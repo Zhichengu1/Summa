@@ -1,0 +1,59 @@
+name: summa-pipeline
+
+# Runs every 10 minutes to poll EDGAR for new filings.
+#
+# GitHub Actions free-tier minute budget:
+#   Private repo → 2,000 min/month. At 144 runs/day × ~1 min each = 4,320 min/month.
+#   → If this repo is PRIVATE, change the cron to '*/30' (1,440 min/month) or make
+#     the repo PUBLIC (unlimited free minutes for public repos).
+#   Public repo  → no minute cap; '*/10' is fine.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:            # manual trigger from the Actions UI
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8          # hard stop — prevents overlap with the next 10-min trigger
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Cache the entire virtual environment including the spaCy en_core_web_md model.
+      # The cache key includes the requirements hash + the model name so a bump to either
+      # invalidates the cache and triggers a fresh install.
+      - name: Cache virtual environment
+        id: venv-cache
+        uses: actions/cache@v4
+        with:
+          path: scraper/.venv
+          key: ${{ runner.os }}-venv-${{ hashFiles('scraper/requirements.txt') }}-spacy-en_core_web_md
+
+      - name: Install dependencies (cache miss only)
+        if: steps.venv-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m venv scraper/.venv
+          scraper/.venv/bin/pip install --upgrade pip
+          scraper/.venv/bin/pip install -r scraper/requirements.txt
+          scraper/.venv/bin/python -m spacy download en_core_web_md
+
+      - name: Run pipeline
+        # working-directory = scraper/ so bare imports (cik_map, db, …) resolve correctly
+        working-directory: scraper
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:         ${{ secrets.SUPABASE_KEY }}
+          UPSTASH_REDIS_URL:    ${{ secrets.UPSTASH_REDIS_URL }}
+          UPSTASH_REDIS_TOKEN:  ${{ secrets.UPSTASH_REDIS_TOKEN }}
+          GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SEC_USER_AGENT:       ${{ secrets.SEC_USER_AGENT }}
+        run: .venv/bin/python sec_scraper.py
