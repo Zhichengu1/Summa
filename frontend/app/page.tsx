@@ -975,7 +975,10 @@ export default function Page() {
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "filings" },
-        (payload) => setFilings((prev) => [payload.new as Filing, ...prev]),
+        (payload) => setFilings((prev) => {
+          const next = [payload.new as Filing, ...prev];
+          return next.length > 200 ? next.slice(0, 200) : next;
+        }),
       )
       .subscribe();
 

@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from dotenv import load_dotenv
 load_dotenv()
@@ -54,7 +55,10 @@ def add_to_watchlist(cik: str, ticker: str, name: str) -> None:
     CORE_WATCHLIST[padded] = {"ticker": ticker.upper(), "name": name}
 
 def fetch_live_sec_mappings() -> dict[str, dict]:
-    """Downloads the master ticker-to-CIK mapping file directly from the SEC."""
+    """Downloads the master ticker-to-CIK mapping file directly from the SEC.
+
+    Retries up to 3 times with exponential backoff. Raises on persistent failure.
+    """
     url = "https://www.sec.gov/files/company_tickers.json"
 
     user_agent = os.getenv("SEC_USER_AGENT")
@@ -65,21 +69,29 @@ def fetch_live_sec_mappings() -> dict[str, dict]:
         "User-Agent": user_agent,
         "Accept-Encoding": "gzip, deflate",
     }
-    
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    
-    sec_data = response.json()
-    processed_map = {}
-    
-    # Re-map the structure so you can look companies up instantly by padded CIK string
+
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            time.sleep(0.12)  # respect SEC rate limit
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            sec_data = response.json()
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    else:
+        raise RuntimeError(f"Failed to fetch SEC ticker map after 3 attempts: {last_exc}")
+
+    processed_map: dict[str, dict] = {}
     for item in sec_data.values():
         raw_cik = str(item["cik_str"])
-        padded_cik = raw_cik.zfill(10)  # SEC requires 10-digit leading zeros
-        
+        padded_cik = raw_cik.zfill(10)
         processed_map[padded_cik] = {
             "ticker": item["ticker"],
-            "name": item["title"]
+            "name":   item["title"],
         }
     return processed_map
 

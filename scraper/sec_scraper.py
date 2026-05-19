@@ -139,10 +139,10 @@ def _is_seen(redis, accession: str) -> bool:
 
 
 def _mark_seen(redis, accession: str) -> None:
-    """Mark accession as processed. TTL = 8 days (covers weekends + holidays)."""
+    """Mark accession as processed. TTL = 30 days (matches DB retention window)."""
     if redis is None:
         return
-    redis.set(f"seen:{accession}", "1", ex=60 * 60 * 24 * 8)
+    redis.set(f"seen:{accession}", "1", ex=60 * 60 * 24 * 30)
 
 
 # ─── RSS feed parsing ─────────────────────────────────────────────────────────
@@ -174,7 +174,10 @@ def fetch_rss_entries(form_type: str) -> list[dict[str, str]]:
                 # path: /Archives/edgar/data/320193/…
                 parts = href.split("/")
                 if "data" in parts:
-                    cik_raw = parts[parts.index("data") + 1]
+                    candidate = parts[parts.index("data") + 1]
+                    # Validate: CIK must be purely numeric (max 10 digits)
+                    if candidate.isdigit() and len(candidate) <= 10:
+                        cik_raw = candidate
 
             entries.append({
                 "accession":  accession.get_text(strip=True) if accession else "",
@@ -220,8 +223,9 @@ def _parse_recent_filings(data: dict[str, Any], forms: list[str], limit: int = 1
     report_dates = recent.get("reportDate", [])
     items_list   = recent.get("items", [])          # populated for 8-K
 
+    MAX_SCAN = 200  # don't iterate the full filing history (can be 1000+ rows)
     results = []
-    for i, acc in enumerate(accessions):
+    for i, acc in enumerate(accessions[:MAX_SCAN]):
         ft = form_types[i] if i < len(form_types) else ""
         if ft not in forms:
             continue
@@ -231,7 +235,10 @@ def _parse_recent_filings(data: dict[str, Any], forms: list[str], limit: int = 1
         rdate = report_dates[i] if i < len(report_dates)  else ""
         items = items_list[i]   if i < len(items_list)   else ""
 
-        # Build direct document URL
+        # Build direct document URL — skip if primary document name is missing
+        if not desc:
+            log.debug("Skipping %s: no primary document name", acc)
+            continue
         acc_path    = acc.replace("-", "")
         cik_clean   = str(data.get("cik", "")).zfill(10)
         document_url = f"{SEC_BASE}/Archives/edgar/data/{int(cik_clean)}/{acc_path}/{desc}"

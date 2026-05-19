@@ -212,3 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_filings_cik_form     ON filings (cik, form_type);
 
 -- filing_events: burst detection query is always (cik, filed_at >= now() - interval '30 days')
 CREATE INDEX IF NOT EXISTS idx_filing_events_cik_filed ON filing_events (cik, filed_at DESC);
+
+-- cleanup.py deletes by filed_at range across all CIKs — needs this to avoid full table scans
+CREATE INDEX IF NOT EXISTS idx_filings_filed_at_cleanup       ON filings       (filed_at);
+CREATE INDEX IF NOT EXISTS idx_filing_events_filed_at_cleanup ON filing_events (filed_at);
