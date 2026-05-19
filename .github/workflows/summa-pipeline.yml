@@ -49,11 +49,14 @@ jobs:
         # working-directory = scraper/ so bare imports (cik_map, db, …) resolve correctly
         working-directory: scraper
         env:
+          # ── Required ────────────────────────────────────────────────────────
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:         ${{ secrets.SUPABASE_KEY }}
+          SEC_USER_AGENT:       ${{ secrets.SEC_USER_AGENT }}
+          # ── Optional: deduplication (scraper works without it, just less efficient)
           UPSTASH_REDIS_URL:    ${{ secrets.UPSTASH_REDIS_URL }}
           UPSTASH_REDIS_TOKEN:  ${{ secrets.UPSTASH_REDIS_TOKEN }}
+          # ── Optional: not yet active in the pipeline (Phase 1 TODO)
           GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}
-          SEC_USER_AGENT:       ${{ secrets.SEC_USER_AGENT }}
         run: .venv/bin/python sec_scraper.py

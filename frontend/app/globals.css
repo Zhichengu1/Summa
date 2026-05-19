@@ -2,27 +2,50 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Design tokens (hex equivalents of the oklch palette) ───────────────────
-   All colors are hex so PostCSS never needs to parse oklch().
-   ─────────────────────────────────────────────────────────────────────────── */
+/* ── Design tokens ───────────────────────────────────────────────────────── */
 :root {
-  --bg-0:     #181c22;
-  --bg-1:     #1e222b;
-  --bg-2:     #242932;
-  --bg-3:     #2b303a;
-  --border-1: #363c48;
-  --border-2: #484f5e;
-  --fg-0:     #f4f5f7;
-  --fg-1:     #cdd1da;
-  --fg-2:     #8e95a4;
-  --fg-3:     #5a6070;
-  --fg-4:     #3f4452;
-  --accent:   #67d5c8;
-  --alert:    #e8604c;
-  --warn:     #f5c842;
-  --pos:      #6dcd8a;
-  --tint-warn:  #252010;
-  --tint-alert: #25100c;
+  /*
+    Background layers — each step is clearly distinguishable:
+      bg-0  ← page canvas (near-black)
+      bg-1  ← sidebar panel
+      bg-2  ← card surface
+      bg-3  ← hover / elevated
+  */
+  --bg-0:     #08090f;
+  --bg-1:     #0d1119;
+  --bg-2:     #141c2e;
+  --bg-3:     #1d2840;
+
+  /*
+    Borders — ~2:1 contrast on bg-2, clearly visible lines.
+    Previously 1.3:1 — invisible.
+  */
+  --border-1: #2e3f60;
+  --border-2: #4d6090;
+
+  /*
+    Foreground — distinct 5-step hierarchy.
+    Previously fg-4 was 1.54:1 on bg-2 — unreadable.
+  */
+  --fg-0:     #e8ecf6;
+  --fg-1:     #a8b8cc;
+  --fg-2:     #6878a2;
+  --fg-3:     #48587a;
+  --fg-4:     #3e5068;
+
+  /* Semantic — slightly more saturated for better pop on dark */
+  --accent:   #4fd4c2;
+  --alert:    #e84040;
+  --warn:     #f0b030;
+  --pos:      #44c870;
+  --tint-warn:  #1e1a06;
+  --tint-alert: #1e0d0a;
+
+  /* Extended accent palette */
+  --accent-08: #4fd4c208;
+  --accent-12: #4fd4c212;
+  --accent-20: #4fd4c220;
+  --accent-40: #4fd4c240;
 }
 
 /* ── Base ────────────────────────────────────────────────────────────────── */
@@ -34,21 +57,21 @@ body {
   background-color: var(--bg-0);
   color: var(--fg-1);
   font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace;
-  font-size: 13px;
+  font-size: 16px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   position: relative;
 }
 
+/* Very subtle fine grid — texture only, no structural noise */
 body::before {
   content: '';
   position: fixed;
   inset: 0;
   background-image:
-    linear-gradient(#262c38 1px, transparent 1px),
-    linear-gradient(90deg, #262c38 1px, transparent 1px);
-  background-size: 80px 80px;
-  opacity: 0.35;
+    linear-gradient(rgba(255,255,255,0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.018) 1px, transparent 1px);
+  background-size: 24px 24px;
   pointer-events: none;
   z-index: 0;
 }
@@ -62,7 +85,7 @@ body::before {
 }
 
 .sidebar {
-  width: 288px;
+  width: 340px;
   flex-shrink: 0;
   height: 100vh;
   position: sticky;
@@ -77,33 +100,34 @@ body::before {
 .main-area {
   flex: 1;
   min-width: 0;
-  padding: 40px 48px;
+  padding: 56px 76px;
   display: flex;
   flex-direction: column;
 }
 
 .main-content {
   width: 100%;
-  max-width: 860px;
+  max-width: 1160px;
   margin: 0 auto;
 }
 
 /* ── Typography ──────────────────────────────────────────────────────────── */
 .label-caps {
-  font-size: 10px;
-  letter-spacing: 0.24em;
+  font-size: 13px;
+  letter-spacing: 0.14em;
   color: var(--fg-3);
   text-transform: uppercase;
 }
 
 .metric-val {
-  font-size: 18px;
+  font-size: 28px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
 }
 
 .caption {
-  font-size: 10px;
+  font-size: 14px;
   color: var(--fg-4);
   font-variant-numeric: tabular-nums;
 }
@@ -115,11 +139,26 @@ body::before {
 }
 @keyframes pulseDot {
   0%, 100% { opacity: 1; }
-  50%       { opacity: 0.2; }
+  50%       { opacity: 0.25; }
+}
+@keyframes shimmer {
+  0%   { background-position: -400% 0; }
+  100% { background-position: 400% 0; }
 }
 
-.anim-fade-up { animation: fadeUp 0.2s ease both; }
-.pulse-dot    { animation: pulseDot 1.8s ease-in-out infinite; }
+.anim-fade-up { animation: fadeUp 0.22s ease both; }
+.pulse-dot    { animation: pulseDot 2s ease-in-out infinite; }
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--bg-3) 25%,
+    #253050 50%,
+    var(--bg-3) 75%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.6s ease infinite;
+}
 
 /* ── Signal grid ─────────────────────────────────────────────────────────── */
 .signal-grid {
@@ -131,7 +170,6 @@ body::before {
   border-radius: 6px;
   overflow: hidden;
 }
-
 .signal-cell {
   background: var(--bg-2);
   padding: 12px 14px;
@@ -139,33 +177,32 @@ body::before {
   flex-direction: column;
   gap: 4px;
 }
-
 .signal-cell.warn-tint  { background: var(--tint-warn); }
 .signal-cell.alert-tint { background: var(--tint-alert); }
 
-/* ── Flagged card stripe ─────────────────────────────────────────────────── */
+/* ── Flagged card accent stripe ──────────────────────────────────────────── */
 .card-flagged-stripe::before {
   content: '';
   position: absolute;
   left: 0; top: 0; bottom: 0;
   width: 3px;
-  background: linear-gradient(to bottom, var(--alert), var(--warn));
-  border-radius: 6px 0 0 6px;
+  background: var(--alert);
+  border-radius: 8px 0 0 8px;
 }
 
 /* ── Scrollbar ───────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar             { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track       { background: transparent; }
 ::-webkit-scrollbar-thumb       { background: var(--border-2); border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: var(--fg-4); }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-3); }
 
-/* ── Home page animations ────────────────────────────────────────────────── */
+/* ── Home page ───────────────────────────────────────────────────────────── */
 @keyframes accentGlow {
-  0%, 100% { text-shadow: 0 0 8px #67d5c833; }
-  50%       { text-shadow: 0 0 26px #67d5c877, 0 0 52px #67d5c822; }
+  0%, 100% { text-shadow: 0 0 8px #4fd4c233; }
+  50%       { text-shadow: 0 0 26px #4fd4c277, 0 0 52px #4fd4c222; }
 }
 @keyframes slideUp {
-  from { opacity: 0; transform: translateY(22px); }
+  from { opacity: 0; transform: translateY(20px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 @keyframes blinkCursor {
@@ -179,89 +216,141 @@ body::before {
   100% { top: 100vh; opacity: 0; }
 }
 @keyframes statusFade {
-  from { opacity: 0; letter-spacing: 0.3em; }
-  to   { opacity: 1; letter-spacing: 0.1em; }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 .anim-slide-up { animation: slideUp 0.55s cubic-bezier(0.16,1,0.3,1) both; }
 .accent-glow   { animation: accentGlow 4s ease-in-out infinite; }
 .blink-cursor  { animation: blinkCursor 1.1s step-end infinite; }
-.status-line   { animation: statusFade 0.6s ease both; }
+.status-line   { animation: statusFade 0.5s ease both; }
 
 .scan-line {
   position: fixed; left: 0; right: 0; height: 1px;
-  background: linear-gradient(90deg, transparent 0%, #67d5c866 30%, #67d5c8cc 50%, #67d5c866 70%, transparent 100%);
+  background: linear-gradient(90deg, transparent 0%, #4fd4c266 30%, #4fd4c2cc 50%, #4fd4c266 70%, transparent 100%);
   pointer-events: none; z-index: 999;
   animation: scanPass 1.8s ease-in-out 0.1s 1 both;
 }
 
+/* Enter button on home */
 .nav-card {
   transition: border-color 0.18s, background 0.18s, transform 0.2s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.2s;
 }
 .nav-card:hover:not(:disabled) {
   border-color: var(--accent) !important;
-  background: var(--bg-2) !important;
-  transform: translateY(-4px);
-  box-shadow: 0 10px 32px #67d5c814;
+  background: var(--bg-3) !important;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px #4fd4c214, 0 0 0 1px #4fd4c220;
 }
 
-/* ── Filing card hover ───────────────────────────────────────────────────── */
+/* ── Filing card ─────────────────────────────────────────────────────────── */
 .filing-card {
   transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 .filing-card:hover {
   border-color: var(--border-2) !important;
-  box-shadow: 0 4px 20px #00000020;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.35);
   transform: translateY(-1px);
 }
 .filing-card.flagged:hover {
   border-color: var(--alert)66 !important;
+  box-shadow: 0 4px 20px #e8404014;
 }
 
 /* ── Search inputs ───────────────────────────────────────────────────────── */
+.search-input-wrap { position: relative; }
+.search-input-wrap::before {
+  content: '⌕';
+  position: absolute;
+  left: 14px; top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg-3);
+  font-size: 18px;
+  pointer-events: none;
+  z-index: 1;
+}
+
 .search-input {
   width: 100%;
   background: var(--bg-1);
   border: 1px solid var(--border-1);
-  border-radius: 4px;
-  padding: 8px 12px;
-  color: var(--fg-1);
+  border-radius: 6px;
+  padding: 12px 14px 12px 42px;
+  color: var(--fg-0);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 15px;
   outline: none;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
-.search-input::placeholder { color: var(--fg-4); }
-.search-input:focus        { border-color: #67d5c855; }
+.search-input::placeholder { color: var(--fg-3); }
+.search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px #4fd4c210;
+}
 
 .sidebar-search {
   width: 100%;
-  background: var(--bg-2);
+  background: var(--bg-0);
   border: 1px solid var(--border-1);
-  border-radius: 3px;
-  padding: 5px 9px;
-  color: var(--fg-2);
+  border-radius: 5px;
+  padding: 9px 14px;
+  color: var(--fg-1);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 14px;
   outline: none;
-  transition: border-color 0.15s, color 0.15s;
+  transition: border-color 0.15s;
 }
-.sidebar-search::placeholder { color: var(--fg-4); }
-.sidebar-search:focus        { border-color: #67d5c855; color: var(--fg-1); }
+.sidebar-search::placeholder { color: var(--fg-3); }
+.sidebar-search:focus { border-color: var(--accent); }
 
-/* ── Filter chips ────────────────────────────────────────────────────────── */
+/* ── Filter chips — have a visible background so they look like buttons ── */
 .filter-chip {
-  padding: 4px 10px;
-  border-radius: 3px;
-  font-size: 10px;
-  letter-spacing: 0.1em;
+  padding: 8px 18px;
+  border-radius: 5px;
+  font-size: 14px;
   border: 1px solid var(--border-1);
-  color: var(--fg-3);
-  background: transparent;
+  color: var(--fg-2);
+  background: var(--bg-2);     /* visible resting state */
   cursor: pointer;
   font-family: inherit;
   white-space: nowrap;
   transition: border-color 0.12s, color 0.12s, background 0.12s;
 }
-.filter-chip:hover         { border-color: var(--border-2); color: var(--fg-1); }
-.filter-chip.active        { border-color: #67d5c855; color: var(--accent); background: #67d5c810; }
+.filter-chip:hover {
+  border-color: var(--border-2);
+  color: var(--fg-0);
+  background: var(--bg-3);
+}
+.filter-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: #4fd4c218;
+  font-weight: 600;
+}
+
+/* ── Live badge ──────────────────────────────────────────────────────────── */
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--accent)55;
+  border-radius: 4px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  background: #4fd4c212;
+  font-family: inherit;
+}
+
+/* ── Stat metric block ───────────────────────────────────────────────────── */
+.stat-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 20px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  min-width: 100px;
+}
