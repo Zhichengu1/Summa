@@ -76,12 +76,15 @@ function FormBadge({ form }: { form: string }) {
 
 function FlagChip({ label, tone }: { label: string; tone: "warn" | "alert" }) {
   const c = tone === "alert" ? "var(--alert)" : "var(--warn)";
+  const border = tone === "alert" ? "#e8404033" : "#f0b03033";
   return (
     <span style={{
-      fontSize: 14, padding: "5px 12px", borderRadius: 4, whiteSpace: "nowrap",
+      fontSize: 12, padding: "4px 10px", borderRadius: 4, whiteSpace: "nowrap",
       background: tone === "alert" ? "var(--tint-alert)" : "var(--tint-warn)",
+      border: `1px solid ${border}`,
       color: c,
       display: "inline-flex", alignItems: "center", gap: 6,
+      letterSpacing: "0.04em",
     }}>
       <span style={{ width: 5, height: 5, borderRadius: "50%", background: c, display: "inline-block", flexShrink: 0 }} />
       {label}
@@ -240,26 +243,36 @@ function CompanyFilingsView({
       <button
         onClick={onBack}
         style={{
-          background: "none", border: "none", padding: 0, cursor: "pointer",
-          color: "var(--fg-3)", fontSize: 16, fontFamily: "inherit",
-          display: "inline-flex", alignItems: "center", gap: 4, alignSelf: "flex-start",
-          transition: "color 0.12s",
+          background: "var(--bg-2)", border: "1px solid var(--border-1)",
+          padding: "7px 14px", borderRadius: 6, cursor: "pointer",
+          color: "var(--fg-3)", fontSize: 13, fontFamily: "inherit",
+          display: "inline-flex", alignItems: "center", gap: 6, alignSelf: "flex-start",
+          transition: "color 0.12s, border-color 0.12s, background 0.12s",
         }}
-        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--fg-1)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--fg-3)"; }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.color = "var(--fg-1)";
+          e.currentTarget.style.borderColor = "var(--border-2)";
+          e.currentTarget.style.background = "var(--bg-3)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.color = "var(--fg-3)";
+          e.currentTarget.style.borderColor = "var(--border-1)";
+          e.currentTarget.style.background = "var(--bg-2)";
+        }}
       >
         ← Back
       </button>
 
       {/* Company header */}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
-        <CompanyMark ticker={meta.ticker} size={60} />
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 18, flexWrap: "wrap" }}>
+        <CompanyMark ticker={meta.ticker} size={56} />
         <div>
-          <h1 style={{ fontSize: 30, fontWeight: 600, color: "var(--fg-0)", margin: "0 0 4px", letterSpacing: "-0.01em" }}>
+          <h1 style={{ fontSize: 28, fontWeight: 700, color: "var(--fg-0)", margin: "0 0 6px", letterSpacing: "-0.02em" }}>
             {meta.company_name}
           </h1>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 16, color: "var(--accent)", fontWeight: 600 }}>{meta.ticker}</span>
+            <span style={{ fontSize: 15, color: "var(--accent)", fontWeight: 600 }}>{meta.ticker}</span>
+            <span className="caption">·</span>
             <span className="caption">CIK {meta.cik}</span>
           </div>
         </div>
@@ -269,24 +282,24 @@ function CompanyFilingsView({
       <div style={{
         display: "flex", gap: 0,
         background: "var(--border-1)", border: "1px solid var(--border-1)",
-        borderRadius: 7, overflow: "hidden",
+        borderRadius: 8, overflow: "hidden",
       }}>
         {[
           { label: "Filings",      value: all.length },
           { label: "Flagged",      value: all.filter((f) => f.signals_flagged).length },
           { label: "Friday Dumps", value: all.filter((f) => f.friday_dump).length },
         ].map((s) => (
-          <div key={s.label} style={{ flex: 1, padding: "12px 18px", background: "var(--bg-2)" }}>
+          <div key={s.label} style={{ flex: 1, padding: "14px 20px", background: "var(--bg-2)" }}>
             <div className="label-caps">{s.label}</div>
-            <div className="metric-val" style={{ marginTop: 3 }}>{s.value}</div>
+            <div className="metric-val" style={{ marginTop: 4 }}>{s.value}</div>
           </div>
         ))}
-        <div style={{ flex: 2, padding: "12px 18px", background: "var(--bg-2)" }}>
-          <div className="label-caps" style={{ marginBottom: 6 }}>Form types</div>
+        <div style={{ flex: 2, padding: "14px 20px", background: "var(--bg-2)" }}>
+          <div className="label-caps" style={{ marginBottom: 8 }}>Form types</div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             {Object.entries(formCounts).map(([form, cnt]) => (
-              <span key={form} style={{ fontSize: 11, color: formColor(form) }}>
-                {form} × {cnt}
+              <span key={form} style={{ fontSize: 12, color: formColor(form), fontWeight: 600 }}>
+                {form} <span style={{ opacity: 0.6, fontWeight: 400 }}>× {cnt}</span>
               </span>
             ))}
           </div>
@@ -368,9 +381,9 @@ function FeedView({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Header */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <h1 style={{ fontSize: 28, fontWeight: 600, color: "var(--fg-0)", margin: 0, letterSpacing: "-0.01em" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <h1 style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", margin: 0, letterSpacing: "-0.02em" }}>
             Recent Filings
           </h1>
           <span className="live-badge">
@@ -382,27 +395,27 @@ function FeedView({
           <div style={{
             display: "flex", gap: 0,
             background: "var(--border-1)", border: "1px solid var(--border-1)",
-            borderRadius: 7, overflow: "hidden",
+            borderRadius: 8, overflow: "hidden",
           }}>
             {FEED_FORM_TYPES.map((t) => typeCounts[t] > 0 && (
               <div key={t} style={{
-                padding: "10px 18px", background: "var(--bg-2)",
-                flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 3,
+                padding: "12px 20px", background: "var(--bg-2)",
+                flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 4,
               }}>
-                <div style={{ fontSize: 24, fontWeight: 600, color: formColor(t), fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
+                <div style={{ fontSize: 26, fontWeight: 700, color: formColor(t), fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
                   {typeCounts[t]}
                 </div>
-                <div className="label-caps" style={{ fontSize: 12 }}>{t}</div>
+                <div className="label-caps">{t}</div>
               </div>
             ))}
             <div style={{
-              padding: "10px 18px", background: "var(--bg-2)",
-              flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 3,
+              padding: "12px 20px", background: "var(--bg-2)",
+              flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 4,
             }}>
-              <div style={{ fontSize: 24, fontWeight: 600, color: "var(--fg-1)", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
+              <div style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-1)", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
                 {uniqueCompanies}
               </div>
-              <div className="label-caps" style={{ fontSize: 12 }}>Companies</div>
+              <div className="label-caps">Companies</div>
             </div>
           </div>
         )}
@@ -489,11 +502,11 @@ function CompanyListView({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div>
-        <h1 style={{ fontSize: 28, fontWeight: 600, color: "var(--fg-0)", margin: "0 0 4px", letterSpacing: "-0.01em" }}>
-          Watchlist Companies
+        <h1 style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", margin: "0 0 6px", letterSpacing: "-0.02em" }}>
+          Watchlist
         </h1>
-        <p style={{ fontSize: 16, color: "var(--fg-3)", margin: 0 }}>
-          {companies.length} companies tracked — click to view filing timeline.
+        <p style={{ fontSize: 14, color: "var(--fg-3)", margin: 0 }}>
+          {companies.length} companies · click to view filing history
         </p>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -502,27 +515,31 @@ function CompanyListView({
             key={c.cik}
             onClick={() => onCompanyClick(c.cik)}
             style={{
-              display: "flex", alignItems: "center", gap: 14,
+              display: "flex", alignItems: "center", gap: 16,
               background: "var(--bg-2)", border: "1px solid var(--border-1)",
-              borderRadius: 8, padding: "20px 24px",
+              borderRadius: 10, padding: "18px 22px",
               cursor: "pointer", fontFamily: "inherit", textAlign: "left",
-              transition: "border-color 0.15s, background 0.15s",
+              transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s",
               width: "100%",
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.borderColor = "var(--border-2)";
               e.currentTarget.style.background  = "var(--bg-3)";
+              e.currentTarget.style.boxShadow   = "var(--shadow-sm)";
+              e.currentTarget.style.transform   = "translateY(-1px)";
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.borderColor = "var(--border-1)";
               e.currentTarget.style.background  = "var(--bg-2)";
+              e.currentTarget.style.boxShadow   = "none";
+              e.currentTarget.style.transform   = "none";
             }}
           >
-            <CompanyMark ticker={c.ticker} size={48} />
+            <CompanyMark ticker={c.ticker} size={44} />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 3 }}>
-                <span style={{ fontSize: 18, fontWeight: 600, color: "var(--fg-0)" }}>{c.name}</span>
-                <span style={{ fontSize: 14, color: "var(--accent)" }}>{c.ticker}</span>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 5 }}>
+                <span style={{ fontSize: 17, fontWeight: 600, color: "var(--fg-0)" }}>{c.name}</span>
+                <span style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600 }}>{c.ticker}</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                 <span className="caption">{c.count} filings</span>
@@ -532,7 +549,7 @@ function CompanyListView({
                 <FormBadge form={c.latest.form_type} />
               </div>
             </div>
-            <span style={{ fontSize: 20, color: "var(--fg-3)", flexShrink: 0 }}>›</span>
+            <span style={{ fontSize: 18, color: "var(--fg-3)", flexShrink: 0 }}>›</span>
           </button>
         ))}
       </div>
@@ -557,10 +574,10 @@ function FlaggedView({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div>
-        <h1 style={{ fontSize: 28, fontWeight: 600, color: "var(--fg-0)", margin: "0 0 4px", letterSpacing: "-0.01em" }}>
+        <h1 style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", margin: "0 0 6px", letterSpacing: "-0.02em" }}>
           Flagged Filings
         </h1>
-        <p style={{ fontSize: 16, color: "var(--fg-3)", margin: 0, maxWidth: 540 }}>
+        <p style={{ fontSize: 14, color: "var(--fg-3)", margin: 0, maxWidth: 520 }}>
           Friday after-hours dumps, burst patterns, and algorithm flags.
         </p>
       </div>
@@ -603,37 +620,22 @@ function FilingsTabs({
     { label: "Flagged",   hash: "flagged" as const, count: counts?.flagged },
   ];
   return (
-    <div style={{ display: "flex", borderBottom: "1px solid var(--border-1)", marginBottom: 28 }}>
+    <div className="tab-pills">
       {tabs.map((t) => {
         const isActive = active === t.hash;
         return (
           <button
             key={t.hash}
             onClick={() => onNavigate(t.hash)}
-            style={{
-              padding: "14px 28px",
-              border: "none",
-              borderBottom: isActive ? "2px solid var(--accent)" : "2px solid transparent",
-              marginBottom: -1,
-              background: isActive ? "#4fd4c210" : "transparent",
-              color: isActive ? "var(--fg-0)" : "var(--fg-3)",
-              cursor: "pointer",
-              fontFamily: "inherit",
-              fontSize: 17,
-              fontWeight: isActive ? 600 : 400,
-              transition: "color 0.15s, border-color 0.15s",
-              display: "flex", alignItems: "center", gap: 7,
-            }}
-            onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.color = "var(--fg-1)"; }}
-            onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.color = "var(--fg-3)"; }}
+            className={`tab-pill${isActive ? " active" : ""}`}
           >
             {t.label}
             {t.count !== undefined && t.count > 0 && (
               <span style={{
-                fontSize: 13, padding: "3px 8px", borderRadius: 4,
+                fontSize: 12, padding: "2px 7px", borderRadius: 4,
                 fontVariantNumeric: "tabular-nums",
-                background: isActive ? "var(--accent)20" : "var(--bg-3)",
-                color: isActive ? "var(--accent)" : "var(--fg-4)",
+                background: isActive ? "var(--accent-20)" : "var(--bg-4, #253050)",
+                color: isActive ? "var(--accent)" : "var(--fg-3)",
               }}>
                 {t.count}
               </span>
@@ -689,7 +691,7 @@ function Sidebar({
   return (
     <aside className="sidebar">
       {/* Brand */}
-      <div style={{ padding: "22px 20px 18px", borderBottom: "1px solid var(--border-1)", flexShrink: 0 }}>
+      <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid var(--border-1)", flexShrink: 0 }}>
         <button
           onClick={() => onNavigate("home")}
           style={{
@@ -697,8 +699,8 @@ function Sidebar({
             cursor: "pointer", fontFamily: "inherit", display: "block", width: "100%",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "0.2em", color: "var(--fg-0)" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 3 }}>
+            <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: "0.24em", color: "var(--fg-0)" }}>
               SUMMA
             </div>
             <span className="live-badge">
@@ -706,14 +708,14 @@ function Sidebar({
               LIVE
             </span>
           </div>
-          <div style={{ fontSize: 14, color: "var(--fg-4)", marginTop: 4 }}>
+          <div style={{ fontSize: 11, color: "var(--fg-4)", letterSpacing: "0.1em" }}>
             SEC Filing Intelligence
           </div>
         </button>
       </div>
 
       {/* Nav */}
-      <div style={{ padding: "8px 0 4px", borderBottom: "1px solid var(--border-1)", flexShrink: 0 }}>
+      <div style={{ padding: "6px 0", borderBottom: "1px solid var(--border-1)", flexShrink: 0 }}>
         {navItems.map((item) => {
           const active = !item.disabled && activeCik === null && (item.group as string[]).includes(activeView);
           return (
@@ -721,23 +723,39 @@ function Sidebar({
               key={item.hash}
               onClick={item.disabled ? undefined : () => onNavigate(item.hash)}
               style={{
-                width: "100%", textAlign: "left", padding: "12px 20px",
-                background: active ? "#4fd4c214" : "transparent",
+                width: "100%", textAlign: "left", padding: "11px 18px",
+                background: active ? "linear-gradient(90deg, var(--accent-12) 0%, var(--accent-08) 100%)" : "transparent",
                 border: "none",
                 borderLeft: active ? "2px solid var(--accent)" : "2px solid transparent",
-                color: active ? "var(--fg-0)" : item.disabled ? "var(--fg-4)" : "var(--fg-3)",
-                fontSize: 16,
+                color: active ? "var(--fg-0)" : item.disabled ? "var(--fg-4)" : "var(--fg-2)",
+                fontSize: 15,
+                fontWeight: active ? 600 : 400,
                 cursor: item.disabled ? "default" : "pointer",
                 fontFamily: "inherit",
                 display: "flex", alignItems: "center", justifyContent: "space-between",
-                transition: "color 0.1s, background 0.1s",
+                transition: "color 0.12s, background 0.12s",
               }}
-              onMouseEnter={(e) => { if (!active && !item.disabled) e.currentTarget.style.color = "var(--fg-1)"; }}
-              onMouseLeave={(e) => { if (!active && !item.disabled) e.currentTarget.style.color = "var(--fg-3)"; }}
+              onMouseEnter={(e) => {
+                if (!active && !item.disabled) {
+                  e.currentTarget.style.color = "var(--fg-1)";
+                  e.currentTarget.style.background = "rgba(255,255,255,0.025)";
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!active && !item.disabled) {
+                  e.currentTarget.style.color = "var(--fg-2)";
+                  e.currentTarget.style.background = "transparent";
+                }
+              }}
             >
               {item.label}
               {item.disabled && (
-                <span style={{ fontSize: 12, letterSpacing: "0.1em", color: "var(--fg-4)" }}>soon</span>
+                <span style={{
+                  fontSize: 10, letterSpacing: "0.12em", color: "var(--fg-4)",
+                  background: "var(--bg-3)", padding: "2px 6px", borderRadius: 3,
+                }}>
+                  SOON
+                </span>
               )}
             </button>
           );
@@ -767,33 +785,46 @@ function Sidebar({
               key={c.cik}
               onClick={() => onNavigate(`c=${c.cik}`)}
               style={{
-                display: "flex", flexDirection: "column", gap: 3,
-                width: "100%", textAlign: "left", padding: "13px 20px",
-                background: active ? "#4fd4c210" : "transparent",
+                display: "flex", alignItems: "center", gap: 10,
+                width: "100%", textAlign: "left", padding: "9px 14px 9px 16px",
+                background: active ? "var(--accent-08)" : "transparent",
                 border: "none",
                 borderLeft: active ? "2px solid var(--accent)" : "2px solid transparent",
                 cursor: "pointer", fontFamily: "inherit",
-                transition: "background 0.1s, border-color 0.1s",
+                transition: "background 0.12s, border-color 0.12s",
               }}
-              onMouseEnter={(e) => { if (!active) { e.currentTarget.style.background = "var(--bg-2)"; e.currentTarget.style.borderLeftColor = "var(--border-2)"; } }}
-              onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.borderLeftColor = "transparent"; } }}
+              onMouseEnter={(e) => {
+                if (!active) {
+                  e.currentTarget.style.background = "rgba(255,255,255,0.03)";
+                  e.currentTarget.style.borderLeftColor = "var(--border-1)";
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!active) {
+                  e.currentTarget.style.background = "transparent";
+                  e.currentTarget.style.borderLeftColor = "transparent";
+                }
+              }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
-                <span style={{
-                  fontSize: 15, fontWeight: 500,
-                  color: active ? "var(--fg-0)" : "var(--fg-1)",
-                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                }}>
-                  {c.name}
-                </span>
-                <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-                  {c.hasFlagged && (
-                    <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--alert)", display: "inline-block" }} />
-                  )}
-                  <span className="caption">{c.count}</span>
+              <CompanyMark ticker={c.ticker} size={28} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
+                  <span style={{
+                    fontSize: 13, fontWeight: 500,
+                    color: active ? "var(--fg-0)" : "var(--fg-1)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>
+                    {c.name}
+                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+                    {c.hasFlagged && (
+                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--alert)", display: "inline-block" }} />
+                    )}
+                    <span className="caption">{c.count}</span>
+                  </div>
                 </div>
+                <span style={{ fontSize: 11, color: "var(--fg-4)", letterSpacing: "0.04em" }}>{c.ticker}</span>
               </div>
-              <span style={{ fontSize: 14, color: "var(--fg-4)" }}>{c.ticker}</span>
             </button>
           );
         })}
@@ -803,10 +834,10 @@ function Sidebar({
       <div style={{ padding: "10px 16px", borderTop: "1px solid var(--border-1)", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--pos)", display: "inline-block" }} />
-            <span className="caption">EDGAR connected</span>
+            <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--pos)", display: "inline-block", flexShrink: 0 }} />
+            <span style={{ fontSize: 11, color: "var(--fg-4)", letterSpacing: "0.04em" }}>EDGAR connected</span>
           </div>
-          <span className="caption">{filings.length} filings</span>
+          <span style={{ fontSize: 11, color: "var(--fg-4)", fontVariantNumeric: "tabular-nums" }}>{filings.length} filings</span>
         </div>
       </div>
     </aside>
@@ -872,40 +903,41 @@ function HomeView({
       </div>
 
       {/* Brand */}
-      <div className="anim-slide-up" style={{ textAlign: "center", marginBottom: 64, animationDelay: "60ms" }}>
-        <div style={{ fontSize: 70, fontWeight: 700, letterSpacing: "0.22em", color: "var(--fg-0)", marginBottom: 18, lineHeight: 1 }}>
+      <div className="anim-slide-up" style={{ textAlign: "center", marginBottom: 52, animationDelay: "60ms" }}>
+        <div style={{ fontSize: 80, fontWeight: 800, letterSpacing: "0.22em", color: "var(--fg-0)", marginBottom: 22, lineHeight: 1 }}>
           <span className="accent-glow" style={{ color: "var(--accent)" }}>S</span>UMMA
         </div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginBottom: 16 }}>
-          <span style={{ fontSize: 14, color: "var(--fg-3)", letterSpacing: "0.18em", textTransform: "uppercase" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 18 }}>
+          <span style={{ color: "var(--border-1)", fontSize: 14 }}>—</span>
+          <span style={{ fontSize: 12, color: "var(--fg-3)", letterSpacing: "0.22em", textTransform: "uppercase" }}>
             SEC Filing Intelligence
           </span>
-          <span className="blink-cursor" style={{ color: "var(--accent)", fontWeight: 700, fontSize: 15 }}>_</span>
+          <span className="blink-cursor" style={{ color: "var(--accent)", fontWeight: 700, fontSize: 13 }}>_</span>
+          <span style={{ color: "var(--border-1)", fontSize: 14 }}>—</span>
         </div>
-        <p style={{ fontSize: 17, color: "var(--fg-3)", margin: 0, maxWidth: 500, lineHeight: 1.8 }}>
+        <p style={{ fontSize: 16, color: "var(--fg-3)", margin: "0 auto", maxWidth: 460, lineHeight: 1.9 }}>
           Automated signal detection for EDGAR filings. Monitors 10-K, 10-Q, 8-K, and DEF&nbsp;14A
           every 10&nbsp;minutes.
         </p>
       </div>
 
       {/* Enter button */}
-      <div className="anim-slide-up" style={{ marginBottom: 60, animationDelay: "160ms" }}>
+      <div className="anim-slide-up" style={{ marginBottom: 52, animationDelay: "160ms" }}>
         <button
           onClick={() => onNavigate("feed")}
           className="nav-card"
           style={{
             background: "var(--bg-1)", border: "1px solid var(--border-2)",
-            borderRadius: 8, padding: "20px 36px",
+            borderRadius: 12, padding: "18px 52px",
             cursor: "pointer", fontFamily: "inherit",
-            display: "flex", alignItems: "center", gap: 14,
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 5,
           }}
         >
-          <span style={{ fontSize: 14, color: "var(--fg-3)", letterSpacing: "0.06em" }}>
-            {filings.length} filings · {totalCompanies} companies
+          <span style={{ fontSize: 16, color: "var(--accent)", letterSpacing: "0.08em", fontWeight: 600 }}>
+            Open live feed →
           </span>
-          <span style={{ color: "var(--border-2)", fontSize: 16 }}>—</span>
-          <span style={{ fontSize: 14, color: "var(--accent)", letterSpacing: "0.12em" }}>
-            Open →
+          <span style={{ fontSize: 12, color: "var(--fg-4)", letterSpacing: "0.04em" }}>
+            {filings.length} filings · {totalCompanies} companies monitored
           </span>
         </button>
       </div>
@@ -913,29 +945,24 @@ function HomeView({
       {/* Stats */}
       <div
         className="anim-slide-up"
-        style={{ display: "flex", gap: 8, animationDelay: "280ms" }}
+        style={{ display: "flex", gap: 10, animationDelay: "280ms", flexWrap: "wrap", justifyContent: "center" }}
       >
         {[
           { label: "Companies",       value: countCompanies, color: "var(--accent)" },
           { label: "Filings indexed", value: countFilings,   color: "var(--fg-0)"   },
           { label: "Signals flagged", value: countFlagged,   color: "var(--alert)"  },
         ].map((s) => (
-          <div key={s.label} style={{
-            padding: "20px 36px",
-            background: "var(--bg-2)",
-            border: "1px solid var(--border-1)",
-            borderRadius: 7,
-            textAlign: "center",
-            minWidth: 150,
-          }}>
+          <div key={s.label} className="hero-stat">
             <div style={{
-              fontSize: 38, fontWeight: 600, color: s.color,
+              fontSize: 44, fontWeight: 700, color: s.color,
               fontVariantNumeric: "tabular-nums", lineHeight: 1,
-              textShadow: s.color === "var(--accent)" ? "0 0 20px #4fd4c228" : undefined,
+              textShadow:
+                s.color === "var(--accent)" ? "0 0 24px #4fd4c232" :
+                s.color === "var(--alert)"  ? "0 0 24px #e8404030" : undefined,
             }}>
               {s.value}
             </div>
-            <div style={{ fontSize: 13, color: "var(--fg-4)", marginTop: 9, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+            <div style={{ fontSize: 11, color: "var(--fg-3)", marginTop: 10, letterSpacing: "0.15em", textTransform: "uppercase" }}>
               {s.label}
             </div>
           </div>
