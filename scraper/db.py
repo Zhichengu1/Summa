@@ -77,3 +77,77 @@ def count_recent_8k(cik: str, days: int = 30) -> int:
         .execute()
     )
     return result.count or 0
+
+
+def delete_old_filings(days: int = 30) -> int:
+    """Delete filings with filed_at older than `days` days. Returns count deleted."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    db     = get_client()
+    result = db.table("filings").delete().lt("filed_at", cutoff).execute()
+    count  = len(result.data) if result.data else 0
+    log.debug("Deleted %d filing(s) older than %d days", count, days)
+    return count
+
+
+def delete_old_filing_events(days: int = 30) -> int:
+    """Delete filing_events with filed_at older than `days` days. Returns count deleted."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    db     = get_client()
+    result = db.table("filing_events").delete().lt("filed_at", cutoff).execute()
+    count  = len(result.data) if result.data else 0
+    log.debug("Deleted %d filing_event(s) older than %d days", count, days)
+    return count
+
+
+def delete_superseded_filings(cik: str, form_type: str, keep_accession: str) -> int:
+    """Delete all filings of (cik, form_type) except keep_accession.
+
+    Used for 10-K and DEF 14A — only the most recent filing of each type matters.
+    Not used for 8-Ks (distinct events) or 10-Qs (use prune_10q_history instead).
+    """
+    db     = get_client()
+    result = (
+        db.table("filings")
+        .delete()
+        .eq("cik", cik)
+        .eq("form_type", form_type)
+        .neq("accession_number", keep_accession)
+        .execute()
+    )
+    count = len(result.data) if result.data else 0
+    if count:
+        log.debug("Deleted %d superseded %s filing(s) for CIK %s", count, form_type, cik)
+    return count
+
+
+def prune_filing_history(cik: str, form_type: str, keep: int) -> int:
+    """Keep only the `keep` most recent filings of `form_type` for a company.
+
+    Called after upserting a new periodic report so history stays bounded.
+    Typical values: 10-Q → keep=10, 10-K → keep=3.
+    """
+    db = get_client()
+    result = (
+        db.table("filings")
+        .select("accession_number")
+        .eq("cik", cik)
+        .eq("form_type", form_type)
+        .order("filed_at", desc=True)
+        .execute()
+    )
+    all_accs  = [r["accession_number"] for r in (result.data or [])]
+    to_delete = all_accs[keep:]
+    if not to_delete:
+        return 0
+    del_result = (
+        db.table("filings")
+        .delete()
+        .in_("accession_number", to_delete)
+        .execute()
+    )
+    count = len(del_result.data) if del_result.data else 0
+    if count:
+        log.debug("Pruned %d old %s(s) for CIK %s (keeping last %d)", count, form_type, cik, keep)
+    return count

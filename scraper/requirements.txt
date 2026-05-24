@@ -6,7 +6,4 @@ spacy==3.8.13
 google-generativeai==0.8.3
 upstash-redis==1.3.0
 pytest==8.3.4
-yfinance==0.2.50
-networkx==3.4.2
-mcp==1.4.1
 python-dotenv==1.0.1

@@ -1,22 +1,37 @@
 name: summa-pipeline
 
-# Runs every 10 minutes to poll EDGAR for new filings.
+# Polls EDGAR for new filings on a safe schedule for both repo visibility levels.
 #
 # GitHub Actions free-tier minute budget:
-#   Private repo → 2,000 min/month. At 144 runs/day × ~1 min each = 4,320 min/month.
-#   → If this repo is PRIVATE, change the cron to '*/30' (1,440 min/month) or make
-#     the repo PUBLIC (unlimited free minutes for public repos).
-#   Public repo  → no minute cap; '*/10' is fine.
+#   Private repo → 2,000 min/month.
+#     '*/30' = 48 runs/day × 1 min × 30 days = 1,440 min/month  ✓ safe
+#     '*/10' = 144 runs/day × 1 min × 30 days = 4,320 min/month ✗ OVER LIMIT → billed
+#   Public repo  → unlimited free minutes; change to '*/10' if you need faster polling.
+#
+# EDGAR filings are batched; a 30-minute polling interval captures every filing
+# without any practical lag for the intelligence use case.
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:            # manual trigger from the Actions UI
+
+# Explicitly restrict to minimum required permissions.
+permissions:
+  contents: read
+
+# Prevent two runs from overlapping. If GitHub Actions starts a new run while the
+# previous one is still running, queue it rather than running both in parallel.
+# Without this, a slow run (e.g. cache miss + spaCy download) would consume 2× the
+# minute budget and risk double-writing the same filings to Supabase.
+concurrency:
+  group: summa-pipeline
+  cancel-in-progress: false
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 8          # hard stop — prevents overlap with the next 10-min trigger
+    timeout-minutes: 8          # hard stop — keeps a hung job from consuming the budget
 
     steps:
       - name: Checkout
