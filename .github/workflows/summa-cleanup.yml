@@ -1,13 +1,13 @@
 name: summa-cleanup
 
-# Runs on the 1st of every month at 03:00 UTC.
-# Deletes filings and filing_events older than 30 days from Supabase.
-# company_meta is intentionally preserved (rolling baselines, not time-series).
+# Monthly maintenance: generate per-company reports + cross-company digest,
+# then delete filings/filing_events older than 30 days. company_meta is never
+# touched — it holds the rolling baselines the signal algorithm needs.
 
 on:
   schedule:
-    - cron: '0 3 1 * *'
-  workflow_dispatch:             # manual trigger from Actions UI
+    - cron: "0 3 1 * *"     # 03:00 UTC on the 1st of every month
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -15,34 +15,26 @@ permissions:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
-      - name: Cache virtual environment
-        id: venv-cache
-        uses: actions/cache@v4
-        with:
-          path: scraper/.venv
-          key: ${{ runner.os }}-venv-${{ hashFiles('scraper/requirements.txt') }}
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
 
-      - name: Install dependencies (cache miss only)
-        if: steps.venv-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m venv scraper/.venv
-          scraper/.venv/bin/pip install --upgrade pip
-          scraper/.venv/bin/pip install -r scraper/requirements.txt
-
-      - name: Run cleanup
-        working-directory: scraper
+      - name: Generate reports + purge old rows
+        working-directory: backend
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: .venv/bin/python cleanup.py
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
+          EDGAR_IDENTITY:      ${{ secrets.EDGAR_IDENTITY }}
+          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python cleanup.py

@@ -9,7 +9,7 @@
 .env
 .env.local
 .env.*.local
-scraper/.env
+backend/.env
 frontend/.env.local
 
 # -----------------------------------------------------------------------------

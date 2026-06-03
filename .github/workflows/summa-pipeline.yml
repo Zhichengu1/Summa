@@ -1,77 +1,44 @@
 name: summa-pipeline
 
-# Polls EDGAR for new filings on a safe schedule for both repo visibility levels.
-#
-# GitHub Actions free-tier minute budget:
-#   Private repo → 2,000 min/month.
-#     '*/30' = 48 runs/day × 1 min × 30 days = 1,440 min/month  ✓ safe
-#     '*/10' = 144 runs/day × 1 min × 30 days = 4,320 min/month ✗ OVER LIMIT → billed
-#   Public repo  → unlimited free minutes; change to '*/10' if you need faster polling.
-#
-# EDGAR filings are batched; a 30-minute polling interval captures every filing
-# without any practical lag for the intelligence use case.
+# Runs the SEC filing intelligence pipeline every 10 minutes.
+# Stage 1 signal extraction is free; Stage 2 (Gemini) + Discord run only on
+# flagged filings. All credentials come from repository secrets.
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:            # manual trigger from the Actions UI
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}   # allow manual "Run workflow" from the Actions tab
 
-# Explicitly restrict to minimum required permissions.
+concurrency:
+  group: summa-pipeline
+  cancel-in-progress: false   # never interrupt an in-flight write to Supabase
+
 permissions:
   contents: read
 
-# Prevent two runs from overlapping. If GitHub Actions starts a new run while the
-# previous one is still running, queue it rather than running both in parallel.
-# Without this, a slow run (e.g. cache miss + spaCy download) would consume 2× the
-# minute budget and risk double-writing the same filings to Supabase.
-concurrency:
-  group: summa-pipeline
-  cancel-in-progress: false
-
 jobs:
-  scrape:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 8          # hard stop — keeps a hung job from consuming the budget
-
+    timeout-minutes: 8        # hard cap so runs never overlap the next cron tick
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
-      # Cache the entire virtual environment including the spaCy en_core_web_md model.
-      # The cache key includes the requirements hash + the model name so a bump to either
-      # invalidates the cache and triggers a fresh install.
-      - name: Cache virtual environment
-        id: venv-cache
-        uses: actions/cache@v4
-        with:
-          path: scraper/.venv
-          key: ${{ runner.os }}-venv-${{ hashFiles('scraper/requirements.txt') }}-spacy-en_core_web_md
-
-      - name: Install dependencies (cache miss only)
-        if: steps.venv-cache.outputs.cache-hit != 'true'
-        run: |
-          python -m venv scraper/.venv
-          scraper/.venv/bin/pip install --upgrade pip
-          scraper/.venv/bin/pip install -r scraper/requirements.txt
-          scraper/.venv/bin/python -m spacy download en_core_web_md
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
 
       - name: Run pipeline
-        # working-directory = scraper/ so bare imports (cik_map, db, …) resolve correctly
-        working-directory: scraper
+        working-directory: backend
         env:
-          # ── Required ────────────────────────────────────────────────────────
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY:         ${{ secrets.SUPABASE_KEY }}
-          SEC_USER_AGENT:       ${{ secrets.SEC_USER_AGENT }}
-          # ── Optional: deduplication (scraper works without it, just less efficient)
-          UPSTASH_REDIS_URL:    ${{ secrets.UPSTASH_REDIS_URL }}
-          UPSTASH_REDIS_TOKEN:  ${{ secrets.UPSTASH_REDIS_TOKEN }}
-          # ── Optional: not yet active in the pipeline (Phase 1 TODO)
-          GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
-          DISCORD_WEBHOOK_URL:  ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: .venv/bin/python sec_scraper.py
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
+          EDGAR_IDENTITY:      ${{ secrets.EDGAR_IDENTITY }}
+          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py

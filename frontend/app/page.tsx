@@ -1,1590 +1,171 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
-import { supabase } from "../lib/supabase";
-import { CORE_WATCHLIST } from "../lib/watchlist";
+import { useEffect, useState, useMemo, useCallback } from "react";
+import { DataTable, type Column } from "../components/DataTable";
+import {
+  ComboChart, MultiLineChart, SimpleBarChart, PairedBarChart,
+  StackedBarChart, DivergingBarChart, HorizontalBarChart, CumulativeLineChart,
+} from "../components/charts";
+import {
+  pivotStatement, seriesFor, deriveKpis, yoyGrowth, METRICS,
+} from "../lib/fundamentals";
+import {
+  fetchCompanies, fetchFilings, fetchFilingsForCik, fetchFinancialFacts,
+  subscribeFilings, fetchInsiderTransactions, fetchInstitutionalHoldings,
+  fetchCorporateEvents, fetchEarningsEvents, fetchLateFilings,
+  fetchSecuritiesOfferings, fetchBeneficialOwnership, fetchProposedSales,
+} from "../lib/data";
+import {
+  fmtUSD, fmtNum, fmtPct, fmtDelta, fmtDate, elapsed, fmtPeriodLabel, formColorVar,
+} from "../lib/format";
+import type {
+  Company, FinancialFact, Filing,
+  InsiderTransaction, InstitutionalHolding,
+  CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
+  BeneficialOwnership, ProposedSale,
+  StatementKind, PeriodType,
+} from "../lib/types";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Formatters ───────────────────────────────────────────────────────────────
 
-type Filing = {
-  id: string;
-  accession_number: string;
-  cik: string;
-  ticker: string;
-  company_name: string;
-  form_type: string;
-  filed_at: string | null;
-  filing_url: string | null;
-  friday_dump: boolean;
-  signals_flagged: boolean;
-  period_of_report: string | null;
-};
+function fmtStatValue(v: number): string {
+  return Math.abs(v) < 1000 ? v.toFixed(2) : fmtUSD(v);
+}
 
-type View = "home" | "feed" | "company" | "flagged";
+// ─── Local types ──────────────────────────────────────────────────────────────
+
+type MainView = "overview" | "feed" | "company";
+type CompanyTab = "overview" | "fundamentals" | "ownership" | "catalysts" | "filings";
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-function elapsed(iso: string | null): string {
-  if (!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
-  const m  = Math.floor(ms / 60000);
-  if (m < 1)  return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return d === 1 ? "1d ago" : `${d}d ago`;
-}
-
-function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short", day: "numeric", year: "numeric",
-  });
-}
-
-function formatPeriod(iso: string | null, formType?: string): string {
-  if (!iso) return "";
-  const d = new Date(iso + "T00:00:00Z");
-  const month = d.getUTCMonth();
-  const year  = d.getUTCFullYear();
-  if (formType === "10-K" || formType === "DEF 14A") return `FY ${year}`;
-  const quarter = Math.floor(month / 3) + 1;
-  return `Q${quarter} ${year}`;
-}
-
-const FORM_DESCRIPTIONS: Record<string, string> = {
-  "10-K":    "Annual Report",
-  "10-Q":    "Quarterly Report",
-  "8-K":     "Material Event",
-  "DEF 14A": "Proxy Statement",
-};
-
-function tickerHue(ticker: string): number {
-  let h = 0;
-  for (const c of ticker) h = (h * 31 + c.charCodeAt(0)) % 360;
-  return h;
-}
-
-const FORM_COLORS: Record<string, string> = {
-  "10-K":    "oklch(0.78 0.14 290)",
-  "10-Q":    "oklch(0.78 0.14 220)",
-  "8-K":     "oklch(0.80 0.15 60)",
-  "DEF 14A": "oklch(0.74 0.14 160)",
-};
-function formColor(form: string): string {
-  return FORM_COLORS[form] ?? "var(--fg-3)";
-}
-
-// Only allow http/https URLs in <a href>. Blocks javascript: and data: injection.
 function safeHref(url: string | null | undefined): string | undefined {
   if (!url) return undefined;
   try {
     const { protocol } = new URL(url);
     return protocol === "https:" || protocol === "http:" ? url : undefined;
-  } catch {
-    return undefined;
-  }
+  } catch { return undefined; }
+}
+
+function tickerHue(t: string): number {
+  let h = 0;
+  for (const c of t) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return h;
 }
 
 // ─── Atoms ────────────────────────────────────────────────────────────────────
 
 function FormBadge({ form }: { form: string }) {
-  const c = formColor(form);
+  const c = formColorVar(form);
   return (
     <span style={{
-      fontSize: 11, letterSpacing: "0.1em", padding: "3px 10px",
+      fontSize: 10, letterSpacing: "0.08em", padding: "2px 7px",
       border: `1px solid ${c}44`, color: c, background: `${c}14`,
-      borderRadius: 100, whiteSpace: "nowrap", flexShrink: 0,
-      fontWeight: 700,
+      borderRadius: 4, whiteSpace: "nowrap", fontWeight: 700, display: "inline-block",
     }}>
       {form}
     </span>
   );
 }
 
-function FlagChip({ label, tone }: { label: string; tone: "warn" | "alert" }) {
-  const c = tone === "alert" ? "var(--alert)" : "var(--warn)";
-  const border = tone === "alert" ? "#e8404044" : "#f0b03044";
-  return (
-    <span style={{
-      fontSize: 11, padding: "4px 11px", borderRadius: 100, whiteSpace: "nowrap",
-      background: tone === "alert" ? "var(--tint-alert)" : "var(--tint-warn)",
-      border: `1px solid ${border}`,
-      color: c,
-      display: "inline-flex", alignItems: "center", gap: 6,
-      letterSpacing: "0.06em", fontWeight: 600,
-    }}>
-      <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: c, display: "inline-block", flexShrink: 0 }} />
-      {label}
-    </span>
-  );
+// Cache CompanyMark styles by ticker+size to avoid string recomputation
+const _markCache = new Map<string, React.CSSProperties>();
+function companyMarkStyle(ticker: string, size: number): React.CSSProperties {
+  const key = `${ticker}:${size}`;
+  if (_markCache.has(key)) return _markCache.get(key)!;
+  const h = tickerHue(ticker);
+  const s: React.CSSProperties = {
+    width: size, height: size, flexShrink: 0, borderRadius: Math.round(size * 0.22),
+    background: `linear-gradient(135deg, oklch(0.20 0.08 ${h}), oklch(0.28 0.07 ${h}))`,
+    border: `1px solid oklch(0.38 0.10 ${h})55`,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: size * 0.31, fontWeight: 700,
+    color: `oklch(0.82 0.14 ${h})`, letterSpacing: "0.04em",
+  };
+  _markCache.set(key, s);
+  return s;
 }
 
-function CompanyMark({ ticker, size = 36 }: { ticker: string; size?: number }) {
-  const hue = tickerHue(ticker);
-  return (
-    <div style={{
-      width: size, height: size, flexShrink: 0,
-      background: `linear-gradient(135deg, oklch(0.20 0.08 ${hue}), oklch(0.28 0.07 ${hue}))`,
-      borderRadius: Math.round(size * 0.22),
-      display: "flex", alignItems: "center", justifyContent: "center",
-      fontSize: size * 0.31, fontWeight: 700,
-      color: `oklch(0.82 0.14 ${hue})`,
-      letterSpacing: "0.04em",
-      boxShadow: `0 0 0 1px oklch(0.38 0.10 ${hue})55, inset 0 1px 0 oklch(0.55 0.10 ${hue})18, 0 2px 8px oklch(0.12 0.06 ${hue})80`,
-      textShadow: `0 0 10px oklch(0.82 0.14 ${hue})35`,
-    }}>
-      {ticker.slice(0, 2)}
-    </div>
-  );
+function CompanyMark({ ticker, size = 32 }: { ticker: string; size?: number }) {
+  return <div style={companyMarkStyle(ticker, size)}>{ticker.slice(0, 2)}</div>;
 }
 
-function SkeletonCard() {
-  return (
-    <div style={{
-      background: "var(--bg-2)", border: "1px solid var(--border-1)",
-      borderRadius: 10, padding: "22px 26px",
-      display: "flex", gap: 15, opacity: 0.55,
-    }}>
-      <div className="skeleton-shimmer" style={{ width: 42, height: 42, borderRadius: 9, flexShrink: 0 }} />
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-        <div className="skeleton-shimmer" style={{ height: 15, width: "38%", borderRadius: 4 }} />
-        <div className="skeleton-shimmer" style={{ height: 13, width: "58%", borderRadius: 4 }} />
-        <div className="skeleton-shimmer" style={{ height: 11, width: "28%", borderRadius: 4 }} />
-      </div>
-    </div>
-  );
-}
-
-// ─── FilingCard ───────────────────────────────────────────────────────────────
-
-function FilingCard({
-  filing, onCompanyClick, index = 0,
+function KpiTile({
+  label, value, fmt, qoq, yoy,
 }: {
-  filing: Filing;
-  onCompanyClick: (cik: string) => void;
-  index?: number;
+  label: string; value: number | null;
+  fmt: "usd" | "pct" | "num";
+  qoq: number | null; yoy: number | null;
 }) {
-  const [copied, setCopied] = useState(false);
-  const fileHref = safeHref(filing.filing_url);
-
-  function copyAccession() {
-    navigator.clipboard.writeText(filing.accession_number).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    }).catch(() => { /* clipboard access denied — fail silently */ });
-  }
-
+  const formatted =
+    fmt === "usd" ? fmtUSD(value) :
+    fmt === "pct" ? fmtPct(value) :
+    fmtNum(value);
   return (
-    <div
-      className={`filing-card anim-fade-up${filing.signals_flagged ? " card-flagged-stripe flagged" : ""}`}
-      style={{
-        position: "relative",
-        background: "var(--bg-2)",
-        border: `1px solid ${filing.signals_flagged ? "var(--alert)22" : "var(--border-1)"}`,
-        borderRadius: 10,
-        padding: "20px 24px",
-        display: "flex", flexDirection: "column", gap: 12,
-        animationDelay: `${index * 35}ms`,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
-        <CompanyMark ticker={filing.ticker} size={42} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Row 1: company name + elapsed */}
-          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
-            <button
-              onClick={() => onCompanyClick(filing.cik)}
-              style={{
-                background: "none", border: "none", padding: 0, cursor: "pointer",
-                fontSize: 17, fontWeight: 700, color: "var(--fg-0)", fontFamily: "inherit",
-                textAlign: "left", lineHeight: 1.3,
-                transition: "color 0.14s",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--fg-0)"; }}
-            >
-              {filing.company_name}
-            </button>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
-              <span style={{ fontSize: 13, color: "var(--fg-3)", fontVariantNumeric: "tabular-nums" }}>
-                {elapsed(filing.filed_at)}
-              </span>
-              <span style={{ fontSize: 11, color: "var(--fg-4)", fontVariantNumeric: "tabular-nums" }}>
-                {fmtDate(filing.filed_at)}
-              </span>
-            </div>
-          </div>
-
-          {/* Row 2: ticker · badge · description + view link */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", minWidth: 0 }}>
-              <span style={{ fontSize: 13, color: "var(--accent)", fontWeight: 700, letterSpacing: "0.04em" }}>{filing.ticker}</span>
-              <span style={{ color: "var(--border-1)" }}>·</span>
-              <FormBadge form={filing.form_type} />
-              <span style={{ fontSize: 12, color: "var(--fg-4)", letterSpacing: "0.02em" }}>
-                {FORM_DESCRIPTIONS[filing.form_type] ?? filing.form_type}
-              </span>
-            </div>
-            {fileHref && (
-              <a
-                href={fileHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  fontSize: 12, color: "var(--fg-3)", textDecoration: "none",
-                  flexShrink: 0, transition: "color 0.12s",
-                  display: "inline-flex", alignItems: "center", gap: 3,
-                  padding: "3px 8px", borderRadius: 5,
-                  border: "1px solid transparent",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.color = "var(--accent)";
-                  e.currentTarget.style.borderColor = "var(--accent)33";
-                  e.currentTarget.style.background = "var(--accent-08)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = "var(--fg-3)";
-                  e.currentTarget.style.borderColor = "transparent";
-                  e.currentTarget.style.background = "transparent";
-                }}
-              >
-                View ↗
-              </a>
-            )}
-          </div>
-
-          {/* Row 3: period + accession (clickable copy) */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            {filing.period_of_report && (
-              <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                <span className="label-caps">Period</span>
-                <span style={{ fontSize: 12, color: "var(--fg-1)", fontWeight: 700 }}>
-                  {formatPeriod(filing.period_of_report, filing.form_type)}
-                </span>
-                <span style={{ fontSize: 11, color: "var(--fg-4)" }}>
-                  ({fmtDate(filing.period_of_report)})
-                </span>
-              </div>
-            )}
-            {filing.period_of_report && filing.accession_number && (
-              <span style={{ color: "var(--border-1)" }}>·</span>
-            )}
-            {filing.accession_number && (
-              <button
-                onClick={copyAccession}
-                className={`copy-btn${copied ? " copied" : ""}`}
-                title={copied ? "Copied!" : "Click to copy accession number"}
-                style={{ fontSize: 11, color: copied ? "var(--pos)" : "var(--fg-4)" }}
-              >
-                {copied ? "copied ✓" : filing.accession_number}
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Flag chips */}
-      {(filing.friday_dump || filing.signals_flagged) && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {filing.friday_dump     && <FlagChip label="Friday dump"      tone="warn"  />}
-          {filing.signals_flagged && <FlagChip label="Signals detected" tone="alert" />}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Quarterly 10-Q view ─────────────────────────────────────────────────────
-
-function calcVelocityDays(periodEnd: string | null, filedAt: string | null): number | null {
-  if (!periodEnd || !filedAt) return null;
-  const days = Math.round(
-    (new Date(filedAt).getTime() - new Date(periodEnd + "T00:00:00Z").getTime()) / 86_400_000,
-  );
-  return days >= 0 ? days : null;
-}
-
-function VelocityBadge({ days }: { days: number }) {
-  const fast   = days <= 35;
-  const late   = days > 45;
-  const color  = fast ? "var(--pos)"  : late ? "var(--warn)" : "var(--fg-2)";
-  const bg     = fast ? "#2ecc7114"  : late ? "#f0b03014"  : "var(--bg-3)";
-  const border = fast ? "#2ecc7130"  : late ? "#f0b03030"  : "var(--border-1)";
-  const label  = fast ? "Fast"       : late ? "Late"       : "On time";
-  return (
-    <span style={{
-      fontSize: 12, padding: "3px 10px", borderRadius: 100,
-      background: bg, border: `1px solid ${border}`, color,
-      display: "inline-flex", alignItems: "center", gap: 5,
-      fontWeight: 600,
-    }}>
-      <span style={{ width: 5, height: 5, borderRadius: "50%", background: color, flexShrink: 0, display: "inline-block" }} />
-      {days}d · {label}
-    </span>
-  );
-}
-
-const GUIDE_METRICS: { name: string; detail: string; impact: string; color: string }[] = [
-  {
-    name: "Revenue & EPS",
-    detail: "Beat or miss vs. Wall Street consensus estimates. The single most watched number — a ±5% surprise routinely moves a stock 5–15% at open.",
-    impact: "Critical", color: "var(--alert)",
-  },
-  {
-    name: "Forward Guidance",
-    detail: "Management's outlook for next quarter or full year. A guidance raise or cut typically has more long-term price impact than the reported quarter itself.",
-    impact: "Critical", color: "var(--alert)",
-  },
-  {
-    name: "Gross Margin",
-    detail: "Revenue minus cost of goods sold, as a percentage. Expanding margins signal pricing power or cost efficiency; compression signals competitive pressure or rising input costs.",
-    impact: "High", color: "oklch(0.78 0.14 220)",
-  },
-  {
-    name: "MD&A Language",
-    detail: "Management's Discussion & Analysis. Rising hedge words — 'uncertainty', 'headwinds', 'challenging environment' — signal softening confidence before the numbers deteriorate.",
-    impact: "High", color: "oklch(0.78 0.14 220)",
-  },
-  {
-    name: "Operating Cash Flow",
-    detail: "Cash generated from core operations. Strong OCF relative to net income confirms earnings quality. A sustained gap between the two is a red flag for aggressive accounting.",
-    impact: "Medium", color: "var(--fg-3)",
-  },
-  {
-    name: "Risk Factor Updates",
-    detail: "New or materially escalated risk disclosures. Fresh litigation, regulatory inquiry, or macro exposure added here signals that management is concerned enough to document it legally.",
-    impact: "Medium", color: "var(--fg-3)",
-  },
-  {
-    name: "One-time Items",
-    detail: "Restructuring charges, asset impairments, or gains on disposals. Check whether these are excluded from non-GAAP figures in guidance — that is where accounting choices can obscure real trends.",
-    impact: "Medium", color: "var(--fg-3)",
-  },
-];
-
-const BULLISH_SIGNALS = [
-  "EPS beats Wall Street estimate",
-  "Revenue guidance raised",
-  "Gross margin expanding",
-  "Operating cash flow accelerating",
-  "Share buyback announced or increased",
-  "Debt reduced ahead of schedule",
-];
-
-const BEARISH_SIGNALS = [
-  "EPS misses estimate",
-  "Guidance lowered or withdrawn",
-  "Gross margin compressing",
-  "New material risk factor added",
-  "Unexpected impairment or write-off",
-  "Inventory or days-sales-outstanding rising",
-];
-
-function QuarterlyGuide() {
-  const [open, setOpen] = useState(false);
-  return (
-    <div style={{ background: "var(--bg-2)", border: "1px solid var(--border-1)", borderRadius: 8, overflow: "hidden" }}>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "14px 20px", background: "none", border: "none", cursor: "pointer",
-          fontFamily: "inherit", transition: "background 0.12s",
-        }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.025)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 14, fontWeight: 600, color: "var(--fg-1)" }}>How to read a 10-Q</span>
-          <span style={{ fontSize: 10, letterSpacing: "0.1em", color: "var(--fg-4)", background: "var(--bg-3)", padding: "2px 7px", borderRadius: 3 }}>
-            GUIDE
-          </span>
-        </div>
-        <span style={{ fontSize: 18, color: "var(--fg-4)", lineHeight: 1, fontWeight: 300 }}>{open ? "−" : "+"}</span>
-      </button>
-
-      {open && (
-        <div style={{ borderTop: "1px solid var(--border-1)", padding: "22px 20px", display: "flex", flexDirection: "column", gap: 24 }}>
-
-          {/* Definition */}
-          <div>
-            <div className="label-caps" style={{ marginBottom: 10 }}>What is a 10-Q</div>
-            <p style={{ fontSize: 13, color: "var(--fg-2)", lineHeight: 1.85, margin: 0 }}>
-              A <strong style={{ color: "var(--fg-0)" }}>10-Q</strong> is a mandatory quarterly report filed with the SEC within{" "}
-              <strong style={{ color: "var(--fg-0)" }}>40 days</strong> of each quarter end for large companies (45 days for smaller
-              ones). It covers <strong style={{ color: "var(--fg-0)" }}>Q1, Q2, and Q3</strong> of each fiscal year — the fourth
-              quarter is rolled into the annual <strong style={{ color: "var(--fg-0)" }}>10-K</strong>. Unlike the 10-K, the
-              financial statements inside are <em>unaudited</em>, meaning restatements are possible. Companies must disclose any
-              material changes in financial condition, operations, liquidity, and risk factors since the prior filing. Reading a
-              10-Q before the market digests it gives you the same primary source the analysts are working from.
-            </p>
-          </div>
-
-          {/* Key metrics table */}
-          <div>
-            <div className="label-caps" style={{ marginBottom: 12 }}>What to look for — and why it moves the stock</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 0, border: "1px solid var(--border-1)", borderRadius: 6, overflow: "hidden" }}>
-              {GUIDE_METRICS.map((m, i) => (
-                <div
-                  key={m.name}
-                  style={{
-                    display: "flex", alignItems: "flex-start", gap: 14, padding: "13px 16px",
-                    background: i % 2 === 0 ? "var(--bg-1)" : "var(--bg-2)",
-                    borderBottom: i < GUIDE_METRICS.length - 1 ? "1px solid var(--border-1)" : "none",
-                  }}
-                >
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)" }}>{m.name}</span>
-                      <span style={{
-                        fontSize: 10, padding: "2px 6px", borderRadius: 3, letterSpacing: "0.06em",
-                        color: m.color, border: `1px solid ${m.color}44`, background: `${m.color}10`,
-                      }}>
-                        {m.impact}
-                      </span>
-                    </div>
-                    <p style={{ fontSize: 12, color: "var(--fg-3)", margin: 0, lineHeight: 1.75 }}>{m.detail}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Price signal grid */}
-          <div>
-            <div className="label-caps" style={{ marginBottom: 12 }}>Signals that move the stock price</div>
-            <div className="two-col-grid">
-              <div style={{ background: "var(--bg-1)", border: "1px solid #2ecc7120", borderRadius: 6, padding: "14px 16px" }}>
-                <div style={{ fontSize: 11, color: "var(--pos)", letterSpacing: "0.14em", fontWeight: 700, marginBottom: 12 }}>BULLISH</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {BULLISH_SIGNALS.map((s) => (
-                    <div key={s} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--pos)", flexShrink: 0, marginTop: 5, display: "inline-block" }} />
-                      <span style={{ fontSize: 12, color: "var(--fg-2)", lineHeight: 1.5 }}>{s}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div style={{ background: "var(--bg-1)", border: "1px solid var(--alert)20", borderRadius: 6, padding: "14px 16px" }}>
-                <div style={{ fontSize: 11, color: "var(--alert)", letterSpacing: "0.14em", fontWeight: 700, marginBottom: 12 }}>BEARISH</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {BEARISH_SIGNALS.map((s) => (
-                    <div key={s} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--alert)", flexShrink: 0, marginTop: 5, display: "inline-block" }} />
-                      <span style={{ fontSize: 12, color: "var(--fg-2)", lineHeight: 1.5 }}>{s}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Filing deadline note */}
-          <div style={{
-            background: "var(--bg-1)", border: "1px solid var(--border-1)", borderRadius: 6,
-            padding: "12px 16px", display: "flex", alignItems: "flex-start", gap: 10,
-          }}>
-            <span style={{ fontSize: 11, color: "var(--accent)", letterSpacing: "0.1em", fontWeight: 700, flexShrink: 0, paddingTop: 1 }}>NOTE</span>
-            <p style={{ fontSize: 12, color: "var(--fg-3)", margin: 0, lineHeight: 1.7 }}>
-              Large accelerated filers (market cap ≥ $700M — all companies in this watchlist) must file within{" "}
-              <strong style={{ color: "var(--fg-1)" }}>40 days</strong>. Filing significantly earlier can signal strong quarters;
-              filing very close to the deadline, or on a Friday after market close, sometimes precedes negative news.
-              The <strong style={{ color: "var(--fg-1)" }}>filing velocity</strong> and{" "}
-              <strong style={{ color: "var(--fg-1)" }}>Friday dump</strong> indicators on each card track exactly this.
-            </p>
-          </div>
-
-        </div>
-      )}
-    </div>
-  );
-}
-
-function QuarterlyView({ cik, filings }: { cik: string; filings: Filing[] }) {
-  // Fetch the last 10 10-Qs from Supabase directly — the main `filings` state
-  // only covers the current month, so older quarters would be missing from it.
-  const [history, setHistory] = useState<Filing[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(true);
-
-  useEffect(() => {
-    setHistoryLoading(true);
-    supabase
-      .from("filings")
-      .select("id,accession_number,cik,ticker,company_name,form_type,filed_at,filing_url,friday_dump,signals_flagged,period_of_report")
-      .eq("cik", cik)
-      .eq("form_type", "10-Q")
-      .order("filed_at", { ascending: false })
-      .limit(10)
-      .then(
-        ({ data }) => { setHistory((data as Filing[]) ?? []); setHistoryLoading(false); },
-        ()         => { setHistory([]); setHistoryLoading(false); },
-      );
-  }, [cik]);
-
-  // Merge: live Realtime inserts from the parent state take precedence over cached history.
-  const quarters = useMemo(() => {
-    const live = filings.filter((f) => f.cik === cik && f.form_type === "10-Q");
-    const seen  = new Set<string>();
-    const merged: Filing[] = [];
-    for (const f of [...live, ...history]) {
-      if (!seen.has(f.accession_number)) {
-        seen.add(f.accession_number);
-        merged.push(f);
-      }
-    }
-    return merged
-      .sort((a, b) =>
-        (b.period_of_report ?? b.filed_at ?? "").localeCompare(
-          a.period_of_report ?? a.filed_at ?? "",
-        ),
-      )
-      .slice(0, 10);
-  }, [history, filings, cik]);
-
-  const velocities = useMemo(
-    () => quarters.map((q) => calcVelocityDays(q.period_of_report, q.filed_at)),
-    [quarters],
-  );
-
-  const avgVelocity = useMemo(() => {
-    const valid = velocities.filter((v): v is number => v !== null);
-    return valid.length ? Math.round(valid.reduce((a, b) => a + b, 0) / valid.length) : null;
-  }, [velocities]);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <QuarterlyGuide />
-
-      {historyLoading ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {Array.from({ length: 3 }).map((_, i) => <SkeletonCard key={i} />)}
-        </div>
-      ) : quarters.length === 0 ? (
-        <div style={{
-          padding: "52px 40px", textAlign: "center",
-          border: "1px dashed var(--border-2)", borderRadius: 10,
-          background: "var(--bg-1)",
-        }}>
-          <div style={{ fontSize: 28, color: "var(--fg-4)", marginBottom: 12, lineHeight: 1 }}>◎</div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: "var(--fg-2)", marginBottom: 8 }}>
-            No 10-Q filings found
-          </div>
-          <div style={{ fontSize: 13, color: "var(--fg-4)" }}>
-            Run <code style={{ color: "var(--accent)" }}>python sec_scraper.py --backfill</code> to load recent quarterly reports.
-          </div>
-        </div>
-      ) : (
-        <>
-          {/* Summary bar */}
-          <div className="stats-bar">
-            {[
-              { label: "Quarters tracked", value: quarters.length },
-              { label: "Signals detected", value: quarters.filter((q) => q.signals_flagged).length },
-              { label: "Friday dumps",     value: quarters.filter((q) => q.friday_dump).length },
-              { label: "Avg days to file", value: avgVelocity !== null ? `${avgVelocity}d` : "—" },
-            ].map((s) => (
-              <div key={s.label}>
-                <div className="label-caps">{s.label}</div>
-                <div style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", marginTop: 4, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
-                  {s.value}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Quarter cards */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {quarters.map((q, i) => {
-              const vel       = velocities[i];
-              const fast      = vel !== null && vel <= 35;
-              const late      = vel !== null && vel > 45;
-              const qHref     = safeHref(q.filing_url);
-              const leftColor = q.signals_flagged ? "var(--alert)"
-                : fast ? "#2ecc71"
-                : late ? "var(--warn)"
-                : "var(--accent)";
-
-              return (
-                <div
-                  key={q.id}
-                  style={{
-                    background: "var(--bg-2)",
-                    border: `1px solid ${q.signals_flagged ? "var(--alert)33" : "var(--border-1)"}`,
-                    borderLeft: `3px solid ${leftColor}`,
-                    borderRadius: 8, padding: "20px 24px",
-                    display: "flex", flexDirection: "column", gap: 16,
-                  }}
-                >
-                  {/* Header: quarter label + link */}
-                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <span style={{ fontSize: 22, fontWeight: 700, color: "var(--fg-0)", letterSpacing: "-0.01em" }}>
-                          {formatPeriod(q.period_of_report, "10-Q")}
-                        </span>
-                        <FormBadge form="10-Q" />
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        {q.period_of_report && (
-                          <span style={{ fontSize: 13, color: "var(--fg-3)" }}>Period ending {fmtDate(q.period_of_report)}</span>
-                        )}
-                        {q.period_of_report && q.filed_at && <span style={{ color: "var(--border-2)" }}>·</span>}
-                        {q.filed_at && (
-                          <span style={{ fontSize: 13, color: "var(--fg-3)" }}>Filed {fmtDate(q.filed_at)}</span>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
-                      <span style={{ fontSize: 13, color: "var(--fg-4)" }}>{elapsed(q.filed_at)}</span>
-                      {qHref && (
-                        <a
-                          href={qHref} target="_blank" rel="noopener noreferrer"
-                          style={{ fontSize: 13, color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}
-                          onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.7"; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}
-                        >
-                          View 10-Q ↗
-                        </a>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Metrics grid */}
-                  <div className="metrics-grid-3">
-                    {[
-                      {
-                        label: "Filing velocity",
-                        node: vel !== null ? <VelocityBadge days={vel} /> : <span style={{ fontSize: 12, color: "var(--fg-4)" }}>—</span>,
-                      },
-                      {
-                        label: "Signals",
-                        node: q.signals_flagged
-                          ? <FlagChip label="Detected" tone="alert" />
-                          : <span style={{ fontSize: 12, color: "var(--fg-4)" }}>None detected</span>,
-                      },
-                      {
-                        label: "Timing",
-                        node: q.friday_dump
-                          ? <FlagChip label="Friday dump" tone="warn" />
-                          : <span style={{ fontSize: 12, color: "var(--fg-4)" }}>Normal</span>,
-                      },
-                    ].map((m) => (
-                      <div
-                        key={m.label}
-                      >
-                        <div className="label-caps" style={{ marginBottom: 8 }}>{m.label}</div>
-                        {m.node}
-                      </div>
-                    ))}
-                  </div>
-
-                  {q.accession_number && (
-                    <span style={{ fontSize: 11, color: "var(--fg-4)", fontFamily: "monospace", letterSpacing: "0.02em" }}>
-                      {q.accession_number}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ─── Annual 10-K view ────────────────────────────────────────────────────────
-
-const ANNUAL_GUIDE_METRICS: { name: string; detail: string; impact: string; color: string }[] = [
-  {
-    name: "Revenue & EPS vs Prior Year",
-    detail: "Year-over-year growth rate. A slowdown from prior annual rates — even with positive growth — is often treated as a miss by the market.",
-    impact: "Critical", color: "var(--alert)",
-  },
-  {
-    name: "Annual Guidance / Outlook",
-    detail: "Full-year outlook issued alongside the 10-K. Raised guidance moves stocks up; withdrawn or cut guidance often triggers larger drops than a single-quarter miss.",
-    impact: "Critical", color: "var(--alert)",
-  },
-  {
-    name: "Gross & Operating Margins",
-    detail: "Full-year margin trends. Annual margins remove seasonal noise and reveal true structural shifts in pricing power or cost structure.",
-    impact: "High", color: "oklch(0.78 0.14 220)",
-  },
-  {
-    name: "Free Cash Flow",
-    detail: "Operating cash flow minus capex. The cleanest measure of earnings quality — companies can manipulate GAAP net income but not sustained cash generation.",
-    impact: "High", color: "oklch(0.78 0.14 220)",
-  },
-  {
-    name: "Balance Sheet & Debt",
-    detail: "Net debt position, debt-to-equity, and liquidity runway. Rising leverage during a revenue slowdown is a compounding risk flag.",
-    impact: "Medium", color: "var(--fg-3)",
-  },
-  {
-    name: "Risk Factor Changes",
-    detail: "New or substantially rewritten risks vs. the prior year's 10-K. Material additions — new regulatory exposure, supply chain dependency, litigation — signal known threats management is now documenting.",
-    impact: "Medium", color: "var(--fg-3)",
-  },
-  {
-    name: "Auditor Opinion",
-    detail: "Any qualification, emphasis of matter, or going-concern language is a serious flag. A 'clean' unqualified opinion is baseline; anything else requires immediate attention.",
-    impact: "Medium", color: "var(--fg-3)",
-  },
-];
-
-const ANNUAL_BULLISH = [
-  "Revenue accelerating YoY",
-  "Full-year guidance raised",
-  "Operating margin expanding",
-  "Free cash flow exceeding net income",
-  "Debt reduced or refinanced at lower rate",
-  "Clean unqualified auditor opinion",
-];
-
-const ANNUAL_BEARISH = [
-  "Revenue growth decelerating",
-  "Full-year guidance cut or withdrawn",
-  "Margin compression (pricing or cost pressure)",
-  "Goodwill impairment or asset write-down",
-  "Auditor change or going-concern language",
-  "New material litigation or regulatory risk",
-];
-
-function AnnualGuide() {
-  const [open, setOpen] = useState(false);
-  return (
-    <div style={{ background: "var(--bg-2)", border: "1px solid var(--border-1)", borderRadius: 8, overflow: "hidden" }}>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", transition: "background 0.12s" }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.025)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 14, fontWeight: 600, color: "var(--fg-1)" }}>How to read a 10-K</span>
-          <span style={{ fontSize: 10, letterSpacing: "0.1em", color: "var(--fg-4)", background: "var(--bg-3)", padding: "2px 7px", borderRadius: 3 }}>GUIDE</span>
-        </div>
-        <span style={{ fontSize: 18, color: "var(--fg-4)", lineHeight: 1, fontWeight: 300 }}>{open ? "−" : "+"}</span>
-      </button>
-      {open && (
-        <div style={{ borderTop: "1px solid var(--border-1)", padding: "22px 20px", display: "flex", flexDirection: "column", gap: 24 }}>
-          <div>
-            <div className="label-caps" style={{ marginBottom: 10 }}>What is a 10-K</div>
-            <p style={{ fontSize: 13, color: "var(--fg-2)", lineHeight: 1.85, margin: 0 }}>
-              A <strong style={{ color: "var(--fg-0)" }}>10-K</strong> is the mandatory annual report every public company files with the SEC within{" "}
-              <strong style={{ color: "var(--fg-0)" }}>60 days</strong> of fiscal year end (large accelerated filers). Unlike the quarterly 10-Q, the financials inside are{" "}
-              <strong style={{ color: "var(--fg-0)" }}>fully audited</strong> by an independent accounting firm. It is the most comprehensive and legally significant document a company produces —
-              covering the full-year income statement, balance sheet, cash flow statement, MD&A, executive compensation, risk factors, and auditor opinion. It is the single document analysts use to set their annual price targets.
-            </p>
-          </div>
-          <div>
-            <div className="label-caps" style={{ marginBottom: 12 }}>What to look for — and why it moves the stock</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 0, border: "1px solid var(--border-1)", borderRadius: 6, overflow: "hidden" }}>
-              {ANNUAL_GUIDE_METRICS.map((m, i) => (
-                <div key={m.name} style={{ display: "flex", alignItems: "flex-start", gap: 14, padding: "13px 16px", background: i % 2 === 0 ? "var(--bg-1)" : "var(--bg-2)", borderBottom: i < ANNUAL_GUIDE_METRICS.length - 1 ? "1px solid var(--border-1)" : "none" }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)" }}>{m.name}</span>
-                      <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 3, letterSpacing: "0.06em", color: m.color, border: `1px solid ${m.color}44`, background: `${m.color}10` }}>{m.impact}</span>
-                    </div>
-                    <p style={{ fontSize: 12, color: "var(--fg-3)", margin: 0, lineHeight: 1.75 }}>{m.detail}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div>
-            <div className="label-caps" style={{ marginBottom: 12 }}>Signals that move the stock price</div>
-            <div className="two-col-grid">
-              <div style={{ background: "var(--bg-1)", border: "1px solid #2ecc7120", borderRadius: 6, padding: "14px 16px" }}>
-                <div style={{ fontSize: 11, color: "var(--pos)", letterSpacing: "0.14em", fontWeight: 700, marginBottom: 12 }}>BULLISH</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {ANNUAL_BULLISH.map((s) => (
-                    <div key={s} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--pos)", flexShrink: 0, marginTop: 5, display: "inline-block" }} />
-                      <span style={{ fontSize: 12, color: "var(--fg-2)", lineHeight: 1.5 }}>{s}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div style={{ background: "var(--bg-1)", border: "1px solid var(--alert)20", borderRadius: 6, padding: "14px 16px" }}>
-                <div style={{ fontSize: 11, color: "var(--alert)", letterSpacing: "0.14em", fontWeight: 700, marginBottom: 12 }}>BEARISH</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {ANNUAL_BEARISH.map((s) => (
-                    <div key={s} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                      <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--alert)", flexShrink: 0, marginTop: 5, display: "inline-block" }} />
-                      <span style={{ fontSize: 12, color: "var(--fg-2)", lineHeight: 1.5 }}>{s}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-          <div style={{ background: "var(--bg-1)", border: "1px solid var(--border-1)", borderRadius: 6, padding: "12px 16px", display: "flex", alignItems: "flex-start", gap: 10 }}>
-            <span style={{ fontSize: 11, color: "var(--accent)", letterSpacing: "0.1em", fontWeight: 700, flexShrink: 0, paddingTop: 1 }}>NOTE</span>
-            <p style={{ fontSize: 12, color: "var(--fg-3)", margin: 0, lineHeight: 1.7 }}>
-              Large accelerated filers must file within <strong style={{ color: "var(--fg-1)" }}>60 days</strong> of fiscal year end.
-              Earnings calls typically precede the 10-K by 1–3 weeks — the 10-K confirms the call numbers with full audited detail
-              and is where analysts look for discrepancies between what management said and what was formally reported.
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AnnualView({ cik, filings }: { cik: string; filings: Filing[] }) {
-  const [history, setHistory]           = useState<Filing[]>([]);
-  const [historyLoading, setHistLoading] = useState(true);
-
-  useEffect(() => {
-    setHistLoading(true);
-    supabase
-      .from("filings")
-      .select("id,accession_number,cik,ticker,company_name,form_type,filed_at,filing_url,friday_dump,signals_flagged,period_of_report")
-      .eq("cik", cik)
-      .eq("form_type", "10-K")
-      .order("filed_at", { ascending: false })
-      .limit(2)
-      .then(
-        ({ data }) => { setHistory((data as Filing[]) ?? []); setHistLoading(false); },
-        ()         => { setHistory([]); setHistLoading(false); },
-      );
-  }, [cik]);
-
-  const annuals = useMemo(() => {
-    const live = filings.filter((f) => f.cik === cik && f.form_type === "10-K");
-    const seen  = new Set<string>();
-    const merged: Filing[] = [];
-    for (const f of [...live, ...history]) {
-      if (!seen.has(f.accession_number)) { seen.add(f.accession_number); merged.push(f); }
-    }
-    return merged.sort((a, b) => (b.filed_at ?? "").localeCompare(a.filed_at ?? "")).slice(0, 2);
-  }, [history, filings, cik]);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <AnnualGuide />
-      {historyLoading ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {Array.from({ length: 2 }).map((_, i) => <SkeletonCard key={i} />)}
-        </div>
-      ) : annuals.length === 0 ? (
-        <div style={{ padding: "52px 40px", textAlign: "center", border: "1px dashed var(--border-2)", borderRadius: 10, background: "var(--bg-1)" }}>
-          <div style={{ fontSize: 28, color: "var(--fg-4)", marginBottom: 12 }}>◎</div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: "var(--fg-2)", marginBottom: 8 }}>No annual reports found</div>
-          <div style={{ fontSize: 13, color: "var(--fg-4)" }}>
-            Run <code style={{ color: "var(--accent)" }}>python sec_scraper.py --backfill</code> to load annual reports.
-          </div>
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {annuals.map((a) => {
-            const vel       = calcVelocityDays(a.period_of_report, a.filed_at);
-            const fast      = vel !== null && vel <= 55;
-            const late      = vel !== null && vel > 70;
-            const aHref     = safeHref(a.filing_url);
-            const leftColor = a.signals_flagged ? "var(--alert)" : fast ? "#2ecc71" : late ? "var(--warn)" : "var(--accent)";
-            return (
-              <div key={a.id} style={{ background: "var(--bg-2)", border: `1px solid ${a.signals_flagged ? "var(--alert)33" : "var(--border-1)"}`, borderLeft: `3px solid ${leftColor}`, borderRadius: 8, padding: "20px 24px", display: "flex", flexDirection: "column", gap: 16 }}>
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <span style={{ fontSize: 22, fontWeight: 700, color: "var(--fg-0)", letterSpacing: "-0.01em" }}>
-                        {formatPeriod(a.period_of_report, "10-K")}
-                      </span>
-                      <FormBadge form="10-K" />
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                      {a.period_of_report && <span style={{ fontSize: 13, color: "var(--fg-3)" }}>Period ending {fmtDate(a.period_of_report)}</span>}
-                      {a.period_of_report && a.filed_at && <span style={{ color: "var(--border-2)" }}>·</span>}
-                      {a.filed_at && <span style={{ fontSize: 13, color: "var(--fg-3)" }}>Filed {fmtDate(a.filed_at)}</span>}
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
-                    <span style={{ fontSize: 13, color: "var(--fg-4)" }}>{elapsed(a.filed_at)}</span>
-                    {aHref && (
-                      <a href={aHref} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}
-                        onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.7"; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}>
-                        View 10-K ↗
-                      </a>
-                    )}
-                  </div>
-                </div>
-                <div className="metrics-grid-3">
-                  {[
-                    { label: "Filing velocity", node: vel !== null ? <VelocityBadge days={vel} /> : <span style={{ fontSize: 12, color: "var(--fg-4)" }}>—</span> },
-                    { label: "Signals", node: a.signals_flagged ? <FlagChip label="Detected" tone="alert" /> : <span style={{ fontSize: 12, color: "var(--fg-4)" }}>None detected</span> },
-                    { label: "Timing", node: a.friday_dump ? <FlagChip label="Friday dump" tone="warn" /> : <span style={{ fontSize: 12, color: "var(--fg-4)" }}>Normal timing</span> },
-                  ].map((cell) => (
-                    <div key={cell.label}>
-                      <div className="label-caps" style={{ marginBottom: 8 }}>{cell.label}</div>
-                      {cell.node}
-                    </div>
-                  ))}
-                </div>
-                {(a.friday_dump || a.signals_flagged) && (
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {a.friday_dump && <FlagChip label="Friday dump" tone="warn" />}
-                    {a.signals_flagged && <FlagChip label="Signals detected" tone="alert" />}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── 8-K events view ──────────────────────────────────────────────────────────
-
-const EVENT_TYPE_GUIDE: { item: string; label: string; impact: string; color: string; note: string }[] = [
-  { item: "2.02", label: "Results of Operations (Earnings Release)", impact: "Critical", color: "var(--alert)", note: "Quarterly or annual earnings data. The single highest-volume trading event — price moves of 5–20% at open are common on surprise beats or misses." },
-  { item: "2.01", label: "Acquisition or Disposition Completed", impact: "Critical", color: "var(--alert)", note: "Company acquired or sold a significant business. Acquisition premium pricing instantly reprices the acquirer; disposals free up capital." },
-  { item: "5.01", label: "Change in Control",                         impact: "Critical", color: "var(--alert)", note: "Ownership change or merger in progress. Typically triggers a sharp rerating of both acquirer and target." },
-  { item: "4.02", label: "Non-Reliance on Prior Financials",          impact: "Critical", color: "var(--alert)", note: "Company is restating previously issued financials. Severe negative signal — implies accounting error or fraud investigation." },
-  { item: "1.01", label: "Material Definitive Agreement",             impact: "High",     color: "oklch(0.78 0.14 220)", note: "Major contract, licensing deal, or partnership signed. Impact depends on deal size relative to revenue." },
-  { item: "1.02", label: "Termination of Material Agreement",         impact: "High",     color: "oklch(0.78 0.14 220)", note: "A previously material contract ended. Loss of a major customer or partner is a direct revenue risk." },
-  { item: "5.02", label: "Executive Departure or Appointment",        impact: "High",     color: "oklch(0.78 0.14 220)", note: "CEO or CFO changes in particular move stocks. Sudden unexplained departures are more bearish than planned transitions." },
-  { item: "4.01", label: "Change in Certifying Accountant",           impact: "High",     color: "oklch(0.78 0.14 220)", note: "Auditor switch mid-year is a yellow flag. Check whether the auditor resigned or was dismissed and why." },
-  { item: "3.01", label: "Notice of Delisting",                       impact: "Critical", color: "var(--alert)", note: "Exchange notified company it does not meet listing standards. Delisting risk materially compresses valuation multiples." },
-  { item: "7.01", label: "Regulation FD Disclosure",                  impact: "Medium",   color: "var(--fg-3)", note: "Material non-public information shared at an investor day or conference, now made public. Often a guidance update or strategic announcement." },
-];
-
-function EventsGuide() {
-  const [open, setOpen] = useState(false);
-  return (
-    <div style={{ background: "var(--bg-2)", border: "1px solid var(--border-1)", borderRadius: 8, overflow: "hidden" }}>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", transition: "background 0.12s" }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.025)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 14, fontWeight: 600, color: "var(--fg-1)" }}>How to read an 8-K</span>
-          <span style={{ fontSize: 10, letterSpacing: "0.1em", color: "var(--fg-4)", background: "var(--bg-3)", padding: "2px 7px", borderRadius: 3 }}>GUIDE</span>
-        </div>
-        <span style={{ fontSize: 18, color: "var(--fg-4)", lineHeight: 1, fontWeight: 300 }}>{open ? "−" : "+"}</span>
-      </button>
-      {open && (
-        <div style={{ borderTop: "1px solid var(--border-1)", padding: "22px 20px", display: "flex", flexDirection: "column", gap: 24 }}>
-          <div>
-            <div className="label-caps" style={{ marginBottom: 10 }}>What is an 8-K</div>
-            <p style={{ fontSize: 13, color: "var(--fg-2)", lineHeight: 1.85, margin: 0 }}>
-              An <strong style={{ color: "var(--fg-0)" }}>8-K</strong> is a current report filed within{" "}
-              <strong style={{ color: "var(--fg-0)" }}>4 business days</strong> of any material event that shareholders need to know about.
-              Unlike the 10-K or 10-Q which cover scheduled periods, 8-Ks are{" "}
-              <strong style={{ color: "var(--fg-0)" }}>event-driven</strong> — each one is a distinct disclosure triggered by something that just happened.
-              The content is identified by item numbers (e.g. Item 2.02 = earnings, Item 5.02 = executive change). The item number is the first thing
-              to check — it tells you immediately whether the filing is price-moving or routine.
-            </p>
-          </div>
-          <div>
-            <div className="label-caps" style={{ marginBottom: 12 }}>Item types and their price impact</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 0, border: "1px solid var(--border-1)", borderRadius: 6, overflow: "hidden" }}>
-              {EVENT_TYPE_GUIDE.map((e, i) => (
-                <div key={e.item} style={{ display: "flex", alignItems: "flex-start", gap: 14, padding: "13px 16px", background: i % 2 === 0 ? "var(--bg-1)" : "var(--bg-2)", borderBottom: i < EVENT_TYPE_GUIDE.length - 1 ? "1px solid var(--border-1)" : "none" }}>
-                  <div style={{ flexShrink: 0, width: 36, paddingTop: 2 }}>
-                    <span style={{ fontSize: 11, fontFamily: "monospace", color: "var(--fg-4)", letterSpacing: "0.04em" }}>{e.item}</span>
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-                      <span style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-0)" }}>{e.label}</span>
-                      <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 3, letterSpacing: "0.06em", color: e.color, border: `1px solid ${e.color}44`, background: `${e.color}10` }}>{e.impact}</span>
-                    </div>
-                    <p style={{ fontSize: 12, color: "var(--fg-3)", margin: 0, lineHeight: 1.75 }}>{e.note}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div style={{ background: "var(--bg-1)", border: "1px solid var(--border-1)", borderRadius: 6, padding: "12px 16px", display: "flex", alignItems: "flex-start", gap: 10 }}>
-            <span style={{ fontSize: 11, color: "var(--accent)", letterSpacing: "0.1em", fontWeight: 700, flexShrink: 0, paddingTop: 1 }}>NOTE</span>
-            <p style={{ fontSize: 12, color: "var(--fg-3)", margin: 0, lineHeight: 1.7 }}>
-              A single 8-K can cover multiple items (e.g. an earnings release filed with an executive appointment). Always read all items in the filing.
-              High-frequency 8-K filers — 3 or more in 30 days — trigger the <strong style={{ color: "var(--fg-1)" }}>8-K Burst</strong> signal in this pipeline, which indicates elevated corporate activity worth monitoring.
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function EventsView({ cik, filings }: { cik: string; filings: Filing[] }) {
-  const [history, setHistory]           = useState<Filing[]>([]);
-  const [historyLoading, setHistLoading] = useState(true);
-
-  useEffect(() => {
-    setHistLoading(true);
-    supabase
-      .from("filings")
-      .select("id,accession_number,cik,ticker,company_name,form_type,filed_at,filing_url,friday_dump,signals_flagged,period_of_report")
-      .eq("cik", cik)
-      .eq("form_type", "8-K")
-      .order("filed_at", { ascending: false })
-      .limit(10)
-      .then(
-        ({ data }) => { setHistory((data as Filing[]) ?? []); setHistLoading(false); },
-        ()         => { setHistory([]); setHistLoading(false); },
-      );
-  }, [cik]);
-
-  const events = useMemo(() => {
-    const live = filings.filter((f) => f.cik === cik && f.form_type === "8-K");
-    const seen  = new Set<string>();
-    const merged: Filing[] = [];
-    for (const f of [...live, ...history]) {
-      if (!seen.has(f.accession_number)) { seen.add(f.accession_number); merged.push(f); }
-    }
-    return merged.sort((a, b) => (b.filed_at ?? "").localeCompare(a.filed_at ?? "")).slice(0, 10);
-  }, [history, filings, cik]);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <EventsGuide />
-      {historyLoading ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {Array.from({ length: 3 }).map((_, i) => <SkeletonCard key={i} />)}
-        </div>
-      ) : events.length === 0 ? (
-        <div style={{ padding: "52px 40px", textAlign: "center", border: "1px dashed var(--border-2)", borderRadius: 10, background: "var(--bg-1)" }}>
-          <div style={{ fontSize: 28, color: "var(--fg-4)", marginBottom: 12 }}>◎</div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: "var(--fg-2)", marginBottom: 8 }}>No 8-K events found</div>
-          <div style={{ fontSize: 13, color: "var(--fg-4)" }}>
-            Run <code style={{ color: "var(--accent)" }}>python sec_scraper.py --backfill</code> to load material events.
-          </div>
-        </div>
-      ) : (
-        <>
-          <div className="stats-bar">
-            {[
-              { label: "Events tracked",    value: events.length },
-              { label: "Signals detected",  value: events.filter((e) => e.signals_flagged).length },
-              { label: "Friday dumps",      value: events.filter((e) => e.friday_dump).length },
-            ].map((s) => (
-              <div key={s.label}>
-                <div className="label-caps">{s.label}</div>
-                <div style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", marginTop: 4, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>{s.value}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {events.map((ev) => {
-              const evHref = safeHref(ev.filing_url);
-              return (
-                <div key={ev.id} style={{ background: "var(--bg-2)", border: `1px solid ${ev.signals_flagged ? "var(--alert)33" : "var(--border-1)"}`, borderLeft: `3px solid ${ev.signals_flagged ? "var(--alert)" : ev.friday_dump ? "var(--warn)" : "oklch(0.80 0.15 60)"}`, borderRadius: 8, padding: "18px 22px", display: "flex", flexDirection: "column", gap: 12 }}>
-                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <FormBadge form="8-K" />
-                        {ev.signals_flagged && <FlagChip label="Signals detected" tone="alert" />}
-                        {ev.friday_dump     && <FlagChip label="Friday dump"      tone="warn"  />}
-                      </div>
-                      <span style={{ fontSize: 13, color: "var(--fg-3)" }}>Filed {fmtDate(ev.filed_at)}</span>
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
-                      <span style={{ fontSize: 13, color: "var(--fg-4)" }}>{elapsed(ev.filed_at)}</span>
-                      {evHref && (
-                        <a href={evHref} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}
-                          onMouseEnter={(e) => { e.currentTarget.style.opacity = "0.7"; }}
-                          onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}>
-                          View 8-K ↗
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                  {ev.accession_number && (
-                    <span style={{ fontSize: 11, color: "var(--fg-4)", fontFamily: "monospace" }}>{ev.accession_number}</span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ─── Company detail ───────────────────────────────────────────────────────────
-
-function CompanyFilingsView({
-  cik, filings, onBack,
-}: {
-  cik: string; filings: Filing[]; onBack: () => void;
-}) {
-  const [activeTab, setActiveTab] = useState<"quarterly" | "annual" | "events" | "all">("quarterly");
-
-  const all = useMemo(
-    () => filings
-      .filter((f) => f.cik === cik)
-      .sort((a, b) => (b.filed_at ?? "").localeCompare(a.filed_at ?? "")),
-    [filings, cik],
-  );
-
-  const meta = all[0];
-  if (!meta) {
-    return (
-      <div style={{ color: "var(--fg-4)", padding: "40px 0", textAlign: "center" }}>
-        No filings found for this company.
-      </div>
-    );
-  }
-
-  const formCounts = all.reduce<Record<string, number>>((acc, f) => {
-    acc[f.form_type] = (acc[f.form_type] ?? 0) + 1;
-    return acc;
-  }, {});
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
-      <button
-        onClick={onBack}
-        style={{
-          background: "var(--bg-2)", border: "1px solid var(--border-1)",
-          padding: "7px 14px", borderRadius: 6, cursor: "pointer",
-          color: "var(--fg-3)", fontSize: 13, fontFamily: "inherit",
-          display: "inline-flex", alignItems: "center", gap: 6, alignSelf: "flex-start",
-          transition: "color 0.12s, border-color 0.12s, background 0.12s",
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.color = "var(--fg-1)";
-          e.currentTarget.style.borderColor = "var(--border-2)";
-          e.currentTarget.style.background = "var(--bg-3)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.color = "var(--fg-3)";
-          e.currentTarget.style.borderColor = "var(--border-1)";
-          e.currentTarget.style.background = "var(--bg-2)";
-        }}
-      >
-        ← Back
-      </button>
-
-      {/* Company header */}
-      <div style={{
-        display: "flex", alignItems: "flex-start", gap: 20, flexWrap: "wrap",
-        padding: "20px 24px",
-        background: "var(--bg-2)", border: "1px solid var(--border-1)",
-        borderRadius: 12,
-      }}>
-        <CompanyMark ticker={meta.ticker} size={60} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <h1 style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", margin: "0 0 8px", letterSpacing: "-0.02em" }}>
-            {meta.company_name}
-          </h1>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <span style={{
-              fontSize: 13, color: "var(--accent)", fontWeight: 700,
-              background: "var(--accent-12)", border: "1px solid var(--accent-20)",
-              borderRadius: 100, padding: "2px 10px", letterSpacing: "0.06em",
-            }}>{meta.ticker}</span>
-            <span className="caption" style={{ fontSize: 11, color: "var(--fg-4)", fontFamily: "monospace" }}>CIK {meta.cik}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Stats bar */}
-      <div className="stats-bar">
-        {[
-          { label: "Filings",      value: all.length },
-          { label: "Flagged",      value: all.filter((f) => f.signals_flagged).length },
-          { label: "Friday Dumps", value: all.filter((f) => f.friday_dump).length },
-        ].map((s) => (
-          <div key={s.label}>
-            <div className="label-caps">{s.label}</div>
-            <div className="metric-val" style={{ marginTop: 4 }}>{s.value}</div>
-          </div>
-        ))}
-        <div style={{ flex: 2 }}>
-          <div className="label-caps" style={{ marginBottom: 8 }}>Form types</div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {Object.entries(formCounts).map(([form, cnt]) => (
-              <span key={form} style={{ fontSize: 12, color: formColor(form), fontWeight: 600 }}>
-                {form} <span style={{ opacity: 0.6, fontWeight: 400 }}>× {cnt}</span>
-              </span>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="tab-pills">
-        {([
-          { key: "quarterly", label: "10-Q Reports",  formType: "10-Q"  },
-          { key: "annual",    label: "Annual (10-K)", formType: "10-K"  },
-          { key: "events",    label: "Events (8-K)",  formType: "8-K"   },
-          { key: "all",       label: "All Filings",   formType: null    },
-        ] as const).map(({ key, label, formType }) => {
-          const count    = formType ? all.filter((f) => f.form_type === formType).length : all.length;
-          const isActive = activeTab === key;
-          return (
-            <button
-              key={key}
-              onClick={() => setActiveTab(key)}
-              className={`tab-pill${isActive ? " active" : ""}`}
-            >
-              {label}
-              {count > 0 && (
-                <span style={{
-                  fontSize: 12, padding: "2px 7px", borderRadius: 4,
-                  fontVariantNumeric: "tabular-nums",
-                  background: isActive ? "var(--accent-20)" : "var(--bg-4, #253050)",
-                  color: isActive ? "var(--accent)" : "var(--fg-3)",
-                }}>
-                  {count}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Tab content */}
-      {activeTab === "quarterly" ? (
-        <QuarterlyView cik={cik} filings={filings} />
-      ) : activeTab === "annual" ? (
-        <AnnualView cik={cik} filings={filings} />
-      ) : activeTab === "events" ? (
-        <EventsView cik={cik} filings={filings} />
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
-          <div style={{ fontSize: 13, color: "var(--fg-3)", letterSpacing: "0.12em", textTransform: "uppercase", marginBottom: 20 }}>
-            Filing history · {all.length} entries
-          </div>
-          {all.map((f, i) => (
-            <div key={f.id} style={{ display: "flex", gap: 14, paddingBottom: i < all.length - 1 ? 20 : 0 }}>
-              <div style={{
-                width: 80, flexShrink: 0,
-                display: "flex", flexDirection: "column", alignItems: "flex-end",
-                paddingTop: 10, gap: 2,
-              }}>
-                <span style={{ fontSize: 14, color: "var(--fg-3)" }}>{fmtDate(f.filed_at).replace(/, \d{4}$/, "")}</span>
-                <span className="caption">{new Date(f.filed_at ?? "").getFullYear()}</span>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
-                <div style={{
-                  width: 8, height: 8, borderRadius: "50%", marginTop: 13, flexShrink: 0,
-                  background: f.signals_flagged ? "var(--alert)" : f.friday_dump ? "var(--warn)" : "var(--border-2)",
-                }} />
-                {i < all.length - 1 && (
-                  <div style={{ width: 1, flex: 1, minHeight: 16, background: "var(--border-1)", marginTop: 3 }} />
-                )}
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <FilingCard filing={f} onCompanyClick={() => {}} index={i} />
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Feed view ────────────────────────────────────────────────────────────────
-
-const FEED_FORM_TYPES = ["10-K", "10-Q", "8-K", "DEF 14A"] as const;
-
-function FeedView({
-  filings, loading, onCompanyClick,
-}: {
-  filings: Filing[]; loading: boolean; onCompanyClick: (cik: string) => void;
-}) {
-  const [search, setSearch]           = useState("");
-  const [activeTypes, setActiveTypes] = useState<string[]>([]);
-
-  function toggleType(t: string) {
-    setActiveTypes((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]);
-  }
-
-  const typeCounts = useMemo(() =>
-    FEED_FORM_TYPES.reduce<Record<string, number>>((acc, t) => {
-      acc[t] = filings.filter((f) => f.form_type === t).length;
-      return acc;
-    }, {}),
-  [filings]);
-
-  const { displayed, uniqueCompanies } = useMemo(() => {
-    let r = filings;
-    if (activeTypes.length > 0) r = r.filter((f) => activeTypes.includes(f.form_type));
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      r = r.filter((f) =>
-        f.company_name.toLowerCase().includes(q) || f.ticker.toLowerCase().includes(q),
-      );
-    }
-    return { displayed: r, uniqueCompanies: new Set(r.map((f) => f.cik)).size };
-  }, [filings, search, activeTypes]);
-
-  const isFiltered = activeTypes.length > 0 || search.trim().length > 0;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Header */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <h1 style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", margin: 0, letterSpacing: "-0.02em" }}>
-            Recent Filings
-          </h1>
-          <span className="live-badge">
-            <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--accent)", display: "inline-block" }} />
-            LIVE
-          </span>
-        </div>
-        {!loading && filings.length > 0 && (
-          <div className="stats-bar">
-            {FEED_FORM_TYPES.map((t) => typeCounts[t] > 0 && (
-              <div key={t} style={{
-                flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 4,
-              }}>
-                <div style={{ fontSize: 26, fontWeight: 700, color: formColor(t), fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
-                  {typeCounts[t]}
-                </div>
-                <div className="label-caps">{t}</div>
-              </div>
-            ))}
-            <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-              <div style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-1)", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
-                {uniqueCompanies}
-              </div>
-              <div className="label-caps">Companies</div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Filter bar */}
-      {!loading && filings.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div className="search-input-wrap">
-            <input
-              className="search-input"
-              placeholder="Search company or ticker…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            {FEED_FORM_TYPES.map((t) => (
-              <button
-                key={t}
-                className={`filter-chip${activeTypes.includes(t) ? " active" : ""}`}
-                onClick={() => toggleType(t)}
-              >
-                {t}
-                {typeCounts[t] > 0 && <span style={{ marginLeft: 5, opacity: 0.5 }}>{typeCounts[t]}</span>}
-              </button>
-            ))}
-            {isFiltered && (
-              <button
-                className="filter-chip"
-                onClick={() => { setActiveTypes([]); setSearch(""); }}
-                style={{ color: "var(--alert)", borderColor: "var(--alert)33" }}
-              >
-                Clear
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Card list */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {loading
-          ? Array.from({ length: 5 }).map((_, i) => <SkeletonCard key={i} />)
-          : displayed.length === 0
-          ? (
-            <div style={{ padding: "52px 0", textAlign: "center", color: "var(--fg-4)", fontSize: 13 }}>
-              {filings.length === 0
-                ? "No filings yet — run the scraper to populate data."
-                : "No filings match the current filters."}
-            </div>
-          )
-          : displayed.map((f, i) => (
-            <FilingCard key={f.id} filing={f} onCompanyClick={onCompanyClick} index={i} />
-          ))
-        }
+    <div className="kpi">
+      <div className="k-label">{label}</div>
+      <div className="k-value">{formatted}</div>
+      <div className="k-delta">
+        {qoq != null && <span className={qoq >= 0 ? "pos" : "neg"}>{fmtDelta(qoq)} QoQ</span>}
+        {yoy != null && <span className={yoy >= 0 ? "pos" : "neg"}>{fmtDelta(yoy)} YoY</span>}
       </div>
     </div>
   );
 }
 
-// ─── Company list view ────────────────────────────────────────────────────────
+// ─── Skeleton loader ──────────────────────────────────────────────────────────
 
-function CompanyListView({
-  filings, onCompanyClick,
-}: {
-  filings: Filing[]; onCompanyClick: (cik: string) => void;
-}) {
-  const companies = useMemo(() => {
-    const map = new Map<string, { ticker: string; name: string; filings: Filing[] }>();
-    for (const f of filings) {
-      const entry = map.get(f.cik) ?? { ticker: f.ticker, name: f.company_name, filings: [] };
-      entry.filings.push(f);
-      map.set(f.cik, entry);
-    }
-    return Array.from(map.entries())
-      .map(([cik, v]) => {
-        const sorted = [...v.filings].sort((a, b) => (b.filed_at ?? "").localeCompare(a.filed_at ?? ""));
-        return { cik, ticker: v.ticker, name: v.name, latest: sorted[0], count: sorted.length };
-      })
-      .sort((a, b) => (b.latest.filed_at ?? "").localeCompare(a.latest.filed_at ?? ""));
-  }, [filings]);
-
+function SkeletonKpi() {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div>
-        <h1 style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", margin: "0 0 6px", letterSpacing: "-0.02em" }}>
-          Watchlist
-        </h1>
-        <p style={{ fontSize: 14, color: "var(--fg-3)", margin: 0 }}>
-          {companies.length} companies · click to view filing history
-        </p>
+    <div className="skeleton-kpi">
+      <div className="skeleton" style={{ height: 10, width: "45%" }} />
+      <div className="skeleton" style={{ height: 26, width: "65%" }} />
+      <div className="skeleton" style={{ height: 10, width: "55%" }} />
+    </div>
+  );
+}
+
+function SkeletonChart({ height = 220 }: { height?: number }) {
+  return (
+    <div className="skeleton-chart">
+      <div className="skeleton" style={{ height: 10, width: "35%", marginBottom: 14 }} />
+      <div className="skeleton" style={{ height }} />
+    </div>
+  );
+}
+
+function LoadingFundamentals() {
+  return (
+    <div className="skeleton-block">
+      <div className="kpi-strip">
+        {[0, 1, 2, 3, 4, 5].map((i) => <SkeletonKpi key={i} />)}
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {companies.map((c) => (
-          <button
-            key={c.cik}
-            onClick={() => onCompanyClick(c.cik)}
-            style={{
-              display: "flex", alignItems: "center", gap: 16,
-              background: "var(--bg-2)", border: "1px solid var(--border-1)",
-              borderRadius: 10, padding: "18px 22px",
-              cursor: "pointer", fontFamily: "inherit", textAlign: "left",
-              transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s",
-              width: "100%",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.borderColor = "var(--border-2)";
-              e.currentTarget.style.background  = "var(--bg-3)";
-              e.currentTarget.style.boxShadow   = "var(--shadow-sm)";
-              e.currentTarget.style.transform   = "translateY(-1px)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = "var(--border-1)";
-              e.currentTarget.style.background  = "var(--bg-2)";
-              e.currentTarget.style.boxShadow   = "none";
-              e.currentTarget.style.transform   = "none";
-            }}
-          >
-            <CompanyMark ticker={c.ticker} size={44} />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 5 }}>
-                <span style={{ fontSize: 17, fontWeight: 600, color: "var(--fg-0)" }}>{c.name}</span>
-                <span style={{ fontSize: 13, color: "var(--accent)", fontWeight: 600 }}>{c.ticker}</span>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                <span className="caption">{c.count} filings</span>
-                <span className="caption">·</span>
-                <span className="caption">{elapsed(c.latest.filed_at)}</span>
-                <span className="caption">·</span>
-                <FormBadge form={c.latest.form_type} />
-              </div>
-            </div>
-            <span style={{ fontSize: 18, color: "var(--fg-3)", flexShrink: 0 }}>›</span>
-          </button>
-        ))}
+      <SkeletonChart height={300} />
+      <div className="chart-grid">
+        <SkeletonChart /><SkeletonChart /><SkeletonChart /><SkeletonChart />
       </div>
     </div>
   );
 }
 
-// ─── Flagged view ─────────────────────────────────────────────────────────────
-
-function FlaggedView({
-  filings, onCompanyClick,
-}: {
-  filings: Filing[]; onCompanyClick: (cik: string) => void;
-}) {
-  const flagged = useMemo(
-    () => filings
-      .filter((f) => f.signals_flagged || f.friday_dump)
-      .sort((a, b) => (b.filed_at ?? "").localeCompare(a.filed_at ?? "")),
-    [filings],
-  );
-
+function LoadingOwnership() {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div>
-        <h1 style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-0)", margin: "0 0 6px", letterSpacing: "-0.02em" }}>
-          Flagged Filings
-        </h1>
-        <p style={{ fontSize: 14, color: "var(--fg-3)", margin: 0, maxWidth: 520 }}>
-          Friday after-hours dumps, burst patterns, and algorithm flags.
-        </p>
+    <div className="skeleton-block">
+      <div className="chart-grid">
+        <SkeletonChart /><SkeletonChart />
       </div>
-      {flagged.length === 0 ? (
-        <div style={{
-          padding: "56px 40px", textAlign: "center",
-          border: "1px dashed var(--border-2)", borderRadius: 10,
-          background: "var(--bg-1)",
-        }}>
-          <div style={{ fontSize: 30, marginBottom: 14, color: "var(--fg-4)", lineHeight: 1 }}>◎</div>
-          <div style={{ fontSize: 17, fontWeight: 600, color: "var(--fg-2)", marginBottom: 10 }}>No flagged filings yet</div>
-          <div style={{ fontSize: 14, color: "var(--fg-4)", lineHeight: 1.8, maxWidth: 380, margin: "0 auto" }}>
-            Signal extraction runs automatically when the pipeline processes new filings.
-            Wire up <code style={{ color: "var(--accent)" }}>signal_extractor.py</code> to activate scoring.
-          </div>
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {flagged.map((f, i) => (
-            <FilingCard key={f.id} filing={f} onCompanyClick={onCompanyClick} index={i} />
-          ))}
-        </div>
-      )}
+      <SkeletonChart height={180} />
     </div>
   );
 }
 
-// ─── Filings tabs ─────────────────────────────────────────────────────────────
-
-function FilingsTabs({
-  active, onNavigate, counts,
-}: {
-  active: Exclude<View, "home">;
-  onNavigate: (hash: string) => void;
-  counts?: { feed: number; company: number; flagged: number };
-}) {
-  const tabs = [
-    { label: "Feed",      hash: "feed"    as const, count: counts?.feed },
-    { label: "Companies", hash: "company" as const, count: counts?.company },
-    { label: "Flagged",   hash: "flagged" as const, count: counts?.flagged },
-  ];
+function LoadingCatalysts() {
   return (
-    <div className="tab-pills">
-      {tabs.map((t) => {
-        const isActive = active === t.hash;
-        return (
-          <button
-            key={t.hash}
-            onClick={() => onNavigate(t.hash)}
-            className={`tab-pill${isActive ? " active" : ""}`}
-          >
-            {t.label}
-            {t.count !== undefined && t.count > 0 && (
-              <span style={{
-                fontSize: 12, padding: "2px 7px", borderRadius: 4,
-                fontVariantNumeric: "tabular-nums",
-                background: isActive ? "var(--accent-20)" : "var(--bg-4, #253050)",
-                color: isActive ? "var(--accent)" : "var(--fg-3)",
-              }}>
-                {t.count}
-              </span>
-            )}
-          </button>
-        );
-      })}
+    <div className="skeleton-block">
+      <div className="chart-grid">
+        <SkeletonChart /><SkeletonChart />
+      </div>
+      <SkeletonChart height={160} />
     </div>
   );
 }
@@ -1592,568 +173,1293 @@ function FilingsTabs({
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 function Sidebar({
-  filings, activeView, activeCik, onNavigate, mobileOpen, onMobileClose,
+  companies, filings, activeCik, view,
+  onCompany, onOverview, onFeed, q, setQ,
 }: {
-  filings: Filing[];
-  activeView: Exclude<View, "home">;
-  activeCik: string | null;
-  onNavigate: (hash: string) => void;
-  mobileOpen?: boolean;
-  onMobileClose?: () => void;
+  companies: Company[]; filings: Filing[];
+  activeCik: string | null; view: MainView;
+  onCompany: (cik: string) => void;
+  onOverview: () => void; onFeed: () => void;
+  q: string; setQ: (v: string) => void;
 }) {
-  const [companySearch, setCompanySearch] = useState("");
+  const filtered = useMemo(() => {
+    if (!q.trim()) return companies;
+    const n = q.toLowerCase();
+    return companies.filter(
+      (c) => (c.ticker ?? "").toLowerCase().includes(n) ||
+             (c.name ?? "").toLowerCase().includes(n),
+    );
+  }, [companies, q]);
 
-  const companies = useMemo(() => {
-    const map = new Map<string, { ticker: string; name: string; latest: Filing; count: number; hasFlagged: boolean }>();
-    for (const f of [...filings].sort((a, b) => (b.filed_at ?? "").localeCompare(a.filed_at ?? ""))) {
-      const entry = map.get(f.cik);
-      if (!entry) {
-        map.set(f.cik, { ticker: f.ticker, name: f.company_name, latest: f, count: 1, hasFlagged: f.signals_flagged || f.friday_dump });
-      } else {
-        entry.count++;
-        if (f.signals_flagged || f.friday_dump) entry.hasFlagged = true;
-      }
+  const recent30 = useMemo(() => {
+    const cutoff = Date.now() - 30 * 86_400_000;
+    const m = new Map<string, number>();
+    for (const f of filings) {
+      if (f.filed_at && new Date(f.filed_at).getTime() > cutoff)
+        m.set(f.cik, (m.get(f.cik) ?? 0) + 1);
     }
-    return Array.from(map.entries()).map(([cik, v]) => ({ cik, ...v }));
+    return m;
   }, [filings]);
 
-  const visibleCompanies = useMemo(() =>
-    companySearch.trim()
-      ? companies.filter((c) =>
-          c.ticker.toLowerCase().includes(companySearch.toLowerCase()) ||
-          c.name.toLowerCase().includes(companySearch.toLowerCase()),
-        )
-      : companies,
-  [companies, companySearch]);
-
-  const navItems = [
-    { label: "Filings", hash: "feed",    group: ["feed", "company", "flagged"], disabled: false },
-    { label: "Search",  hash: "search",  group: ["search"],                     disabled: true  },
-    { label: "Signals", hash: "signals", group: ["signals"],                    disabled: true  },
-  ];
-
   return (
-    <aside className={`sidebar${mobileOpen ? " mobile-open" : ""}`}>
-      {/* Brand */}
-      <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid var(--border-1)", flexShrink: 0, display: "flex", alignItems: "center", gap: 8 }}>
-        <button
-          onClick={() => onNavigate("home")}
-          style={{
-            background: "none", border: "none", padding: 0,
-            cursor: "pointer", fontFamily: "inherit", flex: 1, minWidth: 0,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 3 }}>
-            <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: "0.24em", color: "var(--fg-0)" }}>
-              SUMMA
-            </div>
-            <span className="live-badge">
-              <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--accent)", display: "inline-block" }} />
-              LIVE
-            </span>
-          </div>
-          <div style={{ fontSize: 11, color: "var(--fg-4)", letterSpacing: "0.1em" }}>
-            SEC Filing Intelligence
-          </div>
-        </button>
-        <button
-          onClick={onMobileClose}
-          className="sidebar-close-btn"
-          aria-label="Close menu"
-          style={{ fontFamily: "inherit" }}
-        >
-          ✕
-        </button>
+    <aside className="sidebar">
+      <div className="sidebar-brand" onClick={onOverview}>
+        Summa<span className="dot">.</span>
       </div>
-
-      {/* Nav */}
-      <div style={{ padding: "6px 0", borderBottom: "1px solid var(--border-1)", flexShrink: 0 }}>
-        {navItems.map((item) => {
-          const active = !item.disabled && activeCik === null && (item.group as string[]).includes(activeView);
-          return (
-            <button
-              key={item.hash}
-              onClick={item.disabled ? undefined : () => onNavigate(item.hash)}
-              style={{
-                width: "100%", textAlign: "left", padding: "11px 18px",
-                background: active ? "linear-gradient(90deg, var(--accent-12) 0%, var(--accent-08) 100%)" : "transparent",
-                border: "none",
-                borderLeft: active ? "2px solid var(--accent)" : "2px solid transparent",
-                color: active ? "var(--fg-0)" : item.disabled ? "var(--fg-4)" : "var(--fg-2)",
-                fontSize: 15,
-                fontWeight: active ? 600 : 400,
-                cursor: item.disabled ? "default" : "pointer",
-                fontFamily: "inherit",
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-                transition: "color 0.12s, background 0.12s",
-              }}
-              onMouseEnter={(e) => {
-                if (!active && !item.disabled) {
-                  e.currentTarget.style.color = "var(--fg-1)";
-                  e.currentTarget.style.background = "rgba(255,255,255,0.025)";
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!active && !item.disabled) {
-                  e.currentTarget.style.color = "var(--fg-2)";
-                  e.currentTarget.style.background = "transparent";
-                }
-              }}
-            >
-              {item.label}
-              {item.disabled && (
-                <span style={{
-                  fontSize: 10, letterSpacing: "0.12em", color: "var(--fg-4)",
-                  background: "var(--bg-3)", padding: "2px 6px", borderRadius: 3,
-                }}>
-                  SOON
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Company list */}
-      <div style={{ padding: "14px 20px 8px", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 13, color: "var(--fg-3)", letterSpacing: "0.12em", textTransform: "uppercase" }}>Companies</span>
-        <span className="caption">{companies.length}</span>
-      </div>
-      {companies.length > 0 && (
-        <div style={{ padding: "0 12px 10px", flexShrink: 0 }}>
-          <input
-            className="sidebar-search"
-            placeholder="Filter…"
-            value={companySearch}
-            onChange={(e) => setCompanySearch(e.target.value)}
-          />
+      <nav className="sidebar-nav">
+        <div className={`nav-item${view === "overview" ? " active" : ""}`} onClick={onOverview}>
+          ◈ Overview
         </div>
-      )}
-      <div style={{ flex: 1, overflowY: "auto" }}>
-        {visibleCompanies.map((c) => {
-          const active = activeCik === c.cik;
+        <div className={`nav-item${view === "feed" ? " active" : ""}`} onClick={onFeed}>
+          ≡ Feed
+        </div>
+      </nav>
+      <div className="sidebar-search">
+        <input
+          className="sidebar-input"
+          placeholder="Search companies…" value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+      </div>
+      <div className="sidebar-list">
+        {filtered.map((c) => {
+          const cnt = recent30.get(c.cik) ?? 0;
           return (
-            <button
+            <div
               key={c.cik}
-              onClick={() => onNavigate(`c=${c.cik}`)}
-              style={{
-                display: "flex", alignItems: "center", gap: 10,
-                width: "100%", textAlign: "left", padding: "10px 14px 10px 16px",
-                background: active ? "linear-gradient(90deg, var(--accent-12) 0%, var(--accent-08) 100%)" : "transparent",
-                border: "none",
-                borderLeft: active ? "2px solid var(--accent)" : "2px solid transparent",
-                cursor: "pointer", fontFamily: "inherit",
-                transition: "background 0.15s, border-color 0.15s, transform 0.15s",
-              }}
-              onMouseEnter={(e) => {
-                if (!active) {
-                  e.currentTarget.style.background = "rgba(79,212,194,0.03)";
-                  e.currentTarget.style.borderLeftColor = "var(--accent)33";
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (!active) {
-                  e.currentTarget.style.background = "transparent";
-                  e.currentTarget.style.borderLeftColor = "transparent";
-                }
-              }}
+              className={`company-row${activeCik === c.cik ? " active" : ""}`}
+              onClick={() => onCompany(c.cik)}
             >
-              <CompanyMark ticker={c.ticker} size={28} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 4 }}>
-                  <span style={{
-                    fontSize: 13, fontWeight: active ? 600 : 500,
-                    color: active ? "var(--fg-0)" : "var(--fg-1)",
-                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  }}>
-                    {c.name}
-                  </span>
-                  <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-                    {c.hasFlagged && (
-                      <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--alert)", display: "inline-block" }} />
-                    )}
-                    <span style={{
-                      fontSize: 11, padding: "1px 6px", borderRadius: 100,
-                      background: active ? "var(--accent-20)" : "var(--bg-3)",
-                      color: active ? "var(--accent)" : "var(--fg-4)",
-                      fontVariantNumeric: "tabular-nums",
-                    }}>
-                      {c.count}
-                    </span>
-                  </div>
-                </div>
-                <span style={{ fontSize: 11, color: active ? "var(--accent)99" : "var(--fg-4)", letterSpacing: "0.06em" }}>{c.ticker}</span>
-              </div>
-            </button>
+              <CompanyMark ticker={c.ticker ?? "?"} size={22} />
+              <span className="tkr">{c.ticker}</span>
+              <span className="nm">{c.name}</span>
+              {cnt > 0 && <span className="cnt">{cnt}</span>}
+            </div>
           );
         })}
-      </div>
-
-      {/* Footer */}
-      <div style={{ padding: "10px 16px", borderTop: "1px solid var(--border-1)", flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--pos)", display: "inline-block", flexShrink: 0 }} />
-            <span style={{ fontSize: 11, color: "var(--fg-4)", letterSpacing: "0.04em" }}>EDGAR connected</span>
-          </div>
-          <span style={{ fontSize: 11, color: "var(--fg-4)", fontVariantNumeric: "tabular-nums" }}>{filings.length} filings</span>
-        </div>
       </div>
     </aside>
   );
 }
 
-// ─── useCountUp ───────────────────────────────────────────────────────────────
+// ─── Overview page ────────────────────────────────────────────────────────────
 
-function useCountUp(target: number, delayMs = 0): number {
-  const [val, setVal] = useState(0);
-  useEffect(() => {
-    if (target === 0) { setVal(0); return; }
-    let rafId = 0;
-    let alive = true;
-    const t = setTimeout(() => {
-      const start = performance.now();
-      const duration = 900;
-      const tick = () => {
-        if (!alive) return;
-        const p = Math.min((performance.now() - start) / duration, 1);
-        const eased = 1 - Math.pow(1 - p, 3);
-        setVal(Math.round(eased * target));
-        if (p < 1) rafId = requestAnimationFrame(tick);
-      };
-      rafId = requestAnimationFrame(tick);
-    }, delayMs);
-    return () => {
-      alive = false;
-      clearTimeout(t);
-      cancelAnimationFrame(rafId);
-    };
-  }, [target, delayMs]);
-  return val;
-}
+function OverviewPage({
+  companies, filings, onCompany,
+}: { companies: Company[]; filings: Filing[]; onCompany: (cik: string) => void }) {
+  const volumeData = useMemo(() => {
+    const buckets = new Map<string, Record<string, number>>();
+    for (const f of filings) {
+      if (!f.filed_at) continue;
+      const d = new Date(f.filed_at);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const b = buckets.get(key) ?? {};
+      b[f.form_type] = (b[f.form_type] ?? 0) + 1;
+      buckets.set(key, b);
+    }
+    return Array.from(buckets.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, counts]) => ({ x: key, ...counts }));
+  }, [filings]);
 
-// ─── Home page ────────────────────────────────────────────────────────────────
+  const formTypes = useMemo(() => {
+    const s = new Set<string>();
+    for (const f of filings) s.add(f.form_type);
+    return Array.from(s).sort();
+  }, [filings]);
 
-function HomeView({
-  filings, onNavigate,
-}: {
-  filings: Filing[]; onNavigate: (hash: string) => void;
-}) {
-  const { totalCompanies, flaggedCount } = useMemo(() => ({
-    totalCompanies: new Set(filings.map((f) => f.cik)).size,
-    flaggedCount: filings.filter((f) => f.signals_flagged || f.friday_dump).length,
-  }), [filings]);
+  const lastFiling = useMemo(() => {
+    const m = new Map<string, Filing>();
+    for (const f of [...filings].reverse()) {
+      if (!m.has(f.cik)) m.set(f.cik, f);
+    }
+    return m;
+  }, [filings]);
 
-  const countCompanies = useCountUp(totalCompanies, 500);
-  const countFilings   = useCountUp(filings.length,  560);
-  const countFlagged   = useCountUp(flaggedCount,     620);
+  const cnt30 = useMemo(() => {
+    const cutoff = Date.now() - 30 * 86_400_000;
+    const m = new Map<string, number>();
+    for (const f of filings) {
+      if (f.filed_at && new Date(f.filed_at).getTime() > cutoff)
+        m.set(f.cik, (m.get(f.cik) ?? 0) + 1);
+    }
+    return m;
+  }, [filings]);
+
+  const cols: Column<Company>[] = [
+    {
+      key: "ticker", header: "Ticker", width: "110px",
+      value: (c) => c.ticker ?? "",
+      render: (c) => (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <CompanyMark ticker={c.ticker ?? "?"} size={22} />
+          <strong style={{ color: "var(--accent)", letterSpacing: "0.04em" }}>{c.ticker}</strong>
+        </div>
+      ),
+    },
+    { key: "name", header: "Company", value: (c) => c.name ?? "" },
+    {
+      key: "sector", header: "Sector",
+      value: (c) => c.sector ?? "",
+      render: (c) => <span className="dimmed">{c.sector ?? "—"}</span>,
+    },
+    {
+      key: "last_filing", header: "Last Filing",
+      value: (c) => lastFiling.get(c.cik)?.filed_at ?? "",
+      render: (c) => {
+        const lf = lastFiling.get(c.cik);
+        if (!lf) return <span className="dimmed">—</span>;
+        const ago = elapsed(lf.filed_at);
+        return (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <FormBadge form={lf.form_type} />
+            <span className="muted" title={fmtDate(lf.filed_at)}>{ago || fmtDate(lf.filed_at)}</span>
+          </div>
+        );
+      },
+    },
+    {
+      key: "cnt", header: "30d", align: "right", width: "55px",
+      value: (c) => cnt30.get(c.cik) ?? 0,
+      render: (c) => {
+        const n = cnt30.get(c.cik) ?? 0;
+        return <span className="dt-num" style={{ color: n > 0 ? "var(--accent)" : "var(--fg-4)" }}>{n}</span>;
+      },
+    },
+  ];
 
   return (
-    <div style={{
-      minHeight: "100vh",
-      display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center",
-      padding: "60px 32px",
-      position: "relative", zIndex: 1,
-    }}>
-      <div className="scan-line" />
-
-      {/* Status pill */}
-      <div
-        className="status-line"
-        style={{ marginBottom: 56, display: "flex", alignItems: "center", gap: 8 }}
-      >
-        <span style={{
-          display: "inline-flex", alignItems: "center", gap: 8,
-          padding: "6px 16px", borderRadius: 100,
-          background: "var(--bg-2)", border: "1px solid var(--border-1)",
-          fontSize: 13, color: "var(--fg-3)",
-        }}>
-          <span className="pulse-dot" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", display: "inline-block" }} />
-          <span style={{ color: "var(--accent)", fontWeight: 600 }}>Live</span>
-          <span style={{ color: "var(--border-2)" }}>·</span>
-          <span>{filings.length} filings indexed</span>
-          <span style={{ color: "var(--border-2)" }}>·</span>
-          <span>{totalCompanies} companies</span>
-        </span>
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Watchlist Overview</h1>
+        <div className="page-sub">{companies.length} companies · {filings.length} filings loaded</div>
       </div>
 
-      {/* Brand */}
-      <div className="anim-slide-up" style={{ textAlign: "center", marginBottom: 48, animationDelay: "60ms" }}>
-        <div style={{ fontSize: 76, fontWeight: 800, letterSpacing: "0.22em", marginBottom: 20, lineHeight: 1, position: "relative", display: "inline-block" }}>
-          <span className="accent-glow" style={{ color: "var(--accent)" }}>S</span>
-          <span style={{ color: "var(--fg-0)" }}>UMMA</span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 20 }}>
-          <span style={{ width: 32, height: 1, background: "linear-gradient(90deg, transparent, var(--border-2))", display: "inline-block" }} />
-          <span style={{ fontSize: 11, color: "var(--fg-3)", letterSpacing: "0.28em", textTransform: "uppercase" }}>
-            SEC Filing Intelligence
-          </span>
-          <span className="blink-cursor" style={{ color: "var(--accent)", fontWeight: 700, fontSize: 13 }}>_</span>
-          <span style={{ width: 32, height: 1, background: "linear-gradient(90deg, var(--border-2), transparent)", display: "inline-block" }} />
-        </div>
-        <p style={{ fontSize: 15, color: "var(--fg-3)", margin: "0 auto", maxWidth: 440, lineHeight: 2 }}>
-          Automated signal detection for EDGAR filings.<br />
-          10-K · 10-Q · 8-K · DEF&nbsp;14A — monitored every 10&nbsp;minutes.
-        </p>
+      <div className="section">
+        <div className="section-title">Watchlist · {companies.length} companies</div>
+        <DataTable
+          columns={cols} rows={companies} rowKey={(c) => c.cik}
+          onRowClick={(c) => onCompany(c.cik)}
+          initialSort={{ key: "ticker", dir: "asc" }}
+          filterable filterPlaceholder="Filter companies…"
+          empty="No companies."
+        />
       </div>
 
-      {/* Enter button */}
-      <div className="anim-slide-up" style={{ marginBottom: 56, animationDelay: "160ms" }}>
+      {volumeData.length > 1 && (
+        <div className="section">
+          <div className="section-title">Filing Volume by Month</div>
+          <StackedBarChart
+            data={volumeData}
+            keys={formTypes.map((ft) => ({ key: ft, name: ft }))}
+            title="Filings by form type"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Feed page ────────────────────────────────────────────────────────────────
+
+function FeedPage({ filings, onCompany }: { filings: Filing[]; onCompany: (cik: string) => void }) {
+  const [q, setQ] = useState("");
+  const [formFilter, setFormFilter] = useState<string | null>(null);
+
+  const formTypes = useMemo(() => {
+    const s = new Set<string>();
+    for (const f of filings) s.add(f.form_type);
+    return Array.from(s).sort();
+  }, [filings]);
+
+  const displayed = useMemo(() => {
+    let r = filings;
+    if (formFilter) r = r.filter((f) => f.form_type === formFilter);
+    if (q.trim()) {
+      const n = q.toLowerCase();
+      r = r.filter((f) =>
+        (f.company_name ?? "").toLowerCase().includes(n) ||
+        (f.ticker ?? "").toLowerCase().includes(n),
+      );
+    }
+    return r;
+  }, [filings, q, formFilter]);
+
+  const cols: Column<Filing>[] = [
+    {
+      key: "ticker", header: "Ticker", width: "70px",
+      value: (f) => f.ticker ?? "",
+      render: (f) => (
         <button
-          onClick={() => onNavigate("feed")}
-          className="nav-card"
           style={{
-            background: "var(--bg-2)", border: "1px solid var(--border-2)",
-            borderRadius: 14, padding: "18px 56px",
-            cursor: "pointer", fontFamily: "inherit",
-            display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
-            position: "relative", overflow: "hidden",
+            background: "none", border: "none", padding: 0, cursor: "pointer",
+            color: "var(--accent)", fontWeight: 700,
+            fontFamily: "inherit", fontSize: "inherit",
           }}
+          onClick={(e) => { e.stopPropagation(); onCompany(f.cik); }}
         >
-          <span style={{ fontSize: 16, color: "var(--accent)", letterSpacing: "0.08em", fontWeight: 700 }}>
-            Open live feed →
-          </span>
-          <span style={{ fontSize: 11, color: "var(--fg-4)", letterSpacing: "0.06em" }}>
-            press <span className="kbd">F</span> to jump in
-          </span>
+          {f.ticker}
         </button>
+      ),
+    },
+    { key: "company", header: "Company", value: (f) => f.company_name ?? "" },
+    {
+      key: "form", header: "Form", width: "80px",
+      value: (f) => f.form_type,
+      render: (f) => <FormBadge form={f.form_type} />,
+    },
+    {
+      key: "filed", header: "Filed",
+      value: (f) => f.filed_at ?? "",
+      render: (f) => {
+        const ago = elapsed(f.filed_at);
+        return (
+          <span className="muted" title={fmtDate(f.filed_at)}>
+            {ago || fmtDate(f.filed_at)}
+          </span>
+        );
+      },
+    },
+    {
+      key: "period", header: "Period",
+      value: (f) => f.period_of_report ?? "",
+      render: (f) => <span className="dimmed">{fmtDate(f.period_of_report)}</span>,
+    },
+    {
+      key: "link", header: "", width: "30px",
+      value: () => "",
+      render: (f) => {
+        const href = safeHref(f.filing_url);
+        return href
+          ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: "var(--fg-4)" }}>↗</a>
+          : null;
+      },
+    },
+  ];
+
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          Filing Feed
+          <span className="live-dot" title="Live — new filings appear in real time" />
+        </h1>
+        <div className="page-sub">{filings.length} filings loaded · updates in real time</div>
+      </div>
+      <div className="toggle-row">
+        <input
+          className="dt-filter"
+          style={{ borderRadius: 5, width: 220 }}
+          placeholder="Search…" value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <button className={`chip${formFilter === null ? " active" : ""}`} onClick={() => setFormFilter(null)}>
+          All
+        </button>
+        {formTypes.map((ft) => (
+          <button
+            key={ft}
+            className={`chip${formFilter === ft ? " active" : ""}`}
+            onClick={() => setFormFilter(formFilter === ft ? null : ft)}
+          >
+            {ft}
+          </button>
+        ))}
+      </div>
+      <DataTable
+        columns={cols} rows={displayed} rowKey={(f) => f.accession_number}
+        filterable={false}
+        initialSort={{ key: "filed", dir: "desc" }}
+        empty="No filings match." maxHeight="calc(100vh - 240px)"
+      />
+    </div>
+  );
+}
+
+// ─── Company page ─────────────────────────────────────────────────────────────
+
+function CompanyPage({
+  cik, tab, companies, onTab,
+}: { cik: string; tab: CompanyTab; companies: Company[]; onTab: (t: CompanyTab) => void }) {
+  const company = companies.find((c) => c.cik === cik) ?? null;
+  const [facts, setFacts] = useState<FinancialFact[]>([]);
+  const [loadingFacts, setLoadingFacts] = useState(true);
+
+  useEffect(() => {
+    setFacts([]);
+    setLoadingFacts(true);
+    fetchFinancialFacts(cik).then((d) => { setFacts(d); setLoadingFacts(false); });
+  }, [cik]);
+
+  const ticker = company?.ticker ?? "?";
+  const name = company?.name ?? cik;
+
+  const TABS: { key: CompanyTab; label: string }[] = [
+    { key: "overview",      label: "Overview" },
+    { key: "fundamentals",  label: "Fundamentals" },
+    { key: "ownership",     label: "Ownership" },
+    { key: "catalysts",     label: "Catalysts" },
+    { key: "filings",       label: "Filings" },
+  ];
+
+  return (
+    <div>
+      <div className="page-head-row">
+        <CompanyMark ticker={ticker} size={44} />
+        <div>
+          <h1 className="page-title">{name}</h1>
+          <div className="page-sub">
+            {ticker} · CIK {cik}
+            {company?.sector ? ` · ${company.sector}` : ""}
+            {company?.industry ? ` · ${company.industry}` : ""}
+          </div>
+        </div>
       </div>
 
-      {/* Stats */}
-      <div
-        className="anim-slide-up"
-        style={{ display: "flex", gap: 12, animationDelay: "280ms", flexWrap: "wrap", justifyContent: "center" }}
-      >
-        {[
-          { label: "Companies",       value: countCompanies, color: "var(--accent)",  glow: "#4fd4c232" },
-          { label: "Filings indexed", value: countFilings,   color: "var(--fg-0)",    glow: undefined   },
-          { label: "Signals flagged", value: countFlagged,   color: "var(--alert)",   glow: "#e8404030" },
-        ].map((s) => (
-          <div key={s.label} className="hero-stat">
-            <div style={{
-              fontSize: 48, fontWeight: 700, color: s.color,
-              fontVariantNumeric: "tabular-nums", lineHeight: 1,
-              textShadow: s.glow ? `0 0 28px ${s.glow}` : undefined,
-            }}>
-              {s.value}
-            </div>
-            <div style={{ fontSize: 10, color: "var(--fg-4)", marginTop: 12, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>
-              {s.label}
-            </div>
+      <div className="tabs">
+        {TABS.map((t) => (
+          <div key={t.key} className={`tab${tab === t.key ? " active" : ""}`} onClick={() => onTab(t.key)}>
+            {t.label}
           </div>
         ))}
       </div>
 
-      {/* Keyboard hint */}
-      <div className="anim-slide-up" style={{ marginTop: 40, animationDelay: "380ms", display: "flex", alignItems: "center", gap: 16 }}>
-        {[
-          { key: "F", label: "Feed" },
-          { key: "C", label: "Companies" },
-          { key: "L", label: "Flagged" },
-        ].map((k) => (
-          <span key={k.key} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "var(--fg-4)" }}>
-            <span className="kbd">{k.key}</span>
-            <span>{k.label}</span>
-          </span>
-        ))}
+      {tab === "overview"     && <CompanyOverviewTab cik={cik} facts={facts} loading={loadingFacts} />}
+      {tab === "fundamentals" && <FundamentalsTab facts={facts} loading={loadingFacts} />}
+      {tab === "ownership"    && <OwnershipTab cik={cik} />}
+      {tab === "catalysts"    && <CatalystsTab cik={cik} />}
+      {tab === "filings"      && <FilingsTab cik={cik} />}
+    </div>
+  );
+}
+
+// ─── Company Overview tab ─────────────────────────────────────────────────────
+
+function CompanyOverviewTab({
+  cik, facts, loading,
+}: { cik: string; facts: FinancialFact[]; loading: boolean }) {
+  const [recentFilings, setRecentFilings] = useState<Filing[]>([]);
+  const [loadingFilings, setLoadingFilings] = useState(true);
+
+  useEffect(() => {
+    setLoadingFilings(true);
+    fetchFilingsForCik(cik, 10).then((d) => { setRecentFilings(d); setLoadingFilings(false); });
+  }, [cik]);
+
+  const kpis = useMemo(() => {
+    if (loading || !facts.length) return [];
+    return deriveKpis(facts, "quarterly");
+  }, [facts, loading]);
+
+  const filCols: Column<Filing>[] = [
+    { key: "form", header: "Form", width: "80px", value: (f) => f.form_type, render: (f) => <FormBadge form={f.form_type} /> },
+    { key: "period", header: "Period", value: (f) => f.period_of_report ?? "", render: (f) => <span className="dimmed">{fmtDate(f.period_of_report)}</span> },
+    {
+      key: "filed", header: "Filed", value: (f) => f.filed_at ?? "",
+      render: (f) => {
+        const ago = elapsed(f.filed_at);
+        return <span className="muted" title={fmtDate(f.filed_at)}>{ago || fmtDate(f.filed_at)}</span>;
+      },
+    },
+    {
+      key: "link", header: "", width: "30px", value: () => "",
+      render: (f) => {
+        const href = safeHref(f.filing_url);
+        return href ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: "var(--fg-3)" }}>↗</a> : null;
+      },
+    },
+  ];
+
+  return (
+    <div>
+      {kpis.length > 0 && (
+        <div className="kpi-strip">
+          {kpis.map((k) => (
+            <KpiTile key={k.label} label={k.label} value={k.value} fmt={k.fmt} qoq={k.qoq} yoy={k.yoy} />
+          ))}
+        </div>
+      )}
+      <div className="section">
+        <div className="section-title">Recent Filings</div>
+        {loadingFilings ? (
+          <div className="skeleton-block">
+            <div className="skeleton" style={{ height: 36, borderRadius: 4 }} />
+            {[0,1,2,3,4].map((i) => <div key={i} className="skeleton" style={{ height: 32, borderRadius: 4, opacity: 0.7 - i * 0.1 }} />)}
+          </div>
+        ) : (
+          <DataTable
+            columns={filCols} rows={recentFilings} rowKey={(f) => f.accession_number}
+            initialSort={{ key: "filed", dir: "desc" }} empty="No filings."
+          />
+        )}
       </div>
     </div>
   );
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
+// ─── Fundamentals tab ─────────────────────────────────────────────────────────
 
-export default function Page() {
-  const [filings, setFilings]         = useState<Filing[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [view, setView]               = useState<View>("home");
-  const [activeCik, setActiveCik]     = useState<string | null>(null);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+function FundamentalsTab({ facts, loading }: { facts: FinancialFact[]; loading: boolean }) {
+  const [periodType, setPeriodType] = useState<PeriodType>("quarterly");
+  const [stmt, setStmt]             = useState<StatementKind>("income");
 
-  useEffect(() => {
-    const watchlistCiks = CORE_WATCHLIST.map((c) => c.cik);
-    const watchlistCikSet = new Set(watchlistCiks);
-    const since = new Date();
-    since.setDate(1);        // first day of the current calendar month
-    since.setHours(0, 0, 0, 0);
+  const matrix = useMemo(() => facts.length ? pivotStatement(facts, stmt, periodType) : null, [facts, stmt, periodType]);
+  const kpis   = useMemo(() => deriveKpis(facts, periodType), [facts, periodType]);
+  const lag    = periodType === "quarterly" ? 4 : 1;
 
-    supabase
-      .from("filings")
-      .select("id,accession_number,cik,ticker,company_name,form_type,filed_at,filing_url,friday_dump,signals_flagged,period_of_report")
-      .in("cik", watchlistCiks)
-      .gte("filed_at", since.toISOString())
-      .order("filed_at", { ascending: false })
-      .limit(300)
-      .then(({ data }) => {
-        if (data) setFilings(data as Filing[]);
-        setLoading(false);
-      });
+  // Income series
+  const rev  = useMemo(() => seriesFor(facts, "income", periodType, METRICS.revenue),        [facts, periodType]);
+  const gp   = useMemo(() => seriesFor(facts, "income", periodType, METRICS.grossProfit),     [facts, periodType]);
+  const oi   = useMemo(() => seriesFor(facts, "income", periodType, METRICS.operatingIncome), [facts, periodType]);
+  const ni   = useMemo(() => seriesFor(facts, "income", periodType, METRICS.netIncome),       [facts, periodType]);
+  const eps  = useMemo(() => seriesFor(facts, "income", periodType, METRICS.epsDiluted),      [facts, periodType]);
+  const rd   = useMemo(() => seriesFor(facts, "income", periodType, METRICS.rAndD),           [facts, periodType]);
+  const sga  = useMemo(() => seriesFor(facts, "income", periodType, METRICS.sgAndA),          [facts, periodType]);
 
-    const channel = supabase
-      .channel("filings_live")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "filings" },
-        (payload) => {
-          const f = payload.new as Filing;
-          if (!watchlistCikSet.has(f.cik)) return;
-          setFilings((prev) => {
-            const next = [f, ...prev];
-            return next.length > 200 ? next.slice(0, 200) : next;
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "filings" },
-        (payload) => setFilings((prev) =>
-          prev.map((f) => f.id === (payload.new as Filing).id ? (payload.new as Filing) : f),
-        ),
-      )
-      .on(
-        "postgres_changes",
-        { event: "DELETE", schema: "public", table: "filings" },
-        (payload) => setFilings((prev) =>
-          prev.filter((f) => f.id !== (payload.old as { id: string }).id),
-        ),
-      )
-      .subscribe();
+  // Balance sheet series
+  const cash    = useMemo(() => seriesFor(facts, "balance", periodType, METRICS.cash),         [facts, periodType]);
+  const debt    = useMemo(() => seriesFor(facts, "balance", periodType, METRICS.longTermDebt),  [facts, periodType]);
+  const assets  = useMemo(() => seriesFor(facts, "balance", periodType, METRICS.totalAssets),   [facts, periodType]);
+  const equity  = useMemo(() => seriesFor(facts, "balance", periodType, METRICS.equity),        [facts, periodType]);
 
-    return () => { supabase.removeChannel(channel); };
-  }, []);
+  // Cash-flow series
+  const ocf   = useMemo(() => seriesFor(facts, "cashflow", periodType, METRICS.operatingCF),  [facts, periodType]);
+  const capex = useMemo(() => seriesFor(facts, "cashflow", periodType, METRICS.capex),         [facts, periodType]);
 
-  useEffect(() => {
-    const read = () => {
-      const h = window.location.hash.slice(1);
-      if (h.startsWith("c=")) {
-        setActiveCik(h.slice(2));
-        setView((prev) => (prev === "home" ? "feed" : prev));
-      } else if (h === "feed" || h === "company" || h === "flagged") {
-        setActiveCik(null);
-        setView(h);
-      } else {
-        setActiveCik(null);
-        setView("home");
+  const pt = (p: string) => fmtPeriodLabel(p, periodType);
+
+  // Chart data
+  const revData = useMemo(() => {
+    const yoy = yoyGrowth(rev, lag);
+    return rev.map((p, i) => ({ x: pt(p.period), rev: p.value, yoy: yoy[i] }));
+  }, [rev, lag, periodType]);
+
+  // Align income series by period using rev as anchor
+  const incomeData = useMemo(() => {
+    const byPeriod = new Map<string, Record<string, number | null>>();
+    const add = (arr: typeof rev, key: string) => {
+      for (const p of arr) {
+        const row = byPeriod.get(p.period) ?? {};
+        row[key] = p.value;
+        byPeriod.set(p.period, row);
       }
     };
-    read();
-    window.addEventListener("hashchange", read);
-    return () => window.removeEventListener("hashchange", read);
-  }, []);
+    add(oi, "Operating Income");
+    add(ni, "Net Income");
+    return Array.from(byPeriod.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([period, vals]) => ({ x: pt(period), ...vals }));
+  }, [oi, ni, periodType]);
 
-  function navigate(hash: string) {
-    window.location.hash = hash;
-  }
+  const marginData = useMemo(() => {
+    const byPeriod = new Map<string, Record<string, number | null>>();
+    const revMap = new Map(rev.map((p) => [p.period, p.value]));
+    const add = (arr: typeof rev, key: string, divisor?: Map<string, number>) => {
+      for (const p of arr) {
+        const d = (divisor ?? revMap).get(p.period);
+        if (!d) continue;
+        const row = byPeriod.get(p.period) ?? {};
+        row[key] = (p.value / d) * 100;
+        byPeriod.set(p.period, row);
+      }
+    };
+    add(gp, "Gross %");
+    add(oi, "Op %");
+    add(ni, "Net %");
+    return Array.from(byPeriod.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([period, vals]) => ({ x: pt(period), ...vals }))
+      .filter((d) => Object.values(d).some((v) => typeof v === "number" && v !== null));
+  }, [rev, gp, oi, ni, periodType]);
 
-  // Keyboard shortcuts: f=Feed, c=Companies, l=Flagged, Esc=close mobile menu
-  useEffect(() => {
-    function handleKey(e: KeyboardEvent) {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === "f") navigate("feed");
-      else if (e.key === "c") navigate("company");
-      else if (e.key === "l") navigate("flagged");
-      else if (e.key === "Escape") setMobileMenuOpen(false);
-    }
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, []);
+  const epsData     = useMemo(() => eps.map((p) => ({ x: pt(p.period), EPS: p.value })),         [eps, periodType]);
+  const cashDebt    = useMemo(() => cash.map((p, i) => ({ x: pt(p.period), Cash: p.value, Debt: debt[i]?.value ?? 0 })), [cash, debt, periodType]);
+  const assetEqData = useMemo(() => assets.map((p, i) => ({ x: pt(p.period), Assets: p.value, Equity: equity[i]?.value ?? 0 })), [assets, equity, periodType]);
+  const expData     = useMemo(() => {
+    const byPeriod = new Map<string, Record<string, number | null>>();
+    const add = (arr: typeof rd, key: string) => {
+      for (const p of arr) { const row = byPeriod.get(p.period) ?? {}; row[key] = p.value; byPeriod.set(p.period, row); }
+    };
+    add(rd, "R&D"); add(sga, "SG&A");
+    return Array.from(byPeriod.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([period, v]) => ({ x: pt(period), ...v }));
+  }, [rd, sga, periodType]);
 
-  const tabCounts = useMemo(() => ({
-    feed: filings.length,
-    company: new Set(filings.map((f) => f.cik)).size,
-    flagged: filings.filter((f) => f.signals_flagged || f.friday_dump).length,
-  }), [filings]);
+  const fcfData = useMemo(() => {
+    const m = new Map<string, { o: number; c: number }>();
+    for (const p of ocf)   { m.set(p.period, { o: p.value, c: 0 }); }
+    for (const p of capex) { const e = m.get(p.period); if (e) e.c = Math.abs(p.value); }
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([period, { o, c }]) => ({ x: pt(period), FCF: o - c }));
+  }, [ocf, capex, periodType]);
 
-  if (view === "home") {
-    return <HomeView filings={filings} onNavigate={navigate} />;
-  }
+  const cfData = useMemo(() => {
+    const m = new Map<string, Record<string, number | null>>();
+    const add = (arr: typeof ocf, key: string) => {
+      for (const p of arr) { const row = m.get(p.period) ?? {}; row[key] = p.value; m.set(p.period, row); }
+    };
+    add(ocf, "Operating"); add(capex, "CapEx");
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([period, v]) => ({ x: pt(period), ...v }));
+  }, [ocf, capex, periodType]);
 
-  const dashView = view as Exclude<View, "home">;
+  // Additional series — per-share and working capital
+  const shares    = useMemo(() => seriesFor(facts, "income",  periodType, METRICS.sharesOutstanding),     [facts, periodType]);
+  const curAssets = useMemo(() => seriesFor(facts, "balance", periodType, METRICS.currentAssets),         [facts, periodType]);
+  const curLiab   = useMemo(() => seriesFor(facts, "balance", periodType, METRICS.currentLiabilities),    [facts, periodType]);
 
-  const mainContent = activeCik ? (
-    <CompanyFilingsView
-      cik={activeCik}
-      filings={filings}
-      onBack={() => navigate(dashView === "feed" || dashView === "flagged" ? dashView : "company")}
-    />
-  ) : (
-    <>
-      <FilingsTabs active={dashView} onNavigate={navigate} counts={tabCounts} />
-      {dashView === "company" ? (
-        <CompanyListView filings={filings} onCompanyClick={(cik) => navigate(`c=${cik}`)} />
-      ) : dashView === "flagged" ? (
-        <FlaggedView filings={filings} onCompanyClick={(cik) => navigate(`c=${cik}`)} />
-      ) : (
-        <FeedView filings={filings} loading={loading} onCompanyClick={(cik) => navigate(`c=${cik}`)} />
-      )}
-    </>
+  const sharesData = useMemo(() =>
+    shares.map((p) => ({ x: pt(p.period), Shares: p.value })),
+  [shares, periodType]);
+
+  const workCapData = useMemo(() => {
+    const m = new Map<string, { a: number; l: number }>();
+    for (const p of curAssets) m.set(p.period, { a: p.value, l: 0 });
+    for (const p of curLiab)  { const e = m.get(p.period); if (e) e.l = p.value; }
+    return Array.from(m.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([period, { a, l }]) => ({ x: pt(period), "Working Capital": a - l }))
+      .filter((d) => d["Working Capital"] !== 0);
+  }, [curAssets, curLiab, periodType]);
+
+  const stmtLabels: { key: StatementKind; label: string }[] = [
+    { key: "income",   label: "Income" },
+    { key: "balance",  label: "Balance Sheet" },
+    { key: "cashflow", label: "Cash Flow" },
+  ];
+
+  if (loading) return <LoadingFundamentals />;
+  if (!facts.length) return (
+    <div className="empty-note">
+      <strong>No financial data yet.</strong><br />
+      Run <code>python main.py</code> in the backend to populate XBRL fundamentals.
+    </div>
   );
 
   return (
-    <>
-      {/* Mobile header — CSS-hidden on desktop, sticky bar on mobile */}
-      <div className="mobile-header">
-        <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: "0.24em", color: "var(--fg-0)" }}>SUMMA</div>
-        <span className="live-badge">
-          <span className="pulse-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--accent)", display: "inline-block" }} />
-          LIVE
-        </span>
-        <button
-          onClick={() => setMobileMenuOpen((o) => !o)}
-          style={{
-            background: "none", border: "1px solid var(--border-1)", borderRadius: 6,
-            padding: "6px 12px", cursor: "pointer", color: "var(--fg-2)",
-            fontFamily: "inherit", fontSize: 18, lineHeight: 1,
-          }}
-          aria-label="Toggle menu"
-        >
-          ☰
-        </button>
-      </div>
+    <div>
+      {kpis.length > 0 && (
+        <div className="kpi-strip">
+          {kpis.map((k) => <KpiTile key={k.label} label={k.label} value={k.value} fmt={k.fmt} qoq={k.qoq} yoy={k.yoy} />)}
+        </div>
+      )}
 
-      {/* Overlay — closes drawer when tapped */}
-      <div
-        className={`mobile-overlay${mobileMenuOpen ? " active" : ""}`}
-        onClick={() => setMobileMenuOpen(false)}
-      />
-
-      <div className="app-shell">
-        <Sidebar
-          filings={filings}
-          activeView={dashView}
-          activeCik={activeCik}
-          onNavigate={(h) => { navigate(h); setMobileMenuOpen(false); }}
-          mobileOpen={mobileMenuOpen}
-          onMobileClose={() => setMobileMenuOpen(false)}
-        />
-        <main className="main-area">
-          <div className="main-content">
-            {mainContent}
-          </div>
-        </main>
-      </div>
-
-      {/* Mobile bottom nav — CSS-hidden on desktop */}
-      <nav className="mobile-bottom-nav">
-        {([
-          { label: "Feed",      hash: "feed"    },
-          { label: "Companies", hash: "company" },
-          { label: "Flagged",   hash: "flagged" },
-        ] as const).map((item) => (
-          <button
-            key={item.hash}
-            onClick={() => navigate(item.hash)}
-            className={`mobile-nav-item${dashView === item.hash && !activeCik ? " active" : ""}`}
-          >
-            <span className="mobile-nav-dot">
-              {item.hash === "feed" ? "◈" : item.hash === "company" ? "◉" : "◎"}
-            </span>
-            {item.label}
+      <div className="toggle-row">
+        {(["quarterly", "annual"] as PeriodType[]).map((p) => (
+          <button key={p} className={`chip${periodType === p ? " active" : ""}`} onClick={() => setPeriodType(p)}>
+            {p === "quarterly" ? "Quarterly" : "Annual"}
           </button>
         ))}
-      </nav>
-    </>
+        <span className="chip-sep">|</span>
+        {stmtLabels.map((s) => (
+          <button key={s.key} className={`chip${stmt === s.key ? " active" : ""}`} onClick={() => setStmt(s.key)}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Statement table */}
+      {matrix && (
+        <div className="section">
+          <div className="dt-wrap">
+            <div className="dt-scroll" style={{ maxHeight: 400, overflowY: "auto" }}>
+              <table className="dt">
+                <thead>
+                  <tr>
+                    <th style={{ minWidth: 240, position: "sticky", left: 0, background: "var(--bg-1)", zIndex: 2 }}>Line Item</th>
+                    {matrix.periods.slice(0, 8).map((p) => (
+                      <th key={p} style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                        {fmtPeriodLabel(p, periodType)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {matrix.rows.map((row) => {
+                    const isHighlight = /^(total|net income|gross profit|operating income|revenue|earnings per)/i.test(row.label);
+                    return (
+                      <tr key={row.concept} style={isHighlight ? { fontWeight: 600 } : undefined}>
+                        <td style={{
+                          color: isHighlight ? "var(--fg-0)" : "var(--fg-1)",
+                          position: "sticky", left: 0,
+                          background: isHighlight ? "var(--bg-2)" : "var(--bg-1)",
+                          paddingLeft: 12,
+                        }}>
+                          {row.label}
+                        </td>
+                        {row.values.slice(0, 8).map((v, i) => (
+                          <td key={i} className="dt-num"
+                            style={{ color: v != null ? (isHighlight ? "var(--fg-0)" : "var(--fg-1)") : "var(--fg-4)" }}>
+                            {v != null ? fmtStatValue(v) : "—"}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Income charts */}
+      <div className="section">
+        <div className="section-title">Income</div>
+        <div className="chart-grid">
+          {revData.length > 1 && (
+            <ComboChart data={revData} barKey="rev" lineKey="yoy" barName="Revenue" lineName="YoY %" title="Revenue & YoY Growth" />
+          )}
+          {incomeData.length > 1 && oi.length > 1 && (
+            <PairedBarChart data={incomeData} keyA="Operating Income" keyB="Net Income" nameA="Op. Income" nameB="Net Income" title="Operating & Net Income" />
+          )}
+          {marginData.length > 1 && (
+            <MultiLineChart
+              data={marginData}
+              lines={[
+                ...(gp.length > 1 ? [{ key: "Gross %", name: "Gross Margin" }] : []),
+                ...(oi.length > 1 ? [{ key: "Op %",    name: "Op. Margin"   }] : []),
+                ...(ni.length > 1 ? [{ key: "Net %",   name: "Net Margin"   }] : []),
+              ]}
+              title="Margin Trends"
+            />
+          )}
+          {epsData.length > 1 && (
+            <SimpleBarChart data={epsData} barKey="EPS" title="Diluted EPS" signed />
+          )}
+          {expData.length > 1 && (rd.length > 1 || sga.length > 1) && (
+            <StackedBarChart
+              data={expData}
+              keys={[
+                ...(rd.length  > 1 ? [{ key: "R&D",   name: "R&D"   }] : []),
+                ...(sga.length > 1 ? [{ key: "SG&A",  name: "SG&A"  }] : []),
+              ]}
+              title="Operating Expenses"
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Balance sheet charts */}
+      {(cashDebt.length > 1 || assetEqData.length > 1 || workCapData.length > 1 || sharesData.length > 1) && (
+        <div className="section">
+          <div className="section-title">Balance Sheet & Per-Share</div>
+          <div className="chart-grid">
+            {cashDebt.length > 1 && (
+              <PairedBarChart data={cashDebt} keyA="Cash" keyB="Debt" nameA="Cash" nameB="L/T Debt" title="Cash vs Long-Term Debt" />
+            )}
+            {assetEqData.length > 1 && (
+              <PairedBarChart data={assetEqData} keyA="Assets" keyB="Equity" nameA="Total Assets" nameB="Equity" title="Assets & Stockholders' Equity" />
+            )}
+            {workCapData.length > 1 && (
+              <SimpleBarChart data={workCapData} barKey="Working Capital" title="Working Capital (Current Assets − Current Liabilities)" signed />
+            )}
+            {sharesData.length > 1 && (
+              <SimpleBarChart data={sharesData} barKey="Shares" title="Diluted Shares Outstanding" />
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Cash flow charts */}
+      {(fcfData.length > 1 || cfData.length > 1) && (
+        <div className="section">
+          <div className="section-title">Cash Flow</div>
+          <div className="chart-grid">
+            {fcfData.length > 1 && (
+              <SimpleBarChart data={fcfData} barKey="FCF" title="Free Cash Flow" signed />
+            )}
+            {cfData.length > 1 && (
+              <PairedBarChart data={cfData} keyA="Operating" keyB="CapEx" nameA="Operating CF" nameB="CapEx" title="Operating CF vs CapEx" />
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Ownership tab ────────────────────────────────────────────────────────────
+
+function OwnershipTab({ cik }: { cik: string }) {
+  const [insider,    setInsider]    = useState<InsiderTransaction[]>([]);
+  const [holdings,   setHoldings]   = useState<InstitutionalHolding[]>([]);
+  const [beneficial, setBeneficial] = useState<BeneficialOwnership[]>([]);
+  const [proposed,   setProposed]   = useState<ProposedSale[]>([]);
+  const [loading,    setLoading]    = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    Promise.all([
+      fetchInsiderTransactions(cik),
+      fetchInstitutionalHoldings(cik),
+      fetchBeneficialOwnership(cik),
+      fetchProposedSales(cik),
+    ]).then(([ins, hld, ben, prop]) => {
+      setInsider(ins); setHoldings(hld); setBeneficial(ben); setProposed(prop);
+      setLoading(false);
+    });
+  }, [cik]);
+
+  // ── Insider charts ─────────────────────────────────────────────────────────
+
+  // Net share flow by month (diverging bar)
+  const netFlowData = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const tx of insider) {
+      if (!tx.transaction_date) continue;
+      const d = new Date(tx.transaction_date);
+      if (Number.isNaN(d.getTime())) continue;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      const sign = tx.acquired_disposed === "D" ? -1 : 1;
+      m.set(key, (m.get(key) ?? 0) + (tx.shares ?? 0) * sign);
+    }
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([x, net]) => ({ x, net }));
+  }, [insider]);
+
+  // Cumulative net shares over time
+  const cumulativeData = useMemo(() => {
+    let cum = 0;
+    return netFlowData.map(({ x, net }) => { cum += net; return { x, cumulative: cum }; });
+  }, [netFlowData]);
+
+  // Buy vs sell dollar volume by quarter
+  const buySellData = useMemo(() => {
+    const m = new Map<string, { Buy: number; Sell: number }>();
+    for (const tx of insider) {
+      if (!tx.transaction_date || !tx.value) continue;
+      const d = new Date(tx.transaction_date);
+      if (Number.isNaN(d.getTime())) continue;
+      const q = Math.floor(d.getMonth() / 3) + 1;
+      const key = `${d.getFullYear()} Q${q}`;
+      const row = m.get(key) ?? { Buy: 0, Sell: 0 };
+      if (tx.acquired_disposed === "A") row.Buy  += Math.abs(tx.value);
+      else                               row.Sell += Math.abs(tx.value);
+      m.set(key, row);
+    }
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([x, v]) => ({ x, ...v }));
+  }, [insider]);
+
+  // Top insiders by total value bought or sold
+  const topInsiderData = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const tx of insider) {
+      if (!tx.filer_name || !tx.value) continue;
+      const name = tx.filer_name;
+      m.set(name, (m.get(name) ?? 0) + Math.abs(tx.value));
+    }
+    return Array.from(m.entries())
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 10)
+      .map(([name, value]) => ({ label: name, value }));
+  }, [insider]);
+
+  // ── Institutional charts ───────────────────────────────────────────────────
+
+  // Top holders by value (latest period)
+  const topHoldersData = useMemo(() => {
+    const periods = Array.from(new Set(holdings.map((h) => h.period_of_report))).sort();
+    const latest = periods[periods.length - 1];
+    if (!latest) return [];
+    return holdings
+      .filter((h) => h.period_of_report === latest)
+      .sort((a, b) => (b.value ?? 0) - (a.value ?? 0))
+      .slice(0, 12)
+      .map((h) => ({
+        label: h.manager_name.replace(/ (?:GROUP|CORP|CORPORATION|LLC|LLP|INC|LTD|ADVISORS|MANAGEMENT)\.?$/i, ""),
+        value: h.value ?? 0,
+      }));
+  }, [holdings]);
+
+  // Count of managers holding stock per quarter
+  const managerCountData = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const h of holdings) m.set(h.period_of_report, (m.get(h.period_of_report) ?? 0) + 1);
+    return Array.from(m.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([period, count]) => ({ x: fmtDate(period), Managers: count }));
+  }, [holdings]);
+
+  // QoQ holdings change (latest two periods)
+  const qoqDiff = useMemo(() => {
+    const periods = Array.from(new Set(holdings.map((h) => h.period_of_report))).sort();
+    if (periods.length < 2) return [];
+    const latest = periods[periods.length - 1];
+    const prior  = periods[periods.length - 2];
+    const lMap = new Map(holdings.filter((h) => h.period_of_report === latest).map((h) => [h.manager_name, h]));
+    const pMap = new Map(holdings.filter((h) => h.period_of_report === prior).map((h) => [h.manager_name, h]));
+    const all = new Set([...lMap.keys(), ...pMap.keys()]);
+    return Array.from(all).map((mgr) => {
+      const cur  = lMap.get(mgr);
+      const prev = pMap.get(mgr);
+      const curShares  = cur?.shares  ?? 0;
+      const prevShares = prev?.shares ?? 0;
+      const delta = curShares - prevShares;
+      const action = !prev ? "New" : !cur ? "Exited" : delta > 0 ? "Increased" : delta < 0 ? "Decreased" : "Unchanged";
+      return { manager: mgr, action, shares: curShares, delta, value: cur?.value ?? prev?.value ?? 0 };
+    }).filter((r) => r.action !== "Unchanged")
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  }, [holdings]);
+
+  // ── Column definitions ─────────────────────────────────────────────────────
+
+  const insiderCols: Column<InsiderTransaction>[] = [
+    { key: "date",  header: "Date",   value: (t) => t.transaction_date ?? "", render: (t) => <span className="muted">{fmtDate(t.transaction_date)}</span> },
+    { key: "name",  header: "Insider", value: (t) => t.filer_name ?? "" },
+    { key: "title", header: "Title",  value: (t) => t.filer_title ?? "", render: (t) => <span className="muted">{t.filer_title ?? "—"}</span> },
+    {
+      key: "type", header: "Code", width: "60px",
+      value: (t) => t.transaction_code ?? t.acquired_disposed ?? "",
+      render: (t) => (
+        <span className={`badge badge-${t.acquired_disposed === "A" ? "buy" : "sell"}`}>
+          {t.transaction_code ?? (t.acquired_disposed === "A" ? "BUY" : "SELL")}
+        </span>
+      ),
+    },
+    { key: "shares", header: "Shares", align: "right", value: (t) => t.shares ?? 0, render: (t) => <span className="dt-num">{fmtNum(t.shares, 0)}</span> },
+    { key: "price",  header: "Price",  align: "right", value: (t) => t.price  ?? 0, render: (t) => <span className="dt-num">{fmtUSD(t.price)}</span> },
+    { key: "value",  header: "Value",  align: "right", value: (t) => t.value  ?? 0, render: (t) => <span className="dt-num">{fmtUSD(t.value)}</span> },
+    { key: "after",  header: "Shares After", align: "right", value: (t) => t.shares_after ?? 0, render: (t) => <span className="dt-num dimmed">{fmtNum(t.shares_after, 0)}</span> },
+  ];
+
+  const holdingsCols: Column<InstitutionalHolding>[] = [
+    { key: "manager", header: "Manager",   value: (h) => h.manager_name },
+    { key: "period",  header: "Period",    value: (h) => h.period_of_report, render: (h) => <span className="muted">{fmtDate(h.period_of_report)}</span> },
+    { key: "shares",  header: "Shares",    align: "right", value: (h) => h.shares ?? 0, render: (h) => <span className="dt-num">{fmtNum(h.shares, 0)}</span> },
+    { key: "value",   header: "Value",     align: "right", value: (h) => h.value  ?? 0, render: (h) => <span className="dt-num">{fmtUSD(h.value)}</span> },
+    { key: "pct",     header: "% of Fund", align: "right", value: (h) => h.pct_of_portfolio ?? 0, render: (h) => <span className="dt-num">{fmtPct(h.pct_of_portfolio)}</span> },
+  ];
+
+  type QoQRow = { manager: string; action: string; shares: number; delta: number; value: number };
+  const qoqCols: Column<QoQRow>[] = [
+    { key: "manager", header: "Manager", value: (r) => r.manager },
+    {
+      key: "action", header: "Action", width: "80px",
+      value: (r) => r.action,
+      render: (r) => {
+        const c = r.action === "New" ? "var(--pos)" : r.action === "Exited" ? "var(--neg)" :
+                  r.action === "Increased" ? "var(--pos)" : "var(--neg)";
+        return <span style={{ color: c, fontWeight: 600, fontSize: 11 }}>{r.action}</span>;
+      },
+    },
+    { key: "delta",  header: "Δ Shares", align: "right", value: (r) => r.delta,  render: (r) => <span className={`dt-num ${r.delta >= 0 ? "pos" : "neg"}`}>{r.delta >= 0 ? "+" : ""}{fmtNum(r.delta, 0)}</span> },
+    { key: "shares", header: "Shares",   align: "right", value: (r) => r.shares, render: (r) => <span className="dt-num">{fmtNum(r.shares, 0)}</span> },
+    { key: "value",  header: "Value",    align: "right", value: (r) => r.value,  render: (r) => <span className="dt-num">{fmtUSD(r.value)}</span> },
+  ];
+
+  const beneficialCols: Column<BeneficialOwnership>[] = [
+    { key: "filer",    header: "Filer",    value: (b) => b.filer_name ?? "" },
+    { key: "schedule", header: "Schedule", value: (b) => b.schedule ?? "" },
+    { key: "activist", header: "Activist", value: (b) => b.is_activist ? "Yes" : "No", render: (b) => b.is_activist ? <span className="pos" style={{ fontWeight: 600 }}>Yes</span> : <span className="dimmed">No</span> },
+    { key: "pct",      header: "% Class",  align: "right", value: (b) => b.pct_of_class ?? 0, render: (b) => <span className="dt-num">{b.pct_of_class != null ? fmtPct(b.pct_of_class) : "—"}</span> },
+    { key: "filed",    header: "Filed",    value: (b) => b.filed_at ?? "", render: (b) => <span className="muted">{fmtDate(b.filed_at)}</span> },
+  ];
+
+  const proposedCols: Column<ProposedSale>[] = [
+    { key: "seller",  header: "Seller",       value: (p) => p.seller_name ?? "" },
+    { key: "rel",     header: "Relationship", value: (p) => p.relationship ?? "", render: (p) => <span className="muted">{p.relationship ?? "—"}</span> },
+    { key: "shares",  header: "Shares",       align: "right", value: (p) => p.shares ?? 0, render: (p) => <span className="dt-num">{fmtNum(p.shares, 0)}</span> },
+    { key: "value",   header: "Approx Value", align: "right", value: (p) => p.approx_value ?? 0, render: (p) => <span className="dt-num">{fmtUSD(p.approx_value)}</span> },
+    { key: "date",    header: "Approx Date",  value: (p) => p.approx_date ?? "", render: (p) => <span className="muted">{fmtDate(p.approx_date)}</span> },
+    { key: "filed",   header: "Filed",        value: (p) => p.filed_at ?? "", render: (p) => <span className="muted">{fmtDate(p.filed_at)}</span> },
+  ];
+
+  if (loading) return <LoadingOwnership />;
+
+  return (
+    <div>
+      {/* ── Insider Transactions ──────────────────────────────────────────── */}
+      <div className="section">
+        <div className="section-title">Insider Activity (Form 4)</div>
+        {insider.length === 0 ? <div className="empty-note">No insider transaction data yet.</div> : (
+          <>
+            <div className="chart-grid charts-below">
+              {netFlowData.length > 1 && (
+                <DivergingBarChart data={netFlowData} barKey="net" title="Net Shares Bought / Sold by Month" />
+              )}
+              {cumulativeData.length > 1 && (
+                <CumulativeLineChart data={cumulativeData} lineKey="cumulative" title="Cumulative Net Insider Shares" signed />
+              )}
+              {buySellData.length > 1 && (
+                <PairedBarChart data={buySellData} keyA="Buy" keyB="Sell" nameA="Bought ($)" nameB="Sold ($)" title="Buy vs Sell Dollar Volume by Quarter" />
+              )}
+              {topInsiderData.length > 0 && (
+                <HorizontalBarChart data={topInsiderData} barKey="value" labelKey="label" title="Top Insiders by Total Transaction Volume" />
+              )}
+            </div>
+            <DataTable columns={insiderCols} rows={insider}
+              rowKey={(t) => `${t.accession_number}|${t.transaction_date}|${t.transaction_code}|${t.shares}`}
+              initialSort={{ key: "date", dir: "desc" }}
+              filterable filterPlaceholder="Filter by insider or code…" maxHeight="320px"
+            />
+          </>
+        )}
+      </div>
+
+      {/* ── Institutional Holdings (13F) ──────────────────────────────────── */}
+      <div className="section">
+        <div className="section-title">Institutional Holdings (13F-HR)</div>
+        {holdings.length === 0 ? <div className="empty-note">No institutional holdings data yet.</div> : (
+          <>
+            <div className="chart-grid charts-below">
+              {topHoldersData.length > 0 && (
+                <HorizontalBarChart data={topHoldersData} barKey="value" labelKey="label" title="Top Holders by Position Value (Latest Quarter)" />
+              )}
+              {managerCountData.length > 1 && (
+                <SimpleBarChart data={managerCountData} barKey="Managers" title="Number of Major Institutions Holding Stock by Quarter" />
+              )}
+            </div>
+
+            {qoqDiff.length > 0 && (
+              <div className="section charts-below">
+                <div className="section-title">QoQ Change — Latest vs Prior Quarter</div>
+                <DataTable columns={qoqCols} rows={qoqDiff}
+                  rowKey={(r) => r.manager}
+                  initialSort={{ key: "delta", dir: "desc" }} maxHeight="260px" empty="No changes."
+                />
+              </div>
+            )}
+
+            <DataTable columns={holdingsCols} rows={holdings}
+              rowKey={(h) => `${h.manager_name}|${h.period_of_report}`}
+              initialSort={{ key: "value", dir: "desc" }}
+              filterable filterPlaceholder="Filter managers…" maxHeight="320px"
+            />
+          </>
+        )}
+      </div>
+
+      {/* ── Beneficial Ownership (SC 13D/13G) ────────────────────────────── */}
+      {beneficial.length > 0 && (
+        <div className="section">
+          <div className="section-title">Beneficial Ownership — Large Stakes (SC 13D / 13G)</div>
+          <DataTable columns={beneficialCols} rows={beneficial}
+            rowKey={(b) => b.accession_number}
+            initialSort={{ key: "filed", dir: "desc" }} maxHeight="240px" empty="None."
+          />
+        </div>
+      )}
+
+      {/* ── Proposed Sales (Form 144) ─────────────────────────────────────── */}
+      {proposed.length > 0 && (
+        <div className="section">
+          <div className="section-title">Proposed Insider Sales (Form 144)</div>
+          <DataTable columns={proposedCols} rows={proposed}
+            rowKey={(p) => p.accession_number}
+            initialSort={{ key: "filed", dir: "desc" }} maxHeight="200px" empty="None."
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Catalysts tab ────────────────────────────────────────────────────────────
+
+function EventClassBadge({ cls }: { cls: string | null }) {
+  const colors: Record<string, string> = {
+    "M&A": "#7aa2f7", dilution: "#f5a623", restatement: "#f05252",
+    exec_change: "#bb9af7", earnings: "#4fd4c2", capital_return: "#3fb950",
+    cyber: "#f05252", other: "var(--fg-4)",
+  };
+  const c = colors[cls ?? "other"] ?? "var(--fg-4)";
+  return (
+    <span style={{ color: c, fontSize: 10, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+      {cls ?? "other"}
+    </span>
+  );
+}
+
+function GuidanceBadge({ action }: { action: string }) {
+  const c = action === "raised" ? "var(--pos)" : action === "lowered" ? "var(--neg)" : action === "withdrawn" ? "var(--warn)" : "var(--fg-2)";
+  return <span style={{ color: c, fontWeight: 600 }}>{action}</span>;
+}
+
+function CatalystsTab({ cik }: { cik: string }) {
+  const [events, setEvents]     = useState<CorporateEvent[]>([]);
+  const [earnings, setEarnings] = useState<EarningsEvent[]>([]);
+  const [lateF, setLateF]       = useState<LateFiling[]>([]);
+  const [offers, setOffers]     = useState<SecuritiesOffering[]>([]);
+  const [loading, setLoading]   = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    Promise.all([
+      fetchCorporateEvents(cik), fetchEarningsEvents(cik),
+      fetchLateFilings(cik), fetchSecuritiesOfferings(cik),
+    ]).then(([ev, ea, la, of]) => {
+      setEvents(ev); setEarnings(ea); setLateF(la); setOffers(of);
+      setLoading(false);
+    });
+  }, [cik]);
+
+  // ── Chart data ─────────────────────────────────────────────────────────────
+
+  // Event frequency by quarter, stacked by class
+  const eventFreqData = useMemo(() => {
+    const m = new Map<string, Record<string, number>>();
+    for (const e of events) {
+      if (!e.event_date) continue;
+      const d = new Date(e.event_date);
+      if (Number.isNaN(d.getTime())) continue;
+      const q = Math.floor(d.getMonth() / 3) + 1;
+      const key = `${d.getFullYear()} Q${q}`;
+      const row = m.get(key) ?? {};
+      const cls = e.event_class ?? "other";
+      row[cls] = (row[cls] ?? 0) + 1;
+      m.set(key, row);
+    }
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([x, v]) => ({ x, ...v }));
+  }, [events]);
+
+  const eventClasses = useMemo(() => {
+    const s = new Set(events.map((e) => e.event_class ?? "other"));
+    return Array.from(s);
+  }, [events]);
+
+  // Event count by class (bar — which categories dominate)
+  const classSummaryData = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of events) m.set(e.event_class ?? "other", (m.get(e.event_class ?? "other") ?? 0) + 1);
+    return Array.from(m.entries())
+      .sort(([, a], [, b]) => b - a)
+      .map(([label, count]) => ({ label, count }));
+  }, [events]);
+
+  // Offerings amount over time (bar)
+  const offeringsData = useMemo(() =>
+    offers
+      .filter((o) => o.filed_at && o.amount)
+      .sort((a, b) => (a.filed_at ?? "").localeCompare(b.filed_at ?? ""))
+      .map((o) => ({ x: fmtDate(o.filed_at), Amount: o.amount! })),
+  [offers]);
+
+  // ── Column definitions ─────────────────────────────────────────────────────
+
+  const eventCols: Column<CorporateEvent>[] = [
+    { key: "date",    header: "Date",    value: (e) => e.event_date ?? "", render: (e) => <span className="muted">{fmtDate(e.event_date)}</span> },
+    { key: "item",    header: "Item",    width: "65px", value: (e) => e.item_code ?? "", render: (e) => <strong>{e.item_code}</strong> },
+    { key: "class",   header: "Class",   width: "90px", value: (e) => e.event_class ?? "", render: (e) => <EventClassBadge cls={e.event_class} /> },
+    { key: "summary", header: "Summary", value: (e) => e.summary ?? "", render: (e) => <span className="muted" style={{ maxWidth: 320, display: "block", overflow: "hidden", textOverflow: "ellipsis" }}>{e.summary ?? "—"}</span> },
+    { key: "filed",   header: "Filed",   value: (e) => e.filed_at ?? "", render: (e) => <span className="dimmed">{fmtDate(e.filed_at)}</span> },
+  ];
+
+  const earnCols: Column<EarningsEvent>[] = [
+    { key: "date",    header: "Date",     value: (e) => e.reported_date ?? "", render: (e) => <span className="muted">{fmtDate(e.reported_date)}</span> },
+    { key: "period",  header: "Period",   value: (e) => e.period ?? "", render: (e) => <span className="muted">{fmtDate(e.period)}</span> },
+    { key: "rev",     header: "Revenue",  align: "right", value: (e) => e.revenue ?? 0, render: (e) => <span className="dt-num">{fmtUSD(e.revenue)}</span> },
+    { key: "eps",     header: "EPS",      align: "right", value: (e) => e.diluted_eps ?? 0, render: (e) => <span className="dt-num">{fmtNum(e.diluted_eps)}</span> },
+    { key: "guidance",header: "Guidance", value: (e) => e.guidance_action ?? "", render: (e) => e.guidance_action ? <GuidanceBadge action={e.guidance_action} /> : <span className="muted">—</span> },
+  ];
+
+  const lateCols: Column<LateFiling>[] = [
+    { key: "filed",   header: "Filed",   value: (l) => l.filed_at ?? "",   render: (l) => <span className="muted">{fmtDate(l.filed_at)}</span> },
+    { key: "form",    header: "NT Form", value: (l) => l.nt_form ?? "" },
+    { key: "subject", header: "Subject", value: (l) => l.subject_form ?? "" },
+    { key: "period",  header: "Period",  value: (l) => l.period ?? "",     render: (l) => <span className="muted">{fmtDate(l.period)}</span> },
+    { key: "reason",  header: "Reason",  value: (l) => l.reason_excerpt ?? "", render: (l) => <span className="muted" style={{ maxWidth: 300, display: "block", overflow: "hidden", textOverflow: "ellipsis" }}>{l.reason_excerpt ?? "—"}</span> },
+  ];
+
+  const offerCols: Column<SecuritiesOffering>[] = [
+    { key: "filed",  header: "Filed",       value: (o) => o.filed_at ?? "",       render: (o) => <span className="muted">{fmtDate(o.filed_at)}</span> },
+    { key: "form",   header: "Form",        value: (o) => o.form ?? "" },
+    { key: "type",   header: "Type",        value: (o) => o.offering_type ?? "",  render: (o) => <span className="muted">{o.offering_type ?? "—"}</span> },
+    { key: "amount", header: "Amount",      align: "right", value: (o) => o.amount ?? 0, render: (o) => <span className="dt-num">{fmtUSD(o.amount)}</span> },
+    { key: "shares", header: "Shares Sold", align: "right", value: (o) => o.shares ?? 0, render: (o) => <span className="dt-num">{fmtNum(o.shares, 0)}</span> },
+  ];
+
+  if (loading) return <LoadingCatalysts />;
+
+  const empty = events.length === 0 && earnings.length === 0 && lateF.length === 0 && offers.length === 0;
+  if (empty) return (
+    <div className="empty-note">
+      <strong>No catalyst data yet.</strong><br />
+      Run the backend pipeline — 8-K, NT, and offering data populate automatically.
+    </div>
+  );
+
+  return (
+    <div>
+      {/* Red flag: late filings first */}
+      {lateF.length > 0 && (
+        <div className="section">
+          <div className="section-title alert">Late Filing Notices (NT 10-K / NT 10-Q)</div>
+          <DataTable columns={lateCols} rows={lateF} rowKey={(l) => l.accession_number}
+            initialSort={{ key: "filed", dir: "desc" }} maxHeight="200px" empty="None." />
+        </div>
+      )}
+
+      {/* Corporate event charts */}
+      {events.length > 0 && (
+        <div className="section">
+          <div className="section-title">Corporate Events (8-K) — {events.length} total</div>
+          <div className="chart-grid charts-below">
+            {eventFreqData.length > 1 && (
+              <StackedBarChart
+                data={eventFreqData}
+                keys={eventClasses.map((cls) => ({ key: cls, name: cls }))}
+                title="Event Frequency by Quarter (8-K items)"
+              />
+            )}
+            {classSummaryData.length > 0 && (
+              <HorizontalBarChart
+                data={classSummaryData} barKey="count" labelKey="label"
+                title="Event Count by Class" unit="events"
+              />
+            )}
+          </div>
+          <DataTable columns={eventCols} rows={events}
+            rowKey={(e) => `${e.accession_number}|${e.item_code}`}
+            initialSort={{ key: "date", dir: "desc" }}
+            filterable filterPlaceholder="Filter by class or summary…" maxHeight="360px" empty="No events." />
+        </div>
+      )}
+
+      {/* Earnings events */}
+      {earnings.length > 0 && (
+        <div className="section">
+          <div className="section-title">Earnings Announcements (8-K Item 2.02)</div>
+          <DataTable columns={earnCols} rows={earnings} rowKey={(e) => e.accession_number}
+            initialSort={{ key: "date", dir: "desc" }} maxHeight="240px" empty="No earnings events." />
+        </div>
+      )}
+
+      {/* Securities offerings */}
+      {offers.length > 0 && (
+        <div className="section">
+          <div className="section-title">Securities Offerings (S-3 / 424B)</div>
+          {offeringsData.length > 1 && (
+            <div className="charts-below">
+              <SimpleBarChart data={offeringsData} barKey="Amount" title="Offering Amount Over Time" />
+            </div>
+          )}
+          <DataTable columns={offerCols} rows={offers} rowKey={(o) => o.accession_number}
+            initialSort={{ key: "filed", dir: "desc" }} maxHeight="240px" empty="No offerings." />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Filings tab ──────────────────────────────────────────────────────────────
+
+function FilingsTab({ cik }: { cik: string }) {
+  const [filings, setFilings] = useState<Filing[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    fetchFilingsForCik(cik, 50).then((d) => { setFilings(d); setLoading(false); });
+  }, [cik]);
+
+  const cols: Column<Filing>[] = [
+    { key: "form", header: "Form", width: "80px", value: (f) => f.form_type, render: (f) => <FormBadge form={f.form_type} /> },
+    { key: "period", header: "Period", value: (f) => f.period_of_report ?? "", render: (f) => <span className="muted">{fmtDate(f.period_of_report)}</span> },
+    { key: "filed", header: "Filed", value: (f) => f.filed_at ?? "", render: (f) => <span className="muted">{fmtDate(f.filed_at)}</span> },
+    {
+      key: "link", header: "", width: "30px", value: () => "",
+      render: (f) => {
+        const href = safeHref(f.filing_url);
+        return href ? <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: "var(--fg-4)" }}>↗</a> : null;
+      },
+    },
+  ];
+
+  if (loading) return (
+    <div className="skeleton-block">
+      <div className="skeleton" style={{ height: 36, borderRadius: 4 }} />
+      {[0,1,2,3,4,5,6].map((i) => <div key={i} className="skeleton" style={{ height: 32, borderRadius: 4, opacity: 0.8 - i * 0.08 }} />)}
+    </div>
+  );
+  if (!filings.length) return <div className="empty-note">No filings found.</div>;
+
+  return (
+    <DataTable
+      columns={cols} rows={filings} rowKey={(f) => f.accession_number}
+      initialSort={{ key: "filed", dir: "desc" }}
+      maxHeight="calc(100vh - 280px)" empty="No filings."
+    />
+  );
+}
+
+// ─── Root ─────────────────────────────────────────────────────────────────────
+
+export default function Page() {
+  const [view, setView]           = useState<MainView>("overview");
+  const [activeCik, setActiveCik] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<CompanyTab>("overview");
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [filings, setFilings]     = useState<Filing[]>([]);
+  const [sidebarQ, setSidebarQ]   = useState("");
+  const [loading, setLoading]     = useState(true);
+
+  // Hash routing
+  useEffect(() => {
+    function parse() {
+      const h = window.location.hash.replace(/^#/, "");
+      if (h === "feed") { setView("feed"); setActiveCik(null); return; }
+      const m = h.match(/^c=([^/]+)(?:\/(.*))?$/);
+      if (m) {
+        setView("company");
+        setActiveCik(m[1]);
+        setActiveTab((m[2] ?? "overview") as CompanyTab);
+        return;
+      }
+      setView("overview"); setActiveCik(null);
+    }
+    parse();
+    window.addEventListener("hashchange", parse);
+    return () => window.removeEventListener("hashchange", parse);
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    Promise.all([fetchCompanies(), fetchFilings(200)]).then(([cos, fils]) => {
+      setCompanies(cos);
+      setFilings(fils);
+      setLoading(false);
+    });
+  }, []);
+
+  // Realtime subscription
+  useEffect(() => subscribeFilings((f) => setFilings((p) => [f, ...p].slice(0, 200))), []);
+
+  const navigate = useCallback((hash: string) => { window.location.hash = hash; }, []);
+  const openCompany = useCallback((cik: string, tab: CompanyTab = "overview") => {
+    navigate(`c=${cik}${tab !== "overview" ? `/${tab}` : ""}`);
+  }, [navigate]);
+
+  if (loading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", color: "var(--fg-4)" }}>
+        Loading…
+      </div>
+    );
+  }
+
+  return (
+    <div className="app-shell">
+      <Sidebar
+        companies={companies} filings={filings}
+        activeCik={activeCik} view={view}
+        onCompany={(cik) => openCompany(cik)}
+        onOverview={() => navigate("overview")}
+        onFeed={() => navigate("feed")}
+        q={sidebarQ} setQ={setSidebarQ}
+      />
+      <main className="main-area">
+        <div key={view + activeCik + activeTab} className="page-content">
+          {view === "overview" && (
+            <OverviewPage companies={companies} filings={filings} onCompany={openCompany} />
+          )}
+          {view === "feed" && (
+            <FeedPage filings={filings} onCompany={openCompany} />
+          )}
+          {view === "company" && activeCik && (
+            <CompanyPage
+              cik={activeCik} tab={activeTab} companies={companies}
+              onTab={(tab) => openCompany(activeCik, tab)}
+            />
+          )}
+        </div>
+      </main>
+    </div>
   );
 }
