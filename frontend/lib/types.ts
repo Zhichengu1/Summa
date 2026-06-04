@@ -137,5 +137,37 @@ export type SecuritiesOffering = {
   filed_at: string | null;
 };
 
+export type DailyPrice = {
+  cik: string;
+  ticker: string | null;
+  date: string; // ISO date
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number | null;
+  volume: number | null;
+};
+
 export type StatementKind = "income" | "balance" | "cashflow";
 export type PeriodType = "annual" | "quarterly";
+
+// ─── Reference data (backend-populated; read once per session) ──────────────────
+export type CompanyProfileRow = {
+  cik: string;
+  sector: string | null;
+  industry: string | null;
+  thesis: string | null;
+};
+
+export type CompanyThemeRow = {
+  cik: string;
+  name: string;
+  note: string | null;
+  rank: number | null;
+};
+
+export type EntityRow = {
+  match_key: string;
+  kind: string | null;
+  note: string | null;
+};

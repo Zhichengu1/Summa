@@ -5,7 +5,8 @@ import type {
   Company, FinancialFact, Filing,
   InsiderTransaction, InstitutionalHolding,
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
-  BeneficialOwnership, ProposedSale,
+  BeneficialOwnership, ProposedSale, DailyPrice,
+  CompanyProfileRow, CompanyThemeRow, EntityRow,
 } from "./types";
 
 export async function fetchCompanies(): Promise<Company[]> {
@@ -72,6 +73,18 @@ export async function fetchInstitutionalHoldings(cik: string): Promise<Instituti
   return data as InstitutionalHolding[];
 }
 
+// Holdings where THIS company is the filing manager — i.e. the equity stakes it
+// owns in other companies (only populated if the company files Form 13F itself).
+export async function fetchManagerHoldings(managerCik: string): Promise<InstitutionalHolding[]> {
+  const { data, error } = await supabase
+    .from("institutional_holdings")
+    .select("cik, ticker, period_of_report, manager_name, manager_cik, accession_number, shares, value, pct_of_portfolio, filed_at")
+    .eq("manager_cik", managerCik)
+    .order("period_of_report", { ascending: false });
+  if (error || !data) return [];
+  return data as InstitutionalHolding[];
+}
+
 export async function fetchCorporateEvents(cik: string): Promise<CorporateEvent[]> {
   const { data, error } = await supabase
     .from("corporate_events")
@@ -132,6 +145,159 @@ export async function fetchProposedSales(cik: string): Promise<ProposedSale[]> {
     .order("filed_at", { ascending: false });
   if (error || !data) return [];
   return data as ProposedSale[];
+}
+
+// End-of-day prices for one company (ascending by date — derivePriceKpis expects that).
+export async function fetchPrices(cik: string, limit = 400): Promise<DailyPrice[]> {
+  const { data, error } = await supabase
+    .from("daily_prices")
+    .select("cik, ticker, date, open, high, low, close, volume")
+    .eq("cik", cik)
+    .order("date", { ascending: true })
+    .limit(limit);
+  if (error || !data) return [];
+  return data as DailyPrice[];
+}
+
+// Income-statement facts across several companies — powers the peer comparison.
+// Income statement only (keeps the payload small) so revenue/net-income/EPS series
+// can be derived client-side via fundamentals.ts for each peer.
+export async function fetchIncomeFactsForCiks(ciks: string[]): Promise<FinancialFact[]> {
+  if (!ciks.length) return [];
+  const { data, error } = await supabase
+    .from("financial_facts")
+    .select("cik, ticker, statement, label, concept, standard_concept, period_end, period_type, fiscal_year, value, display_order")
+    .in("cik", ciks)
+    .eq("statement", "income")
+    .limit(20000);  // generous: ~income line-items × periods × watchlist size — avoids the default row cap
+  if (error || !data) return [];
+  return data as FinancialFact[];
+}
+
+// Recent closes for many companies at once — powers the Overview sparklines +
+// price columns. Scoped to `ciks`, limited to the trailing `sinceDays`.
+export async function fetchRecentPrices(ciks: string[], sinceDays = 90): Promise<DailyPrice[]> {
+  if (!ciks.length) return [];
+  const cutoff = new Date(Date.now() - sinceDays * 86_400_000).toISOString().slice(0, 10);
+  const { data, error } = await supabase
+    .from("daily_prices")
+    .select("cik, ticker, date, open, high, low, close, volume")
+    .in("cik", ciks)
+    .gte("date", cutoff)
+    .order("date", { ascending: true })
+    .limit(20000);  // ~trading days × watchlist size — avoids the default row cap truncating companies
+  if (error || !data) return [];
+  return data as DailyPrice[];
+}
+
+// ─── Cross-company (watchlist-wide) fetchers ────────────────────────────────────
+// Powering the Signal Scanner and Catalyst Calendar: the same recent slices the
+// per-cik fetchers above return, but spanning every watchlist company in one
+// round-trip. Pass `ciks` to scope to the personal watchlist (recommended);
+// omit it to span the whole warehouse. Ordered most-recent-first, modest limits.
+// `.in("cik", …)` is applied on the filter builder BEFORE order/limit so the
+// chain stays type-correct.
+
+export async function fetchRecentInsider(ciks?: string[], limit = 400): Promise<InsiderTransaction[]> {
+  let q = supabase
+    .from("insider_transactions")
+    .select("cik, ticker, accession_number, filer_name, filer_title, transaction_date, transaction_code, acquired_disposed, shares, price, value, shares_after, is_10b5_1, filing_url, filed_at");
+  if (ciks?.length) q = q.in("cik", ciks);
+  const { data, error } = await q.order("transaction_date", { ascending: false }).limit(limit);
+  if (error || !data) return [];
+  return data as InsiderTransaction[];
+}
+
+export async function fetchRecentEarnings(ciks?: string[], limit = 200): Promise<EarningsEvent[]> {
+  let q = supabase
+    .from("earnings_events")
+    .select("cik, ticker, accession_number, period, reported_date, revenue, diluted_eps, net_income, guidance_action, guidance_low, guidance_high, filed_at");
+  if (ciks?.length) q = q.in("cik", ciks);
+  const { data, error } = await q.order("reported_date", { ascending: false }).limit(limit);
+  if (error || !data) return [];
+  return data as EarningsEvent[];
+}
+
+export async function fetchRecentEvents(ciks?: string[], limit = 300): Promise<CorporateEvent[]> {
+  let q = supabase
+    .from("corporate_events")
+    .select("cik, ticker, accession_number, event_date, item_code, event_class, summary, filed_at");
+  if (ciks?.length) q = q.in("cik", ciks);
+  const { data, error } = await q.order("event_date", { ascending: false }).limit(limit);
+  if (error || !data) return [];
+  return data as CorporateEvent[];
+}
+
+export async function fetchRecentBeneficial(ciks?: string[], limit = 200): Promise<BeneficialOwnership[]> {
+  let q = supabase
+    .from("beneficial_ownership")
+    .select("cik, ticker, accession_number, filer_name, schedule, is_activist, pct_of_class, shares, purpose_excerpt, filed_at");
+  if (ciks?.length) q = q.in("cik", ciks);
+  const { data, error } = await q.order("filed_at", { ascending: false }).limit(limit);
+  if (error || !data) return [];
+  return data as BeneficialOwnership[];
+}
+
+export async function fetchRecentOfferings(ciks?: string[], limit = 200): Promise<SecuritiesOffering[]> {
+  let q = supabase
+    .from("securities_offerings")
+    .select("cik, ticker, accession_number, form, offering_type, amount, shares, filed_at");
+  if (ciks?.length) q = q.in("cik", ciks);
+  const { data, error } = await q.order("filed_at", { ascending: false }).limit(limit);
+  if (error || !data) return [];
+  return data as SecuritiesOffering[];
+}
+
+export async function fetchRecentLateFilings(ciks?: string[], limit = 200): Promise<LateFiling[]> {
+  let q = supabase
+    .from("late_filings")
+    .select("cik, ticker, accession_number, nt_form, subject_form, period, reason_excerpt, filed_at");
+  if (ciks?.length) q = q.in("cik", ciks);
+  const { data, error } = await q.order("filed_at", { ascending: false }).limit(limit);
+  if (error || !data) return [];
+  return data as LateFiling[];
+}
+
+// ─── Reference data ─────────────────────────────────────────────────────────
+// Small, slowly-changing context tables. Fetched once per session (see
+// taxonomy.ts / entities.ts caches) and matched client-side — never per row.
+// All three return [] on error so the embedded seeds remain the fallback.
+
+export async function fetchCompanyProfiles(): Promise<CompanyProfileRow[]> {
+  const { data, error } = await supabase
+    .from("company_profiles")
+    .select("cik, sector, industry, thesis");
+  if (error || !data) return [];
+  return data as CompanyProfileRow[];
+}
+
+export async function fetchCompanyThemes(): Promise<CompanyThemeRow[]> {
+  const { data, error } = await supabase
+    .from("company_themes")
+    .select("cik, name, note, rank")
+    .order("rank", { ascending: true });
+  if (error || !data) return [];
+  return data as CompanyThemeRow[];
+}
+
+export async function fetchEntities(): Promise<EntityRow[]> {
+  const { data, error } = await supabase
+    .from("entities")
+    .select("match_key, kind, note");
+  if (error || !data) return [];
+  return data as EntityRow[];
+}
+
+// Queue a company for backend ingestion (the one anon-writable table). Inserts a
+// 'queued' row; the next pipeline run picks it up. Duplicate inserts are benign.
+export async function queueWatchlist(c: { cik: string; ticker: string; name: string }): Promise<boolean> {
+  const { error } = await supabase
+    .from("watchlist")
+    .insert({ cik: c.cik, ticker: c.ticker, name: c.name, status: "queued" });
+  if (error && error.code !== "23505") {   // 23505 = already queued; treat as success
+    return false;
+  }
+  return true;
 }
 
 // Realtime: prepend newly-inserted filings to the live feed.

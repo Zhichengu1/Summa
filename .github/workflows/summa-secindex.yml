@@ -1,0 +1,44 @@
+name: summa-secindex
+
+# Refreshes the bundled SEC company index (frontend/public/sec-companies.json)
+# that powers the frontend's universal company search. The SEC list changes
+# slowly, so weekly is plenty. Commits only when the file actually changes, and
+# the commit doubles as repository activity that keeps the cron schedules alive.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"     # 07:00 UTC every Monday
+  workflow_dispatch: {}
+
+concurrency:
+  group: summa-secindex
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Rebuild SEC company index
+        working-directory: backend
+        env:
+          # SEC fair-access requires a descriptive User-Agent on the request.
+          EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
+        run: python build_sec_index.py     # stdlib only, no pip install needed
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "summa-secindex[bot]"
+          git config user.email "summa-secindex@users.noreply.github.com"
+          git add frontend/public/sec-companies.json
+          git diff --staged --quiet || git commit -m "chore: refresh SEC company index [skip ci]"
+          git push

@@ -1,0 +1,78 @@
+# Investor / manager context registry — the quality floor.
+# Ported from frontend/lib/entities.ts. Each entry's `match` strings are
+# lowercase substrings tested (case-insensitively) against a filing's
+# manager_name / filer_name. One row is written to `entities` per match string.
+#
+# kind: index | active | bank | activist | value
+
+- match: [blackrock]
+  kind: index
+  note: "The world's largest asset manager (~$10T). Its index funds and iShares ETFs make it a top-three holder of almost every large US company, so its stake reflects passive indexing, not a stock-specific view."
+- match: [vanguard]
+  kind: index
+  note: "The largest mutual-fund manager and a top-two passive holder of most US large-caps. Client-owned and index-driven, so its position size tracks the company's index weight rather than conviction."
+- match: ["state street"]
+  kind: index
+  note: "Manager of the SPDR ETF family (including SPY) and the third of the 'Big Three' index holders. Its stake is overwhelmingly passive."
+- match: [geode]
+  kind: index
+  note: "Sub-advisor that runs Fidelity's index funds; appears as a large passive holder despite the unfamiliar name."
+
+- match: ["berkshire hathaway", "warren buffett"]
+  kind: value
+  note: "Warren Buffett's conglomerate. Its concentrated, long-held equity stakes are watched as a high-conviction value signal — Berkshire buying or selling moves sentiment."
+- match: [fidelity, "fmr llc", "fmr "]
+  kind: active
+  note: "One of the largest active asset managers and 401(k) providers. An active position change reflects a real portfolio-manager decision, unlike index holders."
+- match: ["t. rowe", "t rowe", "price (t.rowe)"]
+  kind: active
+  note: "A large active manager known for growth and retirement funds; position changes are discretionary calls."
+- match: ["capital research", "capital world", "capital group"]
+  kind: active
+  note: "Capital Group (American Funds) — among the largest active managers in the world; long-term, research-driven positions."
+- match: [wellington]
+  kind: active
+  note: "A major active institutional manager and sub-advisor; discretionary, fundamentals-driven holdings."
+- match: ["morgan stanley"]
+  kind: bank
+  note: "Holdings span its asset-management arm and brokerage/market-making inventory, so the position mixes conviction with client and trading activity."
+- match: [jpmorgan, "j.p. morgan", "jp morgan"]
+  kind: bank
+  note: "Combines JPMorgan Asset Management funds with bank trading inventory; read the position with that mix in mind."
+- match: ["goldman sachs"]
+  kind: bank
+  note: "Mixes Goldman Sachs Asset Management funds with market-making inventory rather than pure conviction."
+- match: ["bank of america", merrill]
+  kind: bank
+  note: "Holdings blend asset management with brokerage and trading inventory."
+- match: [invesco]
+  kind: active
+  note: "A large asset manager (including the QQQ ETF franchise); positions are a mix of active and index funds."
+- match: ["northern trust"]
+  kind: index
+  note: "A custody bank and large index/passive manager; stakes are mostly index-tracking."
+
+- match: [elliott]
+  kind: activist
+  note: "Paul Singer's Elliott Management — an aggressive, deeply-resourced activist that pushes for board change, breakups, cost cuts, or an outright sale. Its arrival often precedes a fight."
+- match: [icahn]
+  kind: activist
+  note: "Carl Icahn's vehicle — a pioneering activist/corporate raider that agitates for buybacks, spin-offs, and board seats."
+- match: ["pershing square", ackman]
+  kind: activist
+  note: "Bill Ackman's concentrated activist fund, known for large, public, high-conviction campaigns."
+- match: [starboard]
+  kind: activist
+  note: "Starboard Value — an activist specializing in operational turnarounds and board overhauls at underperforming companies."
+- match: [valueact]
+  kind: activist
+  note: "A 'constructive' activist that usually takes a board seat and works with management at large caps rather than waging public war."
+- match: ["third point", "daniel loeb", "dan loeb"]
+  kind: activist
+  note: "Dan Loeb's Third Point — an activist hedge fund famous for pointed public letters demanding change."
+- match: [trian, "nelson peltz"]
+  kind: activist
+  note: "Nelson Peltz's Trian — an operational activist that targets large consumer and industrial companies for margin improvement and board seats."
+- match: ["engine no. 1", "engine no 1"]
+  kind: activist
+  note: "A small activist famous for winning Exxon board seats in 2021 on a returns-and-climate platform — proof that a tiny stake can force change."

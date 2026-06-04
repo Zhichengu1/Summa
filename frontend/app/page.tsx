@@ -2,10 +2,12 @@
 
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { DataTable, type Column } from "../components/DataTable";
+import { InfoTip, Term } from "../components/InfoTip";
 import {
   ComboChart, MultiLineChart, SimpleBarChart, PairedBarChart,
-  StackedBarChart, DivergingBarChart, HorizontalBarChart, CumulativeLineChart,
+  StackedBarChart, DivergingBarChart, HorizontalBarChart, CumulativeLineChart, PriceChart,
 } from "../components/charts";
+import { Sparkline } from "../components/Sparkline";
 import {
   pivotStatement, seriesFor, deriveKpis, yoyGrowth, METRICS,
 } from "../lib/fundamentals";
@@ -14,15 +16,32 @@ import {
   subscribeFilings, fetchInsiderTransactions, fetchInstitutionalHoldings,
   fetchCorporateEvents, fetchEarningsEvents, fetchLateFilings,
   fetchSecuritiesOfferings, fetchBeneficialOwnership, fetchProposedSales,
+  fetchManagerHoldings, fetchPrices, fetchRecentPrices, fetchIncomeFactsForCiks,
+  fetchRecentInsider, fetchRecentEarnings, fetchRecentEvents,
+  fetchRecentBeneficial, fetchRecentOfferings, fetchRecentLateFilings,
+  fetchCompanyProfiles, fetchCompanyThemes, fetchEntities, queueWatchlist,
 } from "../lib/data";
+import { profileFor, loadProfiles } from "../lib/taxonomy";
+import { entityContext, loadEntities } from "../lib/entities";
+import { useWatchlist, type WatchItem } from "../lib/useWatchlist";
+import { useLastSeen } from "../lib/useLastSeen";
+import { loadSecIndex, searchSec, type SecCompany } from "../lib/secIndex";
 import {
   fmtUSD, fmtNum, fmtPct, fmtDelta, fmtDate, elapsed, fmtPeriodLabel, formColorVar,
 } from "../lib/format";
+import {
+  buildTape, buildSignals, buildWatchlistSignals, buildWatchlistTape, EVENT_CLASS_DIR,
+  type Direction, type TapeItem, type Signal, type CompanyData, type WatchEntry,
+} from "../lib/pulse";
+import { analyzeInsider, TX_CODE_INFO } from "../lib/insider";
+import { derivePriceKpis, reactionAround } from "../lib/prices";
+import { deriveValuation } from "../lib/valuation";
+import { smaSeries } from "../lib/technicals";
 import type {
   Company, FinancialFact, Filing,
   InsiderTransaction, InstitutionalHolding,
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
-  BeneficialOwnership, ProposedSale,
+  BeneficialOwnership, ProposedSale, DailyPrice,
   StatementKind, PeriodType,
 } from "../lib/types";
 
@@ -34,8 +53,8 @@ function fmtStatValue(v: number): string {
 
 // ─── Local types ──────────────────────────────────────────────────────────────
 
-type MainView = "overview" | "feed" | "company";
-type CompanyTab = "overview" | "fundamentals" | "ownership" | "catalysts" | "filings";
+type MainView = "overview" | "search" | "feed" | "calendar" | "guide" | "company";
+type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings";
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -90,6 +109,20 @@ function CompanyMark({ ticker, size = 32 }: { ticker: string; size?: number }) {
   return <div style={companyMarkStyle(ticker, size)}>{ticker.slice(0, 2)}</div>;
 }
 
+// A filer/manager name with an inline context tooltip when it's a known entity
+// (index manager, activist, bank, etc.) — and a small "who" tag for activists.
+function NameContext({ name }: { name: string | null | undefined }) {
+  if (!name) return <span className="dimmed">—</span>;
+  const e = entityContext(name);
+  if (!e) return <span>{name}</span>;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      {name}
+      <InfoTip def={`${e.label}. ${e.note}`} />
+    </span>
+  );
+}
+
 function KpiTile({
   label, value, fmt, qoq, yoy,
 }: {
@@ -103,12 +136,41 @@ function KpiTile({
     fmtNum(value);
   return (
     <div className="kpi">
-      <div className="k-label">{label}</div>
+      <div className="k-label">{label}<InfoTip term={label} /></div>
       <div className="k-value">{formatted}</div>
       <div className="k-delta">
         {qoq != null && <span className={qoq >= 0 ? "pos" : "neg"}>{fmtDelta(qoq)} QoQ</span>}
         {yoy != null && <span className={yoy >= 0 ? "pos" : "neg"}>{fmtDelta(yoy)} YoY</span>}
       </div>
+    </div>
+  );
+}
+
+// Compact EOD-price metric strip: last close, distance from the 52-week high, and
+// trailing returns. Returns are colored; price feed is end-of-day, not realtime.
+function PriceStrip({ k }: { k: ReturnType<typeof derivePriceKpis> }) {
+  const Ret = ({ label, v }: { label: string; v: number | null }) => (
+    <div className="kpi">
+      <div className="k-label">{label}</div>
+      <div className={`k-value ${v == null ? "" : v >= 0 ? "pos" : "neg"}`}>{v == null ? "—" : fmtDelta(v)}</div>
+    </div>
+  );
+  return (
+    <div className="kpi-strip dense">
+      <div className="kpi">
+        <div className="k-label">Last<InfoTip term="EOD price" /></div>
+        <div className="k-value">{fmtUSD(k.last)}</div>
+        <div className="k-delta"><span className="muted">{k.asOf ? fmtDate(k.asOf) : ""}</span></div>
+      </div>
+      <div className="kpi">
+        <div className="k-label">Off 52-wk High<InfoTip term="% off 52-wk high" /></div>
+        <div className={`k-value ${k.pctOffHigh == null ? "" : k.pctOffHigh > -3 ? "pos" : k.pctOffHigh < -25 ? "neg" : ""}`}>
+          {k.pctOffHigh == null ? "—" : fmtPct(k.pctOffHigh)}
+        </div>
+      </div>
+      <Ret label="YTD" v={k.retYTD} />
+      <Ret label="3M" v={k.ret3M} />
+      <Ret label="1M" v={k.ret1M} />
     </div>
   );
 }
@@ -173,24 +235,17 @@ function LoadingCatalysts() {
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 function Sidebar({
-  companies, filings, activeCik, view,
-  onCompany, onOverview, onFeed, q, setQ,
+  companies, filings, activeCik, view, ingestedCiks,
+  onCompany, onOverview, onSearch, onFeed, onCalendar, onGuide, onRemove, newFilings = 0,
 }: {
   companies: Company[]; filings: Filing[];
   activeCik: string | null; view: MainView;
+  ingestedCiks: Set<string>;
   onCompany: (cik: string) => void;
-  onOverview: () => void; onFeed: () => void;
-  q: string; setQ: (v: string) => void;
+  onOverview: () => void; onSearch: () => void; onFeed: () => void; onCalendar: () => void; onGuide: () => void;
+  onRemove: (cik: string) => void;
+  newFilings?: number;
 }) {
-  const filtered = useMemo(() => {
-    if (!q.trim()) return companies;
-    const n = q.toLowerCase();
-    return companies.filter(
-      (c) => (c.ticker ?? "").toLowerCase().includes(n) ||
-             (c.name ?? "").toLowerCase().includes(n),
-    );
-  }, [companies, q]);
-
   const recent30 = useMemo(() => {
     const cutoff = Date.now() - 30 * 86_400_000;
     const m = new Map<string, number>();
@@ -210,20 +265,28 @@ function Sidebar({
         <div className={`nav-item${view === "overview" ? " active" : ""}`} onClick={onOverview}>
           ◈ Overview
         </div>
+        <div className={`nav-item${view === "search" ? " active" : ""}`} onClick={onSearch}>
+          ⌕ Search Companies
+        </div>
         <div className={`nav-item${view === "feed" ? " active" : ""}`} onClick={onFeed}>
           ≡ Feed
+          {newFilings > 0 && <span className="nav-badge" title={`${newFilings} new since your last visit`}>{newFilings > 99 ? "99+" : newFilings}</span>}
+        </div>
+        <div className={`nav-item${view === "calendar" ? " active" : ""}`} onClick={onCalendar}>
+          ◷ Calendar
+        </div>
+        <div className={`nav-item${view === "guide" ? " active" : ""}`} onClick={onGuide}>
+          ◇ Data Guide
         </div>
       </nav>
-      <div className="sidebar-search">
-        <input
-          className="sidebar-input"
-          placeholder="Search companies…" value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
+      <div className="sidebar-list-head">
+        <span className="label-caps">Watchlist · {companies.length}</span>
+        <button className="sidebar-add-btn" title="Search & add companies" onClick={onSearch}>+ Add</button>
       </div>
       <div className="sidebar-list">
-        {filtered.map((c) => {
+        {companies.map((c) => {
           const cnt = recent30.get(c.cik) ?? 0;
+          const pending = !ingestedCiks.has(c.cik);
           return (
             <div
               key={c.cik}
@@ -233,20 +296,338 @@ function Sidebar({
               <CompanyMark ticker={c.ticker ?? "?"} size={22} />
               <span className="tkr">{c.ticker}</span>
               <span className="nm">{c.name}</span>
-              {cnt > 0 && <span className="cnt">{cnt}</span>}
+              {pending ? <span className="pending-dot" title="Queued — data appears after the next pipeline run">⏳</span>
+                       : cnt > 0 ? <span className="cnt">{cnt}</span> : null}
+              <button
+                className="row-remove" title="Remove from watchlist"
+                onClick={(e) => { e.stopPropagation(); onRemove(c.cik); }}
+              >×</button>
             </div>
           );
         })}
+        {companies.length === 0 && (
+          <div className="sidebar-empty">Your watchlist is empty. <span className="link-like" onClick={onSearch}>Search companies</span> to add some.</div>
+        )}
       </div>
     </aside>
   );
 }
 
+// ─── Watchlist-wide pulse (shared by Scanner + Calendar) ────────────────────────
+//
+// Fetches the six event-driven slices across the whole watchlist in one pass and
+// partitions them per company into the CompanyData bundle that pulse.ts consumes.
+// Deliberately omits heavy fundamentals/13F/prices: the scanner and calendar are
+// catalyst surfaces ("what just happened / what's actionable"), and buildSignals
+// degrades gracefully when those slices are absent.
+function useWatchlistPulse(companies: Company[]): { entries: WatchEntry[]; loading: boolean } {
+  const [bundles, setBundles] = useState<Record<string, CompanyData>>({});
+  const [loading, setLoading] = useState(true);
+  const ciks = useMemo(() => companies.map((c) => c.cik), [companies]);
+  const cikKey = ciks.join(",");
+
+  useEffect(() => {
+    if (!ciks.length) { setBundles({}); setLoading(false); return; }
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([
+      fetchRecentInsider(ciks), fetchRecentEarnings(ciks), fetchRecentEvents(ciks),
+      fetchRecentBeneficial(ciks), fetchRecentOfferings(ciks), fetchRecentLateFilings(ciks),
+    ]).then(([ins, ea, ev, ben, off, late]) => {
+      if (cancelled) return;
+      const by: Record<string, CompanyData> = {};
+      const slot = (cik: string) =>
+        (by[cik] ??= { insider: [], earnings: [], events: [], beneficial: [], offers: [], lateF: [] });
+      for (const r of ins)  slot(r.cik).insider!.push(r);
+      for (const r of ea)   slot(r.cik).earnings!.push(r);
+      for (const r of ev)   slot(r.cik).events!.push(r);
+      for (const r of ben)  slot(r.cik).beneficial!.push(r);
+      for (const r of off)  slot(r.cik).offers!.push(r);
+      for (const r of late) slot(r.cik).lateF!.push(r);
+      setBundles(by);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [cikKey]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const entries = useMemo<WatchEntry[]>(
+    () => companies.map((c) => ({
+      cik: c.cik, ticker: c.ticker ?? "?", name: c.name ?? c.cik, data: bundles[c.cik] ?? {},
+    })),
+    [companies, bundles],
+  );
+  return { entries, loading };
+}
+
+// ─── Signal Scanner (watchlist-wide, ranked) ────────────────────────────────────
+// The landing surface: every actionable signal across the watchlist, ranked most-
+// actionable first (see buildWatchlistSignals), filterable by direction. Reuses the
+// exact SignalCard used inside the company cockpit.
+function ScannerSection({
+  companies, onCompany, isNew,
+}: { companies: Company[]; onCompany: (cik: string) => void; isNew?: (iso: string | null | undefined) => boolean }) {
+  const { entries, loading } = useWatchlistPulse(companies);
+  const [dir, setDir] = useState<Direction | "all">("all");
+
+  const rows = useMemo(() => buildWatchlistSignals(entries).filter((r) => r.signals.length > 0), [entries]);
+  const shown = useMemo(() => {
+    if (dir === "all") return rows;
+    return rows
+      .map((r) => ({ ...r, signals: r.signals.filter((s) => s.dir === dir) }))
+      .filter((r) => r.signals.length > 0);
+  }, [rows, dir]);
+  const counts = useMemo(() => {
+    let bull = 0, bear = 0, flag = 0;
+    for (const r of rows) for (const s of r.signals) {
+      if (s.dir === "bull") bull++; else if (s.dir === "bear") bear++; else if (s.dir === "flag") flag++;
+    }
+    return { bull, bear, flag };
+  }, [rows]);
+
+  return (
+    <div className="section">
+      <div className="section-title">Live Signals · {rows.length} compan{rows.length === 1 ? "y" : "ies"} active</div>
+      <div className="toggle-row">
+        <button className={`chip${dir === "all" ? " active" : ""}`} onClick={() => setDir("all")}>All</button>
+        <button className={`chip${dir === "bull" ? " active" : ""}`} onClick={() => setDir(dir === "bull" ? "all" : "bull")}>▲ Bullish {counts.bull}</button>
+        <button className={`chip${dir === "bear" ? " active" : ""}`} onClick={() => setDir(dir === "bear" ? "all" : "bear")}>▼ Bearish {counts.bear}</button>
+        <button className={`chip${dir === "flag" ? " active" : ""}`} onClick={() => setDir(dir === "flag" ? "all" : "flag")}>◆ Flags {counts.flag}</button>
+      </div>
+      {loading ? (
+        <div className="skeleton-block">
+          {[0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 84, borderRadius: 6, opacity: 0.8 - i * 0.18 }} />)}
+        </div>
+      ) : shown.length === 0 ? (
+        <div className="empty-note">No active signals across your watchlist yet. Signals appear as filings are ingested.</div>
+      ) : (
+        <div className="scan-list">
+          {shown.map((r) => (
+            <div
+              key={r.cik} className={`scan-row dir-${r.dominant}`} role="button" tabIndex={0}
+              onClick={() => onCompany(r.cik)}
+              onKeyDown={(e) => { if (e.key === "Enter") onCompany(r.cik); }}
+            >
+              <div className="scan-head">
+                <CompanyMark ticker={r.ticker} size={26} />
+                <strong style={{ color: "var(--accent)", letterSpacing: "0.04em" }}>{r.ticker}</strong>
+                <span className="dimmed" style={{ fontSize: 12 }}>{r.name}</span>
+                <span className="scan-meta">
+                  {isNew?.(r.latest) && <span className="new-dot" title="New activity since your last visit">NEW</span>}
+                  {r.insider.clusterBuy && <span className="dir-bull" style={{ fontSize: 11 }}>⚑ cluster buy</span>}
+                  {elapsed(r.latest) && <span className="muted" style={{ fontSize: 11 }} title={fmtDate(r.latest)}>{elapsed(r.latest)}</span>}
+                </span>
+              </div>
+              <div className="signal-stack">
+                {r.signals.map((s) => <SignalCard key={s.label} s={s} />)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Catalyst Calendar (watchlist-wide event timeline) ──────────────────────────
+function CalendarView({
+  companies, onCompany,
+}: { companies: Company[]; onCompany: (cik: string) => void }) {
+  const { entries, loading } = useWatchlistPulse(companies);
+  const [kind, setKind] = useState<string>("all");
+
+  const tape = useMemo(() => buildWatchlistTape(entries), [entries]);
+  const kinds = useMemo(() => Array.from(new Set(tape.map((t) => t.kind))), [tape]);
+  const shown = useMemo(() => (kind === "all" ? tape : tape.filter((t) => t.kind === kind)), [tape, kind]);
+
+  // Group by calendar day; `tape` is already date-desc so groups stay newest-first.
+  const groups = useMemo(() => {
+    const m = new Map<string, TapeItem[]>();
+    for (const t of shown) {
+      const day = t.date.slice(0, 10);
+      const arr = m.get(day) ?? [];
+      arr.push(t);
+      m.set(day, arr);
+    }
+    return Array.from(m.entries());
+  }, [shown]);
+
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Catalyst Calendar</h1>
+        <div className="page-sub">{tape.length} events across {companies.length} compan{companies.length === 1 ? "y" : "ies"} · recent &amp; dated disclosures</div>
+      </div>
+      <div className="toggle-row">
+        <button className={`chip${kind === "all" ? " active" : ""}`} onClick={() => setKind("all")}>All</button>
+        {kinds.map((k) => (
+          <button key={k} className={`chip${kind === k ? " active" : ""}`} onClick={() => setKind(kind === k ? "all" : k)}>{k}</button>
+        ))}
+      </div>
+      {loading ? (
+        <div className="skeleton-block">
+          {[0, 1, 2, 3, 4].map((i) => <div key={i} className="skeleton" style={{ height: 30, borderRadius: 4, opacity: 0.85 - i * 0.12 }} />)}
+        </div>
+      ) : groups.length === 0 ? (
+        <div className="empty-note">No catalyst events recorded across your watchlist yet.</div>
+      ) : (
+        <div className="cal-groups">
+          {groups.map(([day, items]) => (
+            <div key={day} className="cal-group">
+              <div className="cal-date">{fmtDate(day)}</div>
+              <div className="cal-items">
+                {items.map((t, i) => (
+                  <div
+                    key={`${t.cik}-${i}`} className={`tape-row dir-${t.dir}`} role="button" tabIndex={0}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => t.cik && onCompany(t.cik)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && t.cik) onCompany(t.cik); }}
+                  >
+                    <span className="tape-kind" style={{ minWidth: 70 }}>{t.kind}</span>
+                    <strong style={{ color: "var(--accent)", minWidth: 52, letterSpacing: "0.04em" }}>{t.ticker}</strong>
+                    <span className="tape-head">
+                      <span className="tape-head-text" title={t.headline}>{t.headline}</span>
+                      {t.note && <InfoTip def={t.note} />}
+                    </span>
+                    <DirMark dir={t.dir} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Search / Browse all companies ──────────────────────────────────────────────
+// The universal company finder, promoted from the sidebar into a full dashboard
+// view. Searches the bundled SEC index (~all US public companies) client-side and
+// lets the user add any of them to the watchlist (which queues backend ingestion).
+function SearchPage({
+  secIndex, watched, ingestedCiks, onAdd, onCompany,
+}: {
+  secIndex: SecCompany[];
+  watched: Set<string>;
+  ingestedCiks: Set<string>;
+  onAdd: (c: SecCompany) => void;
+  onCompany: (cik: string) => void;
+}) {
+  const [q, setQ] = useState("");
+  const [query, setQuery] = useState("");   // settled query — only updates once typing pauses
+
+  // Nothing is shown while you're typing; the search runs ~350ms after you stop, so
+  // "blackrock"/"BLK" resolves once you've finished the word rather than flashing
+  // partial matches for "b", "bl", "bla"…
+  useEffect(() => {
+    const id = setTimeout(() => setQuery(q.trim()), 350);
+    return () => clearTimeout(id);
+  }, [q]);
+
+  const typing = q.trim() !== query;   // entered text hasn't settled into a search yet
+
+  const results = useMemo(
+    () => (query ? searchSec(secIndex, query, 250) : []),
+    [query, secIndex],
+  );
+
+  const cols: Column<SecCompany>[] = [
+    {
+      key: "ticker", header: "Ticker", width: "130px", value: (c) => c.ticker,
+      render: (c) => (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <CompanyMark ticker={c.ticker || "?"} size={22} />
+          <strong style={{ color: "var(--accent)", letterSpacing: "0.04em" }}>{c.ticker}</strong>
+        </div>
+      ),
+    },
+    { key: "name", header: "Company", value: (c) => c.name },
+    {
+      key: "status", header: "Status", width: "140px",
+      value: (c) => (ingestedCiks.has(c.cik) ? "2" : watched.has(c.cik) ? "1" : "0"),
+      render: (c) => ingestedCiks.has(c.cik)
+        ? <span className="cat-chip sector">In warehouse</span>
+        : watched.has(c.cik)
+          ? <span className="cat-chip">Watchlisted</span>
+          : <span className="dimmed">—</span>,
+    },
+    {
+      key: "action", header: "", width: "92px", align: "right", value: () => "",
+      render: (c) => watched.has(c.cik)
+        ? <span style={{ color: "var(--accent)", fontWeight: 600, fontSize: 12 }} title="Open">Open ↗</span>
+        : <button className="chip" onClick={(e) => { e.stopPropagation(); onAdd(c); }}>+ Add</button>,
+    },
+  ];
+
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Search Companies</h1>
+        <div className="page-sub">
+          {secIndex.length.toLocaleString()} US public companies · search any ticker or name and add it to your watchlist to ingest its filings.
+        </div>
+      </div>
+      <div className="toggle-row">
+        <input
+          className="dt-filter" style={{ borderRadius: 5, width: 340 }}
+          placeholder="Search ticker or company name…" value={q}
+          onChange={(e) => setQ(e.target.value)} autoFocus
+        />
+      </div>
+      {query && !typing && (
+        <div className="section">
+          <div className="section-title">Results for “{query}” · {results.length.toLocaleString()}{results.length === 250 ? "+" : ""}</div>
+          <DataTable
+            columns={cols} rows={results} rowKey={(c) => c.cik}
+            onRowClick={(c) => (watched.has(c.cik) || ingestedCiks.has(c.cik) ? onCompany(c.cik) : onAdd(c))}
+            filterable={false}
+            empty={secIndex.length ? "No company matches your search." : "Company index not loaded yet."}
+          />
+        </div>
+      )}
+      {q.trim() && typing && (
+        <div className="empty-note" style={{ marginTop: 4 }}>Searching…</div>
+      )}
+      {!q.trim() && (
+        <div className="empty-note" style={{ marginTop: 4 }}>
+          Start typing a ticker or company name to search {secIndex.length.toLocaleString()} companies, then pause to see matches.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Overview page ────────────────────────────────────────────────────────────
 
+type PriceRow = { last: number | null; chg1d: number | null; offHigh: number | null; spark: number[] };
+
 function OverviewPage({
-  companies, filings, onCompany,
-}: { companies: Company[]; filings: Filing[]; onCompany: (cik: string) => void }) {
+  companies, filings, onCompany, isNew,
+}: { companies: Company[]; filings: Filing[]; onCompany: (cik: string) => void; isNew?: (iso: string | null | undefined) => boolean }) {
+  // Per-company recent prices for the sparkline + price columns (one batched fetch).
+  const [priceRows, setPriceRows] = useState<Record<string, PriceRow>>({});
+  const ciks = useMemo(() => companies.map((c) => c.cik), [companies]);
+  const cikKey = ciks.join(",");
+  useEffect(() => {
+    if (!ciks.length) { setPriceRows({}); return; }
+    let cancelled = false;
+    fetchRecentPrices(ciks, 370).then((rows) => {
+      if (cancelled) return;
+      const by = new Map<string, DailyPrice[]>();
+      for (const r of rows) { const a = by.get(r.cik) ?? []; a.push(r); by.set(r.cik, a); }
+      const out: Record<string, PriceRow> = {};
+      for (const [cik, prc] of by) {
+        const k = derivePriceKpis(prc);
+        const closes = prc.map((p) => p.close).filter((x): x is number => x != null);
+        const prev = closes.length > 1 ? closes[closes.length - 2] : null;
+        const chg1d = k.last != null && prev != null && prev !== 0 ? ((k.last - prev) / prev) * 100 : null;
+        out[cik] = { last: k.last, chg1d, offHigh: k.pctOffHigh, spark: closes.slice(-60) };
+      }
+      setPriceRows(out);
+    });
+    return () => { cancelled = true; };
+  }, [cikKey]);  // eslint-disable-line react-hooks/exhaustive-deps
+
   const volumeData = useMemo(() => {
     const buckets = new Map<string, Record<string, number>>();
     for (const f of filings) {
@@ -299,9 +680,38 @@ function OverviewPage({
     },
     { key: "name", header: "Company", value: (c) => c.name ?? "" },
     {
-      key: "sector", header: "Sector",
-      value: (c) => c.sector ?? "",
-      render: (c) => <span className="dimmed">{c.sector ?? "—"}</span>,
+      key: "sector", header: "Industry",
+      value: (c) => profileFor(c.ticker, c.sector, c.industry, c.cik)?.industry ?? "",
+      render: (c) => {
+        const p = profileFor(c.ticker, c.sector, c.industry, c.cik);
+        if (!p) return <span className="dimmed">—</span>;
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span>{p.industry !== "—" ? p.industry : (p.sector !== "—" ? p.sector : "—")}</span>
+            {p.sector !== "—" && p.industry !== "—" && <span className="dimmed" style={{ fontSize: 10 }}>{p.sector}</span>}
+          </div>
+        );
+      },
+    },
+    {
+      key: "last", header: "Last", align: "right", width: "78px",
+      value: (c) => priceRows[c.cik]?.last ?? -1,
+      render: (c) => { const p = priceRows[c.cik]; return p?.last != null ? <span className="dt-num">{fmtUSD(p.last)}</span> : <span className="dimmed">—</span>; },
+    },
+    {
+      key: "chg1d", header: "Δ% 1d", align: "right", width: "70px",
+      value: (c) => priceRows[c.cik]?.chg1d ?? -999,
+      render: (c) => { const v = priceRows[c.cik]?.chg1d; return v != null ? <span className={`dt-num ${v >= 0 ? "pos" : "neg"}`}>{fmtDelta(v)}</span> : <span className="dimmed">—</span>; },
+    },
+    {
+      key: "offhi", header: "Off Hi", align: "right", width: "70px",
+      value: (c) => priceRows[c.cik]?.offHigh ?? -999,
+      render: (c) => { const v = priceRows[c.cik]?.offHigh; return v != null ? <span className={`dt-num ${v > -3 ? "pos" : v < -25 ? "neg" : "muted"}`}>{fmtPct(v)}</span> : <span className="dimmed">—</span>; },
+    },
+    {
+      key: "trend", header: "Trend (3mo)", width: "84px",
+      value: () => "",
+      render: (c) => { const s = priceRows[c.cik]?.spark; return s && s.length > 1 ? <Sparkline values={s} /> : <span className="dimmed">—</span>; },
     },
     {
       key: "last_filing", header: "Last Filing",
@@ -335,6 +745,9 @@ function OverviewPage({
         <div className="page-sub">{companies.length} companies · {filings.length} filings loaded</div>
       </div>
 
+      {/* What's actionable right now, across the whole watchlist. */}
+      <ScannerSection companies={companies} onCompany={onCompany} isNew={isNew} />
+
       <div className="section">
         <div className="section-title">Watchlist · {companies.length} companies</div>
         <DataTable
@@ -356,6 +769,161 @@ function OverviewPage({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Data Guide page ────────────────────────────────────────────────────────
+//
+// Reference glossary. Every data domain the warehouse tracks is defined here and
+// ranked by how directly it tends to move the share price, so a shareholder knows
+// what to watch first. Tiers are ordered high → low impact intentionally.
+
+type ImpactTier = "high" | "medium" | "signal";
+
+type DataDef = {
+  name: string;
+  source: string;        // SEC form / feed the data comes from
+  where: string;         // where in this app to find it
+  definition: string;    // what the numbers actually are
+  why: string;           // why it moves the stock for shareholders
+};
+
+const IMPACT_TIERS: { tier: ImpactTier; label: string; blurb: string; items: DataDef[] }[] = [
+  {
+    tier: "high",
+    label: "High impact — direct price drivers",
+    blurb: "Disclosures that routinely move a stock the same day they hit the wire. Watch these first.",
+    items: [
+      {
+        name: "Earnings Results & Guidance",
+        source: "8-K · Item 2.02",
+        where: "Company → Catalysts",
+        definition: "Quarterly revenue, diluted EPS, and net income, plus any change to forward guidance (raised / lowered / withdrawn / maintained).",
+        why: "A beat or miss versus analyst expectations is the single most common cause of a large one-day move. A guidance change resets the market's whole forward valuation.",
+      },
+      {
+        name: "Material Corporate Events",
+        source: "8-K",
+        where: "Company → Catalysts",
+        definition: "Classified disclosures of mergers & acquisitions, financial restatements, executive departures, capital returns (buybacks / dividends), and cyber incidents.",
+        why: "An 8-K exists precisely to flag events a reasonable investor would consider important. M&A and restatements can move a stock 20%+ in a session.",
+      },
+      {
+        name: "Activist & Large-Stake Ownership",
+        source: "SC 13D / 13G",
+        where: "Company → Ownership",
+        definition: "A filing triggered when an investor crosses 5% ownership. 13D signals intent to influence the company (activist); 13G is a passive stake.",
+        why: "Activist positions often precede board fights, spin-offs, or buyout pressure. The market reacts to the filer's reputation and the stated purpose of the stake.",
+      },
+      {
+        name: "Insider Transactions",
+        source: "Form 4",
+        where: "Company → Ownership",
+        definition: "Open-market buys and sells by officers and directors, with price, share count, resulting holdings, and whether the trade was under a pre-planned 10b5-1 plan.",
+        why: "Cluster buying by insiders is a well-documented bullish signal; large discretionary selling can signal lost confidence in the near-term outlook.",
+      },
+    ],
+  },
+  {
+    tier: "medium",
+    label: "Medium impact — valuation & capital flows",
+    blurb: "Sets the fair value of the equity and the supply of shares. Moves the price over quarters more than over hours.",
+    items: [
+      {
+        name: "Fundamentals (Financial Statements)",
+        source: "10-K · 10-Q",
+        where: "Company → Fundamentals",
+        definition: "Income statement, balance sheet, and cash-flow trends — revenue growth, margins, debt levels, and free cash flow over time.",
+        why: "These anchor the long-term fair value. Deteriorating margins or rising leverage erode the price gradually even when no single headline lands.",
+      },
+      {
+        name: "Securities Offerings",
+        source: "S-1 · S-3 · 424B",
+        where: "Company → Catalysts",
+        definition: "New issuance of stock or debt and the dollar amount raised.",
+        why: "Equity offerings dilute existing shareholders and usually pressure the price short-term. Debt raises change the company's risk profile and interest burden.",
+      },
+      {
+        name: "Institutional Holdings",
+        source: "13F-HR",
+        where: "Company → Ownership",
+        definition: "Quarterly positions of institutional managers (>$100M AUM): shares held, position value, and quarter-over-quarter change.",
+        why: "Shows 'smart money' accumulation or distribution — but it is filed up to 45 days after quarter-end, so it confirms a trend rather than predicting one.",
+      },
+    ],
+  },
+  {
+    tier: "signal",
+    label: "Signals & red flags — early-warning context",
+    blurb: "Rarely move the price alone, but they front-run the disclosures above. Treat them as leading indicators.",
+    items: [
+      {
+        name: "Late-Filing Notices",
+        source: "NT 10-K · NT 10-Q",
+        where: "Company → Catalysts",
+        definition: "A notification that a required report will be filed late, together with the stated reason.",
+        why: "Often the first public sign of accounting problems, internal-control weakness, or distress — frequently a leading indicator of a sharp decline.",
+      },
+      {
+        name: "Proposed Insider Sales",
+        source: "Form 144",
+        where: "Company → Ownership",
+        definition: "An insider's notice of intent to sell restricted stock — proposed share count and approximate value, before any sale executes.",
+        why: "Signals selling intent ahead of the executed Form 4. Weaker than an actual transaction, but a useful early warning of insider distribution.",
+      },
+      {
+        name: "Filing Volume & Velocity",
+        source: "All forms",
+        where: "Overview · Feed",
+        definition: "How many filings a company submits and how fast, surfaced as the 30-day count and the filing-volume chart.",
+        why: "A sudden burst of 8-Ks or an unusual filing cadence is context, not a verdict — it tells you where to look closer among the higher-impact data.",
+      },
+    ],
+  },
+];
+
+function ImpactPill({ tier }: { tier: ImpactTier }) {
+  const label = tier === "high" ? "High" : tier === "medium" ? "Medium" : "Signal";
+  return <span className={`impact-pill impact-${tier}`}>{label}</span>;
+}
+
+function GuidePage() {
+  return (
+    <div>
+      <div className="page-head">
+        <h1 className="page-title">Data Guide</h1>
+        <div className="page-sub">
+          What every data point means — and how much it tends to move the share price. Ordered most to least impactful.
+        </div>
+      </div>
+
+      {IMPACT_TIERS.map((group) => (
+        <div className="section" key={group.tier}>
+          <div className="guide-tier-head">
+            <ImpactPill tier={group.tier} />
+            <div>
+              <div className={`guide-tier-label tier-${group.tier}`}>{group.label}</div>
+              <div className="guide-tier-blurb">{group.blurb}</div>
+            </div>
+          </div>
+          <div className="guide-grid">
+            {group.items.map((d) => (
+              <div className={`guide-card tier-${group.tier}`} key={d.name}>
+                <div className="guide-card-head">
+                  <span className="guide-card-name">{d.name}</span>
+                  <span className="guide-card-source">{d.source}</span>
+                </div>
+                <div className="guide-def">{d.definition}</div>
+                <div className="guide-why">
+                  <span className="guide-why-label">Why it matters</span> {d.why}
+                </div>
+                <div className="guide-where">Find it in: <span>{d.where}</span></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -479,8 +1047,8 @@ function FeedPage({ filings, onCompany }: { filings: Filing[]; onCompany: (cik: 
 // ─── Company page ─────────────────────────────────────────────────────────────
 
 function CompanyPage({
-  cik, tab, companies, onTab,
-}: { cik: string; tab: CompanyTab; companies: Company[]; onTab: (t: CompanyTab) => void }) {
+  cik, tab, companies, onTab, pending = false,
+}: { cik: string; tab: CompanyTab; companies: Company[]; onTab: (t: CompanyTab) => void; pending?: boolean }) {
   const company = companies.find((c) => c.cik === cik) ?? null;
   const [facts, setFacts] = useState<FinancialFact[]>([]);
   const [loadingFacts, setLoadingFacts] = useState(true);
@@ -493,10 +1061,13 @@ function CompanyPage({
 
   const ticker = company?.ticker ?? "?";
   const name = company?.name ?? cik;
+  const profile = profileFor(ticker, company?.sector, company?.industry, cik);
 
   const TABS: { key: CompanyTab; label: string }[] = [
     { key: "overview",      label: "Overview" },
+    { key: "strategy",      label: "Strategy & Investments" },
     { key: "fundamentals",  label: "Fundamentals" },
+    { key: "peers",         label: "Peers" },
     { key: "ownership",     label: "Ownership" },
     { key: "catalysts",     label: "Catalysts" },
     { key: "filings",       label: "Filings" },
@@ -506,15 +1077,22 @@ function CompanyPage({
     <div>
       <div className="page-head-row">
         <CompanyMark ticker={ticker} size={44} />
-        <div>
+        <div style={{ minWidth: 0 }}>
           <h1 className="page-title">{name}</h1>
-          <div className="page-sub">
-            {ticker} · CIK {cik}
-            {company?.sector ? ` · ${company.sector}` : ""}
-            {company?.industry ? ` · ${company.industry}` : ""}
+          <div className="page-sub" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <span>{ticker} · CIK {cik}</span>
+            {profile && profile.sector !== "—" && <span className="cat-chip sector">{profile.sector}</span>}
+            {profile && profile.industry !== "—" && <span className="cat-chip">{profile.industry}</span>}
           </div>
         </div>
       </div>
+
+      {pending && (
+        <div className="pending-banner">
+          <strong>⏳ Queued for ingestion.</strong> This company was added to your watchlist and
+          will be pulled on the next pipeline run. Its data appears here once the backend ingests it.
+        </div>
+      )}
 
       <div className="tabs">
         {TABS.map((t) => (
@@ -525,7 +1103,9 @@ function CompanyPage({
       </div>
 
       {tab === "overview"     && <CompanyOverviewTab cik={cik} facts={facts} loading={loadingFacts} />}
+      {tab === "strategy"     && <StrategyTab cik={cik} ticker={ticker} facts={facts} loading={loadingFacts} />}
       {tab === "fundamentals" && <FundamentalsTab facts={facts} loading={loadingFacts} />}
+      {tab === "peers"        && <PeersTab cik={cik} peers={companies} />}
       {tab === "ownership"    && <OwnershipTab cik={cik} />}
       {tab === "catalysts"    && <CatalystsTab cik={cik} />}
       {tab === "filings"      && <FilingsTab cik={cik} />}
@@ -533,23 +1113,292 @@ function CompanyPage({
   );
 }
 
-// ─── Company Overview tab ─────────────────────────────────────────────────────
+// ─── Company cockpit ("Overview" tab) ─────────────────────────────────────────
+//
+// A terminal-style dashboard that answers three questions at a glance, with every
+// element ranked by how directly it moves the share price:
+//   01 NOW       — where the company stands (headline fundamentals)
+//   02 HAPPENED  — a merged tape of recent price-moving disclosures
+//   03 GOING     — synthesized forward-looking signals
+// The deep dives (Fundamentals / Ownership / Catalysts / Filings) stay as tabs.
+
+function DirMark({ dir }: { dir: Direction }) {
+  const mark = dir === "bull" ? "▲" : dir === "bear" ? "▼" : dir === "flag" ? "◆" : "●";
+  return <span className={`dir-mark dir-${dir}`}>{mark}</span>;
+}
+
+function TapeRow({ t }: { t: TapeItem }) {
+  return (
+    <div className={`tape-row dir-${t.dir}`}>
+      <span className="tape-date">{fmtDate(t.date)}</span>
+      <span className="tape-kind">{t.kind}</span>
+      <span className="tape-head">
+        <span className="tape-head-text" title={t.headline}>{t.headline}</span>
+        {t.note && <InfoTip def={t.note} />}
+      </span>
+      <DirMark dir={t.dir} />
+    </div>
+  );
+}
+
+// Map each derived signal to the glossary term that explains the concept behind it.
+const SIGNAL_TERM: Record<string, string> = {
+  "Guidance": "Guidance",
+  "Revenue Momentum": "YoY",
+  "Net Margin": "Net Margin",
+  "Insider Flow · 90d": "Insider",
+  "Institutional Flow": "Institutional Holdings",
+  "Activist Watch": "Activist",
+  "Dilution Risk": "Dilution",
+  "Filing Integrity": "NT 10-K",
+  "Insider Cluster Buy": "Cluster buying",
+  "Price vs 52-wk High": "% off 52-wk high",
+  "Golden Cross": "Golden Cross",
+  "Death Cross": "Death Cross",
+  "52-wk Breakout": "52-wk Breakout",
+  "RSI": "RSI",
+  "Volume Spike": "Volume Spike",
+};
+
+function SignalCard({ s }: { s: Signal }) {
+  const term = SIGNAL_TERM[s.label];
+  const age = elapsed(s.date);
+  return (
+    <div className={`signal dir-${s.dir}`}>
+      <div className="sig-top">
+        <span className="sig-label">{s.label}{term && <InfoTip term={term} />}</span>
+        {age && <span className="sig-age" title={fmtDate(s.date)}>{age}</span>}
+        <DirMark dir={s.dir} />
+      </div>
+      <div className="sig-status">{s.status}</div>
+      <div className="sig-detail">{s.detail}</div>
+    </div>
+  );
+}
+
+// ─── Health Scorecard ─────────────────────────────────────────────────────────
+//
+// Turns the raw data into a plain-English read a non-analyst can act on: a grade
+// per dimension a shareholder cares about, an overall verdict, and a sentence or
+// two of summary. Derived entirely from data the cockpit already fetched — no
+// extra Supabase load.
+
+type Grade = "strong" | "good" | "mixed" | "weak" | "na";
+type ScoreDim = { label: string; grade: Grade; detail: string; term?: string };
+
+const GRADE_RANK:  Record<Grade, number> = { strong: 2, good: 1, na: 0, mixed: -1, weak: -2 };
+const GRADE_LABEL: Record<Grade, string> = { strong: "Strong", good: "Good", mixed: "Mixed", weak: "Weak", na: "—" };
+
+function buildScorecard(d: {
+  facts: FinancialFact[]; insider: InsiderTransaction[];
+  offers: SecuritiesOffering[]; lateF: LateFiling[]; events: CorporateEvent[];
+}): { dims: ScoreDim[]; overall: Grade; summary: string } {
+  const Q = "quarterly" as const;
+  const rev   = seriesFor(d.facts, "income",   Q, METRICS.revenue);
+  const ni    = seriesFor(d.facts, "income",   Q, METRICS.netIncome);
+  const cash  = seriesFor(d.facts, "balance",  Q, METRICS.cash);
+  const debt  = seriesFor(d.facts, "balance",  Q, METRICS.longTermDebt);
+  const ocf   = seriesFor(d.facts, "cashflow", Q, METRICS.operatingCF);
+  const capex = seriesFor(d.facts, "cashflow", Q, METRICS.capex);
+  const last = (p: { value: number }[]) => (p.length ? p[p.length - 1].value : null);
+  const back = (p: { value: number }[], n: number) => (p.length > n ? p[p.length - 1 - n].value : null);
+
+  const dims: ScoreDim[] = [];
+
+  // Revenue growth (YoY)
+  {
+    const cur = last(rev), yago = back(rev, 4);
+    if (cur != null && yago) {
+      const g = ((cur - yago) / Math.abs(yago)) * 100;
+      dims.push({
+        label: "Revenue Growth", term: "YoY",
+        grade: g >= 15 ? "strong" : g >= 5 ? "good" : g >= 0 ? "mixed" : "weak",
+        detail: `${fmtDelta(g)} year-over-year`,
+      });
+    } else dims.push({ label: "Revenue Growth", grade: "na", detail: "Not enough history", term: "YoY" });
+  }
+
+  // Profitability (net margin)
+  {
+    const r = last(rev), n = last(ni);
+    if (r && n != null) {
+      const m = (n / r) * 100;
+      dims.push({
+        label: "Profitability", term: "Net Margin",
+        grade: m >= 15 ? "strong" : m >= 5 ? "good" : m > 0 ? "mixed" : "weak",
+        detail: `${fmtPct(m)} net margin`,
+      });
+    } else dims.push({ label: "Profitability", grade: "na", detail: "No earnings data", term: "Net Margin" });
+  }
+
+  // Balance sheet (cash vs long-term debt)
+  {
+    const c = last(cash);
+    if (c != null) {
+      const dbt = last(debt) ?? 0;
+      const ratio = dbt > 0 ? c / dbt : Infinity;
+      dims.push({
+        label: "Balance Sheet", term: "Long-Term Debt",
+        grade: ratio >= 1.5 ? "strong" : ratio >= 0.8 ? "good" : ratio >= 0.4 ? "mixed" : "weak",
+        detail: dbt > 0 ? `${fmtUSD(c)} cash vs ${fmtUSD(dbt)} debt` : `${fmtUSD(c)} cash, minimal debt`,
+      });
+    } else dims.push({ label: "Balance Sheet", grade: "na", detail: "No balance-sheet data" });
+  }
+
+  // Cash generation (free cash flow)
+  {
+    const o = last(ocf);
+    if (o != null) {
+      const fcf = o - (last(capex) ?? 0);
+      const prevO = back(ocf, 4), prevFcf = prevO != null ? prevO - (back(capex, 4) ?? 0) : null;
+      const grade: Grade = fcf <= 0 ? "weak" : (prevFcf != null && fcf > prevFcf ? "strong" : "good");
+      dims.push({ label: "Cash Generation", term: "Free Cash Flow", grade, detail: `${fmtUSD(fcf)} free cash flow` });
+    } else dims.push({ label: "Cash Generation", grade: "na", detail: "No cash-flow data", term: "Free Cash Flow" });
+  }
+
+  // Insider sentiment (trailing 90 days) — open-market conviction only. Cluster
+  // buying is the strongest tell; routine grants/options/tax sales don't count.
+  {
+    const ins = analyzeInsider(d.insider, 90);
+    if (ins.clusterBuy) {
+      dims.push({ label: "Insider Sentiment", term: "Cluster buying", grade: "strong",
+        detail: `Cluster buy — ${ins.distinctBuyers} insiders bought ${fmtUSD(ins.buyValue)} open-market` });
+    } else if (ins.anyOpenMarket) {
+      const net = ins.netOpenMarket;
+      dims.push({ label: "Insider Sentiment", term: "Open-market buy",
+        grade: net > 0 ? "good" : net < 0 ? "weak" : "mixed",
+        detail: net >= 0 ? `Net open-market buying (${fmtUSD(net, { sign: true })})` : `Net open-market selling (${fmtUSD(net, { sign: true })})` });
+    } else if (ins.routineValue > 0) {
+      dims.push({ label: "Insider Sentiment", term: "Insider", grade: "mixed",
+        detail: "Routine grants / options only — no open-market trades" });
+    } else {
+      dims.push({ label: "Insider Sentiment", grade: "na", detail: "No recent insider trades", term: "Insider" });
+    }
+  }
+
+  // Risk flags (late filings, restatements, dilution)
+  {
+    const restate = d.events.some((e) => e.event_class === "restatement");
+    const yr = Date.now() - 365 * 86_400_000;
+    const recentOffers = d.offers.filter((o) => o.filed_at && new Date(o.filed_at).getTime() > yr);
+    const grade: Grade = (d.lateF.length || restate) ? "weak" : recentOffers.length ? "mixed" : "strong";
+    const detail = d.lateF.length ? "Late-filing notice on record"
+      : restate ? "Financial restatement on record"
+      : recentOffers.length ? `${recentOffers.length} securities offering${recentOffers.length > 1 ? "s" : ""} (dilution)`
+      : "No red flags detected";
+    dims.push({ label: "Risk Flags", grade, detail, term: "NT 10-K" });
+  }
+
+  // Overall = average of graded dimensions.
+  const graded = dims.filter((x) => x.grade !== "na");
+  const avg = graded.length ? graded.reduce((s, x) => s + GRADE_RANK[x.grade], 0) / graded.length : 0;
+  const overall: Grade = !graded.length ? "na" : avg >= 1.1 ? "strong" : avg >= 0.3 ? "good" : avg >= -0.6 ? "mixed" : "weak";
+
+  // Plain-English summary.
+  const wins = dims.filter((x) => x.grade === "strong" || x.grade === "good").map((x) => x.label.toLowerCase());
+  const worries = dims.filter((x) => x.grade === "weak" || x.grade === "mixed");
+  const verdict = { strong: "looks financially healthy", good: "is in reasonable shape", mixed: "is a mixed picture", weak: "shows signs of strain", na: "can't be assessed yet" }[overall];
+  let summary = `On the numbers it has reported, this company ${verdict}.`;
+  if (wins.length) summary += ` Strengths: ${wins.slice(0, 3).join(", ")}.`;
+  if (worries.length) summary += ` Watch: ${worries.map((w) => `${w.label.toLowerCase()} (${w.detail.toLowerCase()})`).slice(0, 2).join("; ")}.`;
+  summary += " Not investment advice — a read of the filings, not the share price.";
+
+  return { dims, overall, summary };
+}
+
+function Scorecard({ card }: { card: { dims: ScoreDim[]; overall: Grade; summary: string } }) {
+  return (
+    <div className={`scorecard grade-${card.overall}`}>
+      <div className="sc-top">
+        <div className="sc-overall">
+          <span className="sc-overall-label">Health check</span>
+          <span className={`sc-badge grade-${card.overall}`}>{GRADE_LABEL[card.overall]}</span>
+        </div>
+        <p className="sc-summary">{card.summary}</p>
+      </div>
+      <div className="sc-grid">
+        {card.dims.map((dm) => (
+          <div key={dm.label} className={`sc-dim grade-${dm.grade}`}>
+            <div className="sc-dim-top">
+              <span className="sc-dim-label">{dm.label}{dm.term && <InfoTip term={dm.term} />}</span>
+              <span className={`sc-dim-grade grade-${dm.grade}`}>{GRADE_LABEL[dm.grade]}</span>
+            </div>
+            <div className="sc-dim-detail">{dm.detail}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function CompanyOverviewTab({
   cik, facts, loading,
 }: { cik: string; facts: FinancialFact[]; loading: boolean }) {
   const [recentFilings, setRecentFilings] = useState<Filing[]>([]);
-  const [loadingFilings, setLoadingFilings] = useState(true);
+  const [earnings, setEarnings]     = useState<EarningsEvent[]>([]);
+  const [events, setEvents]         = useState<CorporateEvent[]>([]);
+  const [insider, setInsider]       = useState<InsiderTransaction[]>([]);
+  const [holdings, setHoldings]     = useState<InstitutionalHolding[]>([]);
+  const [beneficial, setBeneficial] = useState<BeneficialOwnership[]>([]);
+  const [offers, setOffers]         = useState<SecuritiesOffering[]>([]);
+  const [lateF, setLateF]           = useState<LateFiling[]>([]);
+  const [prices, setPrices]         = useState<DailyPrice[]>([]);
+  const [loadingAux, setLoadingAux] = useState(true);
 
   useEffect(() => {
-    setLoadingFilings(true);
-    fetchFilingsForCik(cik, 10).then((d) => { setRecentFilings(d); setLoadingFilings(false); });
+    setLoadingAux(true);
+    Promise.all([
+      fetchFilingsForCik(cik, 10), fetchEarningsEvents(cik), fetchCorporateEvents(cik),
+      fetchInsiderTransactions(cik), fetchInstitutionalHoldings(cik),
+      fetchBeneficialOwnership(cik), fetchSecuritiesOfferings(cik), fetchLateFilings(cik),
+      fetchPrices(cik),
+    ]).then(([fil, ea, ev, ins, hol, ben, off, lat, prc]) => {
+      setRecentFilings(fil); setEarnings(ea); setEvents(ev); setInsider(ins);
+      setHoldings(hol); setBeneficial(ben); setOffers(off); setLateF(lat); setPrices(prc);
+      setLoadingAux(false);
+    });
   }, [cik]);
 
-  const kpis = useMemo(() => {
-    if (loading || !facts.length) return [];
-    return deriveKpis(facts, "quarterly");
-  }, [facts, loading]);
+  const kpis = useMemo(() => (loading || !facts.length ? [] : deriveKpis(facts, "quarterly")), [facts, loading]);
+
+  const revTrend = useMemo(() => {
+    const rev = seriesFor(facts, "income", "quarterly", METRICS.revenue);
+    const yoy = yoyGrowth(rev, 4);
+    return rev.map((p, i) => ({ x: fmtPeriodLabel(p.period, "quarterly"), Revenue: p.value, YoY: yoy[i] }));
+  }, [facts]);
+
+  const tape    = useMemo(() => buildTape({ earnings, events, insider, beneficial, offers, lateF }), [earnings, events, insider, beneficial, offers, lateF]);
+  const signals = useMemo(() => buildSignals({ facts, earnings, insider, holdings, beneficial, offers, lateF, prices }), [facts, earnings, insider, holdings, beneficial, offers, lateF, prices]);
+  const scorecard = useMemo(() => buildScorecard({ facts, insider, offers, lateF, events }), [facts, insider, offers, lateF, events]);
+
+  const priceKpis = useMemo(() => derivePriceKpis(prices), [prices]);
+  const valuation = useMemo(() => deriveValuation(facts, prices), [facts, prices]);
+  const priceSma  = useMemo(() => smaSeries(prices), [prices]);
+
+  // Event markers on the price chart: snap each recent event to the close on/before
+  // its date so the dot lands on a real bar, colored by the event's direction.
+  const priceMarkers = useMemo(() => {
+    if (priceSma.length < 2) return [];
+    const dirColor: Record<string, string> = { bull: "#3fb950", bear: "#f05252", flag: "#f5a623", neutral: "#7aa2f7" };
+    const out: { x: string; y: number; color: string }[] = [];
+    for (const ev of events.slice(0, 24)) {
+      const d = ev.event_date ?? ev.filed_at;
+      if (!d) continue;
+      const day = d.slice(0, 10);
+      // last bar on/before the event day
+      let bar: { x: string; Close: number } | null = null;
+      for (const p of priceSma) { if (p.x <= day) bar = p; else break; }
+      if (bar) out.push({ x: bar.x, y: bar.Close, color: dirColor[EVENT_CLASS_DIR[ev.event_class ?? "other"] ?? "neutral"] });
+    }
+    return out;
+  }, [priceSma, events]);
+
+  const bias = useMemo(() => {
+    const b = signals.filter((s) => s.dir === "bull").length;
+    const r = signals.filter((s) => s.dir === "bear").length;
+    const f = signals.filter((s) => s.dir === "flag").length;
+    return { b, r, f };
+  }, [signals]);
 
   const filCols: Column<Filing>[] = [
     { key: "form", header: "Form", width: "80px", value: (f) => f.form_type, render: (f) => <FormBadge form={f.form_type} /> },
@@ -571,20 +1420,119 @@ function CompanyOverviewTab({
   ];
 
   return (
-    <div>
-      {kpis.length > 0 && (
-        <div className="kpi-strip">
-          {kpis.map((k) => (
-            <KpiTile key={k.label} label={k.label} value={k.value} fmt={k.fmt} qoq={k.qoq} yoy={k.yoy} />
-          ))}
-        </div>
+    <div className="cockpit">
+      {/* ── 00 · HEALTH CHECK (plain-English verdict) ─────────────────────────── */}
+      {loadingAux || loading ? (
+        <div className="skeleton" style={{ height: 150, borderRadius: 8 }} />
+      ) : (
+        <Scorecard card={scorecard} />
       )}
-      <div className="section">
-        <div className="section-title">Recent Filings</div>
-        {loadingFilings ? (
+
+      {/* ── 01 · NOW ──────────────────────────────────────────────────────────── */}
+      <section className="ckpt-zone">
+        <div className="ckpt-zone-head">
+          <span className="ckpt-q">01</span> Where it stands
+          <span className="ckpt-sub">latest reported fundamentals</span>
+        </div>
+        {kpis.length > 0 ? (
+          <div className="kpi-strip dense">
+            {kpis.map((k) => <KpiTile key={k.label} label={k.label} value={k.value} fmt={k.fmt} qoq={k.qoq} yoy={k.yoy} />)}
+          </div>
+        ) : (
+          <div className="empty-note">No fundamentals parsed yet.</div>
+        )}
+        {priceKpis.last != null && (
+          <>
+            <PriceStrip k={priceKpis} />
+            {valuation.marketCap != null && (
+              <div className="kpi-strip dense">
+                <div className="kpi">
+                  <div className="k-label">Market Cap<InfoTip term="Market Cap" /></div>
+                  <div className="k-value">{fmtUSD(valuation.marketCap)}</div>
+                </div>
+                <div className="kpi">
+                  <div className="k-label">P/E (TTM)<InfoTip term="P/E (TTM)" /></div>
+                  <div className="k-value">{valuation.peTTM != null ? fmtNum(valuation.peTTM, 1) : "—"}</div>
+                  <div className="k-delta"><span className="muted">{valuation.epsTTM != null ? `EPS ${fmtUSD(valuation.epsTTM)}` : ""}</span></div>
+                </div>
+                <div className="kpi">
+                  <div className="k-label">P/S (TTM)<InfoTip term="P/S (TTM)" /></div>
+                  <div className="k-value">{valuation.psTTM != null ? fmtNum(valuation.psTTM, 1) : "—"}</div>
+                  <div className="k-delta"><span className="muted">{valuation.revenueTTM != null ? `Rev ${fmtUSD(valuation.revenueTTM)}` : ""}</span></div>
+                </div>
+              </div>
+            )}
+            {priceSma.length > 1 && (
+              <PriceChart
+                data={priceSma} markers={priceMarkers}
+                title="Share price (EOD, ~2y) · 50/200-day MA"
+                info="End-of-day close (teal) with 50-day and 200-day moving averages. Dots mark recent 8-K events, colored by direction. Click a legend item to toggle a line; prices are EOD, not realtime."
+              />
+            )}
+          </>
+        )}
+        {revTrend.length > 1 && (
+          <ComboChart
+            data={revTrend} barKey="Revenue" lineKey="YoY" barName="Revenue" lineName="YoY %"
+            title="Revenue trend (quarterly)"
+            info="Bars show quarterly revenue (left axis); the line is year-over-year growth in percent (right axis). Click a legend item to hide it; hover for exact values."
+          />
+        )}
+      </section>
+
+      {/* ── 02 · HAPPENED  ·  03 · GOING ──────────────────────────────────────── */}
+      <div className="ckpt-split">
+        <section className="ckpt-zone">
+          <div className="ckpt-zone-head">
+            <span className="ckpt-q">02</span> What just happened
+            <span className="ckpt-sub">recent price-moving disclosures</span>
+          </div>
+          {loadingAux ? (
+            <div className="skeleton-block">
+              {[0, 1, 2, 3, 4, 5].map((i) => <div key={i} className="skeleton" style={{ height: 30, borderRadius: 4, opacity: 0.8 - i * 0.1 }} />)}
+            </div>
+          ) : tape.length === 0 ? (
+            <div className="empty-note">No catalyst events recorded yet.</div>
+          ) : (
+            <div className="tape">
+              {tape.slice(0, 16).map((t, i) => <TapeRow key={`${t.date}-${t.kind}-${i}`} t={t} />)}
+            </div>
+          )}
+        </section>
+
+        <section className="ckpt-zone">
+          <div className="ckpt-zone-head">
+            <span className="ckpt-q">03</span> Where it&apos;s heading
+            <span className="ckpt-sub">forward signals</span>
+          </div>
+          {!loadingAux && signals.length > 0 && (
+            <div className="bias-bar">
+              {bias.b > 0 && <span className="dir-bull">▲ {bias.b} bullish</span>}
+              {bias.r > 0 && <span className="dir-bear">▼ {bias.r} bearish</span>}
+              {bias.f > 0 && <span className="dir-flag">◆ {bias.f} flag{bias.f > 1 ? "s" : ""}</span>}
+            </div>
+          )}
+          {loadingAux ? (
+            <div className="skeleton-block">
+              {[0, 1, 2, 3].map((i) => <div key={i} className="skeleton" style={{ height: 56, borderRadius: 4, opacity: 0.8 - i * 0.12 }} />)}
+            </div>
+          ) : signals.length === 0 ? (
+            <div className="empty-note">Not enough history to derive signals.</div>
+          ) : (
+            <div className="signal-stack">
+              {signals.map((s) => <SignalCard key={s.label} s={s} />)}
+            </div>
+          )}
+        </section>
+      </div>
+
+      {/* ── Recent filings (raw tape) ─────────────────────────────────────────── */}
+      <section className="ckpt-zone">
+        <div className="ckpt-zone-head"><span className="ckpt-q">·</span> Recent filings</div>
+        {loadingAux ? (
           <div className="skeleton-block">
             <div className="skeleton" style={{ height: 36, borderRadius: 4 }} />
-            {[0,1,2,3,4].map((i) => <div key={i} className="skeleton" style={{ height: 32, borderRadius: 4, opacity: 0.7 - i * 0.1 }} />)}
+            {[0, 1, 2, 3, 4].map((i) => <div key={i} className="skeleton" style={{ height: 32, borderRadius: 4, opacity: 0.7 - i * 0.1 }} />)}
           </div>
         ) : (
           <DataTable
@@ -592,7 +1540,170 @@ function CompanyOverviewTab({
             initialSort={{ key: "filed", dir: "desc" }} empty="No filings."
           />
         )}
-      </div>
+      </section>
+    </div>
+  );
+}
+
+// ─── Strategy & Investments tab ───────────────────────────────────────────────
+//
+// Answers "what is this company investing in, and where is it heading?" from three
+// angles: its industry category + forward themes (curated taxonomy), its own
+// capital allocation (R&D and CapEx — money committed to the future), and its
+// outbound investments in other companies (acquisitions + any 13F portfolio).
+
+/** Prefer annual series for a clean multi-year story; fall back to quarterly. */
+function annualOrQuarterly(facts: FinancialFact[], statement: StatementKind, match: (f: FinancialFact) => boolean) {
+  const a = seriesFor(facts, statement, "annual", match);
+  if (a.length > 1) return { points: a, period: "annual" as PeriodType };
+  return { points: seriesFor(facts, statement, "quarterly", match), period: "quarterly" as PeriodType };
+}
+
+function StrategyTab({
+  cik, ticker, facts, loading,
+}: { cik: string; ticker: string; facts: FinancialFact[]; loading: boolean }) {
+  const [events, setEvents]     = useState<CorporateEvent[]>([]);
+  const [portfolio, setPortfolio] = useState<InstitutionalHolding[]>([]);
+  const [loadingAux, setLoadingAux] = useState(true);
+
+  useEffect(() => {
+    setLoadingAux(true);
+    Promise.all([fetchCorporateEvents(cik), fetchManagerHoldings(cik)])
+      .then(([ev, pf]) => { setEvents(ev); setPortfolio(pf); setLoadingAux(false); });
+  }, [cik]);
+
+  const profile = profileFor(ticker, null, null, cik);
+
+  // Capital allocation: R&D and CapEx are the clearest "investing in the future" lines.
+  const rd     = useMemo(() => annualOrQuarterly(facts, "income", METRICS.rAndD), [facts]);
+  const capex  = useMemo(() => annualOrQuarterly(facts, "cashflow", METRICS.capex), [facts]);
+
+  const rdData = useMemo(() => {
+    if (rd.points.length < 2) return [];
+    const rev = seriesFor(facts, "income", rd.period, METRICS.revenue);
+    const revAt = new Map(rev.map((p) => [p.period, p.value]));
+    return rd.points.map((p) => {
+      const r = revAt.get(p.period);
+      return { x: fmtPeriodLabel(p.period, rd.period), rd: p.value, pct: r ? (p.value / r) * 100 : null };
+    });
+  }, [rd, facts]);
+
+  const capexData = useMemo(
+    () => (capex.points.length < 2 ? [] : capex.points.map((p) => ({ x: fmtPeriodLabel(p.period, capex.period), CapEx: p.value }))),
+    [capex],
+  );
+
+  const acquisitions = useMemo(() => events.filter((e) => e.event_class === "M&A"), [events]);
+
+  // Latest reported portfolio quarter, ranked by position value.
+  const latestPortfolio = useMemo(() => {
+    if (portfolio.length === 0) return [];
+    const latest = portfolio.reduce((m, h) => (h.period_of_report > m ? h.period_of_report : m), portfolio[0].period_of_report);
+    return portfolio.filter((h) => h.period_of_report === latest).sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  }, [portfolio]);
+
+  const acqCols: Column<CorporateEvent>[] = [
+    { key: "date", header: "Date", width: "110px", value: (e) => e.event_date ?? e.filed_at ?? "", render: (e) => <span className="muted">{fmtDate(e.event_date ?? e.filed_at)}</span> },
+    { key: "summary", header: "Deal / Strategic Move", value: (e) => e.summary ?? "", render: (e) => <span>{e.summary ?? "—"}</span> },
+  ];
+
+  const pfCols: Column<InstitutionalHolding>[] = [
+    { key: "ticker", header: "Holding", width: "90px", value: (h) => h.ticker ?? h.cik, render: (h) => <strong style={{ color: "var(--accent)" }}>{h.ticker ?? h.cik}</strong> },
+    { key: "value", header: "Position Value", align: "right", value: (h) => h.value ?? 0, render: (h) => <span className="dt-num">{fmtUSD(h.value)}</span> },
+    { key: "shares", header: "Shares", align: "right", value: (h) => h.shares ?? 0, render: (h) => <span className="dt-num">{fmtNum(h.shares, 0)}</span> },
+    { key: "pct", header: "% of Portfolio", align: "right", value: (h) => h.pct_of_portfolio ?? 0, render: (h) => <span className="dt-num">{h.pct_of_portfolio != null ? fmtPct(h.pct_of_portfolio) : "—"}</span> },
+  ];
+
+  return (
+    <div className="cockpit">
+      {/* ── Direction: industry category + forward themes ─────────────────────── */}
+      <section className="ckpt-zone">
+        <div className="ckpt-zone-head">
+          <span className="ckpt-q">◧</span> Industry &amp; future direction
+          <span className="ckpt-sub">where the company plays, and what it&apos;s betting on next</span>
+        </div>
+        {profile ? (
+          <div className="strategy-head">
+            <div className="cat-row">
+              {profile.sector !== "—" && <span className="cat-chip sector">{profile.sector}</span>}
+              {profile.industry !== "—" && <span className="cat-chip">{profile.industry}</span>}
+            </div>
+            {profile.thesis && <p className="strategy-focus">{profile.thesis}</p>}
+            {profile.themes.length > 0 && (
+              <>
+                <div className="label-caps" style={{ marginBottom: 10 }}>Investing in / next-trend bets</div>
+                <div className="theme-grid">
+                  {profile.themes.map((t) => (
+                    <div key={t.name} className="theme-card">
+                      <div className="theme-name">{t.name}</div>
+                      <div className="theme-note">{t.note}</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="empty-note">No industry profile on file for this company.</div>
+        )}
+      </section>
+
+      {/* ── Capital allocation: money committed to the future ─────────────────── */}
+      <section className="ckpt-zone">
+        <div className="ckpt-zone-head">
+          <span className="ckpt-q">$</span> Investment in the future
+          <span className="ckpt-sub">R&amp;D and capital expenditure</span>
+        </div>
+        {loading ? (
+          <div className="chart-grid"><SkeletonChart /><SkeletonChart /></div>
+        ) : rdData.length === 0 && capexData.length === 0 ? (
+          <div className="empty-note">No R&amp;D or CapEx history parsed yet.</div>
+        ) : (
+          <div className="chart-grid">
+            {rdData.length > 1 && (
+              <ComboChart
+                data={rdData} barKey="rd" lineKey="pct" barName="R&D" lineName="% of Revenue"
+                title="R&D Investment & Intensity"
+                info="Bars: absolute research & development spend (left axis). Line: R&D as a percent of revenue (right axis) — how much of every sales dollar is reinvested into innovation."
+              />
+            )}
+            {capexData.length > 1 && (
+              <SimpleBarChart
+                data={capexData} barKey="CapEx" title="Capital Expenditure"
+                info="Cash spent on property, plant, and equipment — physical investment in future capacity (data centers, factories, fabs)."
+              />
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* ── Outbound: investing in other companies ────────────────────────────── */}
+      <section className="ckpt-zone">
+        <div className="ckpt-zone-head">
+          <span className="ckpt-q">⇄</span> Investing in other companies
+          <span className="ckpt-sub">acquisitions &amp; strategic deals</span>
+        </div>
+        {loadingAux ? (
+          <div className="skeleton-block">{[0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 32, borderRadius: 4, opacity: 0.8 - i * 0.15 }} />)}</div>
+        ) : acquisitions.length === 0 ? (
+          <div className="empty-note">No M&amp;A or strategic-investment events recorded (from 8-K Item 1.01 / 2.01).</div>
+        ) : (
+          <DataTable columns={acqCols} rows={acquisitions} rowKey={(e) => e.accession_number}
+            initialSort={{ key: "date", dir: "desc" }} maxHeight="320px" empty="None." />
+        )}
+      </section>
+
+      {/* ── Disclosed equity portfolio (only if the company files 13F) ────────── */}
+      {!loadingAux && latestPortfolio.length > 0 && (
+        <section className="ckpt-zone">
+          <div className="ckpt-zone-head">
+            <span className="ckpt-q">▦</span> Disclosed equity portfolio
+            <span className="ckpt-sub">stakes this company reports holding (Form 13F)</span>
+          </div>
+          <DataTable columns={pfCols} rows={latestPortfolio} rowKey={(h) => `${h.cik}|${h.period_of_report}`}
+            initialSort={{ key: "value", dir: "desc" }} filterable filterPlaceholder="Filter holdings…" maxHeight="360px" />
+        </section>
+      )}
     </div>
   );
 }
@@ -805,10 +1916,12 @@ function FundamentalsTab({ facts, loading }: { facts: FinancialFact[]; loading: 
         <div className="section-title">Income</div>
         <div className="chart-grid">
           {revData.length > 1 && (
-            <ComboChart data={revData} barKey="rev" lineKey="yoy" barName="Revenue" lineName="YoY %" title="Revenue & YoY Growth" />
+            <ComboChart data={revData} barKey="rev" lineKey="yoy" barName="Revenue" lineName="YoY %" title="Revenue & YoY Growth"
+              info="Bars: total sales per period (left axis). Line: year-over-year growth rate, which strips out seasonality (right axis)." />
           )}
           {incomeData.length > 1 && oi.length > 1 && (
-            <PairedBarChart data={incomeData} keyA="Operating Income" keyB="Net Income" nameA="Op. Income" nameB="Net Income" title="Operating & Net Income" />
+            <PairedBarChart data={incomeData} keyA="Operating Income" keyB="Net Income" nameA="Op. Income" nameB="Net Income" title="Operating & Net Income"
+              info="Operating income is profit from core operations before interest and taxes. Net income is the final bottom line after everything." />
           )}
           {marginData.length > 1 && (
             <MultiLineChart
@@ -819,10 +1932,12 @@ function FundamentalsTab({ facts, loading }: { facts: FinancialFact[]; loading: 
                 ...(ni.length > 1 ? [{ key: "Net %",   name: "Net Margin"   }] : []),
               ]}
               title="Margin Trends"
+              info="Each line is a profit margin — profit as a percent of revenue — at a different stage. Rising margins mean the business is getting more efficient. Click the legend to isolate one."
             />
           )}
           {epsData.length > 1 && (
-            <SimpleBarChart data={epsData} barKey="EPS" title="Diluted EPS" signed />
+            <SimpleBarChart data={epsData} barKey="EPS" title="Diluted EPS" signed
+              info="Diluted earnings per share: net income spread across all shares that would exist if every option and convertible were exercised — the most conservative per-share profit." />
           )}
           {expData.length > 1 && (rd.length > 1 || sga.length > 1) && (
             <StackedBarChart
@@ -843,7 +1958,8 @@ function FundamentalsTab({ facts, loading }: { facts: FinancialFact[]; loading: 
           <div className="section-title">Balance Sheet & Per-Share</div>
           <div className="chart-grid">
             {cashDebt.length > 1 && (
-              <PairedBarChart data={cashDebt} keyA="Cash" keyB="Debt" nameA="Cash" nameB="L/T Debt" title="Cash vs Long-Term Debt" />
+              <PairedBarChart data={cashDebt} keyA="Cash" keyB="Debt" nameA="Cash" nameB="L/T Debt" title="Cash vs Long-Term Debt"
+                info="Liquidity (cash & marketable securities) set against long-term borrowings. More cash than debt is a sign of balance-sheet strength." />
             )}
             {assetEqData.length > 1 && (
               <PairedBarChart data={assetEqData} keyA="Assets" keyB="Equity" nameA="Total Assets" nameB="Equity" title="Assets & Stockholders' Equity" />
@@ -864,10 +1980,12 @@ function FundamentalsTab({ facts, loading }: { facts: FinancialFact[]; loading: 
           <div className="section-title">Cash Flow</div>
           <div className="chart-grid">
             {fcfData.length > 1 && (
-              <SimpleBarChart data={fcfData} barKey="FCF" title="Free Cash Flow" signed />
+              <SimpleBarChart data={fcfData} barKey="FCF" title="Free Cash Flow" signed
+                info="Free cash flow = operating cash flow minus capital expenditures. The cash a business actually generates after funding its own operations and equipment." />
             )}
             {cfData.length > 1 && (
-              <PairedBarChart data={cfData} keyA="Operating" keyB="CapEx" nameA="Operating CF" nameB="CapEx" title="Operating CF vs CapEx" />
+              <PairedBarChart data={cfData} keyA="Operating" keyB="CapEx" nameA="Operating CF" nameB="CapEx" title="Operating CF vs CapEx"
+                info="Operating cash flow is cash from core operations; CapEx is cash spent on property and equipment. Operating CF comfortably above CapEx funds growth without borrowing." />
             )}
           </div>
         </div>
@@ -877,6 +1995,88 @@ function FundamentalsTab({ facts, loading }: { facts: FinancialFact[]; loading: 
 }
 
 // ─── Ownership tab ────────────────────────────────────────────────────────────
+
+// ─── Peers tab — compare the company against the rest of the watchlist ──────────
+type PeerRow = {
+  cik: string; ticker: string; name: string;
+  revG: number | null; netMargin: number | null; pe: number | null; ps: number | null; mcap: number | null;
+};
+
+function PeersTab({ cik, peers }: { cik: string; peers: Company[] }) {
+  const [facts, setFacts]   = useState<FinancialFact[]>([]);
+  const [prices, setPrices] = useState<DailyPrice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const ciks = useMemo(() => peers.map((p) => p.cik), [peers]);
+  const cikKey = ciks.join(",");
+
+  useEffect(() => {
+    if (!ciks.length) { setLoading(false); return; }
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([fetchIncomeFactsForCiks(ciks), fetchRecentPrices(ciks, 15)]).then(([f, p]) => {
+      if (cancelled) return;
+      setFacts(f); setPrices(p); setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [cikKey]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const rows = useMemo<PeerRow[]>(() => {
+    const factsBy = new Map<string, FinancialFact[]>();
+    for (const f of facts) { const a = factsBy.get(f.cik) ?? []; a.push(f); factsBy.set(f.cik, a); }
+    const pxBy = new Map<string, DailyPrice[]>();
+    for (const p of prices) { const a = pxBy.get(p.cik) ?? []; a.push(p); pxBy.set(p.cik, a); }
+    return peers.map((c) => {
+      const ff = factsBy.get(c.cik) ?? [];
+      const rev = seriesFor(ff, "income", "quarterly", METRICS.revenue);
+      const ni  = seriesFor(ff, "income", "quarterly", METRICS.netIncome);
+      const revG = rev.length >= 5 && rev[rev.length - 5].value
+        ? ((rev[rev.length - 1].value - rev[rev.length - 5].value) / Math.abs(rev[rev.length - 5].value)) * 100 : null;
+      const r = rev.at(-1)?.value, n = ni.at(-1)?.value;
+      const netMargin = r && n != null ? (n / r) * 100 : null;
+      const val = deriveValuation(ff, pxBy.get(c.cik) ?? []);
+      return { cik: c.cik, ticker: c.ticker ?? "?", name: c.name ?? c.cik, revG, netMargin, pe: val.peTTM, ps: val.psTTM, mcap: val.marketCap };
+    });
+  }, [peers, facts, prices]);
+
+  const median = (xs: (number | null)[]) => {
+    const v = xs.filter((x): x is number => x != null).sort((a, b) => a - b);
+    if (!v.length) return null;
+    const m = Math.floor(v.length / 2);
+    return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+  };
+  const med = useMemo(() => ({
+    revG: median(rows.map((r) => r.revG)), netMargin: median(rows.map((r) => r.netMargin)),
+    pe: median(rows.map((r) => r.pe)), ps: median(rows.map((r) => r.ps)),
+  }), [rows]);
+
+  const cols: Column<PeerRow>[] = [
+    { key: "ticker", header: "Ticker", width: "96px", value: (r) => r.ticker,
+      render: (r) => <strong style={{ color: r.cik === cik ? "var(--accent)" : undefined }}>{r.ticker}{r.cik === cik ? " ◂" : ""}</strong> },
+    { key: "revG", header: "Rev YoY", align: "right", value: (r) => r.revG ?? -9999,
+      render: (r) => r.revG != null ? <span className={`dt-num ${r.revG >= 0 ? "pos" : "neg"}`}>{fmtDelta(r.revG)}</span> : <span className="dimmed">—</span> },
+    { key: "nm", header: "Net Margin", align: "right", value: (r) => r.netMargin ?? -9999,
+      render: (r) => r.netMargin != null ? <span className="dt-num">{fmtPct(r.netMargin)}</span> : <span className="dimmed">—</span> },
+    { key: "pe", header: "P/E", align: "right", value: (r) => r.pe ?? -1,
+      render: (r) => r.pe != null ? <span className="dt-num">{fmtNum(r.pe, 1)}</span> : <span className="dimmed">—</span> },
+    { key: "ps", header: "P/S", align: "right", value: (r) => r.ps ?? -1,
+      render: (r) => r.ps != null ? <span className="dt-num">{fmtNum(r.ps, 1)}</span> : <span className="dimmed">—</span> },
+    { key: "mcap", header: "Market Cap", align: "right", value: (r) => r.mcap ?? -1,
+      render: (r) => r.mcap != null ? <span className="dt-num">{fmtUSD(r.mcap)}</span> : <span className="dimmed">—</span> },
+  ];
+
+  if (loading) return <div className="section"><div className="skeleton" style={{ height: 160, borderRadius: 8 }} /></div>;
+  if (peers.length < 2) return <div className="empty-note">Add more companies to your watchlist to compare peers.</div>;
+
+  return (
+    <div className="section">
+      <div className="section-title">Peer comparison · your watchlist</div>
+      <div className="page-sub" style={{ marginBottom: 10 }}>
+        The active company (◂) vs your watchlist. Median — Rev YoY {med.revG != null ? fmtDelta(med.revG) : "—"} · Net margin {med.netMargin != null ? fmtPct(med.netMargin) : "—"} · P/E {med.pe != null ? fmtNum(med.pe, 1) : "—"} · P/S {med.ps != null ? fmtNum(med.ps, 1) : "—"}. Valuation uses a diluted-share proxy.
+      </div>
+      <DataTable columns={cols} rows={rows} rowKey={(r) => r.cik} initialSort={{ key: "mcap", dir: "desc" }} empty="No peer data." />
+    </div>
+  );
+}
 
 function OwnershipTab({ cik }: { cik: string }) {
   const [insider,    setInsider]    = useState<InsiderTransaction[]>([]);
@@ -919,6 +2119,9 @@ function OwnershipTab({ cik }: { cik: string }) {
     let cum = 0;
     return netFlowData.map(({ x, net }) => { cum += net; return { x, cumulative: cum }; });
   }, [netFlowData]);
+
+  // Open-market-only insider read for the quality strip (90-day window).
+  const insiderRead = useMemo(() => analyzeInsider(insider, 90), [insider]);
 
   // Buy vs sell dollar volume by quarter
   const buySellData = useMemo(() => {
@@ -1007,11 +2210,18 @@ function OwnershipTab({ cik }: { cik: string }) {
     {
       key: "type", header: "Code", width: "60px",
       value: (t) => t.transaction_code ?? t.acquired_disposed ?? "",
-      render: (t) => (
-        <span className={`badge badge-${t.acquired_disposed === "A" ? "buy" : "sell"}`}>
-          {t.transaction_code ?? (t.acquired_disposed === "A" ? "BUY" : "SELL")}
-        </span>
-      ),
+      render: (t) => {
+        const code = (t.transaction_code ?? "").toUpperCase();
+        const info = TX_CODE_INFO[code];
+        return (
+          <span
+            className={`badge badge-${t.acquired_disposed === "A" ? "buy" : "sell"}`}
+            title={info ? `${code} — ${info.label}: ${info.meaning}` : undefined}
+          >
+            {t.transaction_code ?? (t.acquired_disposed === "A" ? "BUY" : "SELL")}
+          </span>
+        );
+      },
     },
     { key: "shares", header: "Shares", align: "right", value: (t) => t.shares ?? 0, render: (t) => <span className="dt-num">{fmtNum(t.shares, 0)}</span> },
     { key: "price",  header: "Price",  align: "right", value: (t) => t.price  ?? 0, render: (t) => <span className="dt-num">{fmtUSD(t.price)}</span> },
@@ -1020,7 +2230,7 @@ function OwnershipTab({ cik }: { cik: string }) {
   ];
 
   const holdingsCols: Column<InstitutionalHolding>[] = [
-    { key: "manager", header: "Manager",   value: (h) => h.manager_name },
+    { key: "manager", header: "Manager",   value: (h) => h.manager_name, render: (h) => <NameContext name={h.manager_name} /> },
     { key: "period",  header: "Period",    value: (h) => h.period_of_report, render: (h) => <span className="muted">{fmtDate(h.period_of_report)}</span> },
     { key: "shares",  header: "Shares",    align: "right", value: (h) => h.shares ?? 0, render: (h) => <span className="dt-num">{fmtNum(h.shares, 0)}</span> },
     { key: "value",   header: "Value",     align: "right", value: (h) => h.value  ?? 0, render: (h) => <span className="dt-num">{fmtUSD(h.value)}</span> },
@@ -1029,7 +2239,7 @@ function OwnershipTab({ cik }: { cik: string }) {
 
   type QoQRow = { manager: string; action: string; shares: number; delta: number; value: number };
   const qoqCols: Column<QoQRow>[] = [
-    { key: "manager", header: "Manager", value: (r) => r.manager },
+    { key: "manager", header: "Manager", value: (r) => r.manager, render: (r) => <NameContext name={r.manager} /> },
     {
       key: "action", header: "Action", width: "80px",
       value: (r) => r.action,
@@ -1045,7 +2255,7 @@ function OwnershipTab({ cik }: { cik: string }) {
   ];
 
   const beneficialCols: Column<BeneficialOwnership>[] = [
-    { key: "filer",    header: "Filer",    value: (b) => b.filer_name ?? "" },
+    { key: "filer",    header: "Filer",    value: (b) => b.filer_name ?? "", render: (b) => <NameContext name={b.filer_name} /> },
     { key: "schedule", header: "Schedule", value: (b) => b.schedule ?? "" },
     { key: "activist", header: "Activist", value: (b) => b.is_activist ? "Yes" : "No", render: (b) => b.is_activist ? <span className="pos" style={{ fontWeight: 600 }}>Yes</span> : <span className="dimmed">No</span> },
     { key: "pct",      header: "% Class",  align: "right", value: (b) => b.pct_of_class ?? 0, render: (b) => <span className="dt-num">{b.pct_of_class != null ? fmtPct(b.pct_of_class) : "—"}</span> },
@@ -1067,15 +2277,37 @@ function OwnershipTab({ cik }: { cik: string }) {
     <div>
       {/* ── Insider Transactions ──────────────────────────────────────────── */}
       <div className="section">
-        <div className="section-title">Insider Activity (Form 4)</div>
+        <div className="section-title">Insider Activity (<Term term="Form 4">Form 4</Term>)</div>
         {insider.length === 0 ? <div className="empty-note">No insider transaction data yet.</div> : (
           <>
+            {/* Open-market conviction read — grants, option exercises and tax sales excluded. */}
+            <div className="kpi-strip dense">
+              <div className="kpi">
+                <div className="k-label"><Term term="Open-market buy">Open-market net</Term> · 90d</div>
+                <div className={`k-value ${insiderRead.anyOpenMarket ? (insiderRead.netOpenMarket >= 0 ? "pos" : "neg") : ""}`}>
+                  {insiderRead.anyOpenMarket ? fmtUSD(insiderRead.netOpenMarket, { sign: true }) : "—"}
+                </div>
+                <div className="k-delta"><span className="muted">{fmtUSD(insiderRead.buyValue)} bought · {fmtUSD(insiderRead.sellValue)} sold</span></div>
+              </div>
+              <div className="kpi">
+                <div className="k-label"><Term term="Cluster buying">Distinct buyers</Term></div>
+                <div className={`k-value ${insiderRead.clusterBuy ? "pos" : ""}`}>{insiderRead.distinctBuyers}{insiderRead.clusterBuy ? " ⚑" : ""}</div>
+                <div className="k-delta"><span className="muted">{insiderRead.distinctSellers} distinct seller{insiderRead.distinctSellers === 1 ? "" : "s"}</span></div>
+              </div>
+              <div className="kpi">
+                <div className="k-label">Routine (excl.)</div>
+                <div className="k-value dimmed">{fmtUSD(insiderRead.routineValue)}</div>
+                <div className="k-delta"><span className="muted">grants / options / tax</span></div>
+              </div>
+            </div>
             <div className="chart-grid charts-below">
               {netFlowData.length > 1 && (
-                <DivergingBarChart data={netFlowData} barKey="net" title="Net Shares Bought / Sold by Month" />
+                <DivergingBarChart data={netFlowData} barKey="net" title="Net Shares Bought / Sold by Month"
+                  info="Insiders' net trading each month: green above the line is net buying, red below is net selling. Cluster buying by insiders is a well-studied bullish signal." />
               )}
               {cumulativeData.length > 1 && (
-                <CumulativeLineChart data={cumulativeData} lineKey="cumulative" title="Cumulative Net Insider Shares" signed />
+                <CumulativeLineChart data={cumulativeData} lineKey="cumulative" title="Cumulative Net Insider Shares" signed
+                  info="The running total of insider buys minus sells over time. A rising line means insiders have been net accumulators of their own stock." />
               )}
               {buySellData.length > 1 && (
                 <PairedBarChart data={buySellData} keyA="Buy" keyB="Sell" nameA="Bought ($)" nameB="Sold ($)" title="Buy vs Sell Dollar Volume by Quarter" />
@@ -1095,15 +2327,17 @@ function OwnershipTab({ cik }: { cik: string }) {
 
       {/* ── Institutional Holdings (13F) ──────────────────────────────────── */}
       <div className="section">
-        <div className="section-title">Institutional Holdings (13F-HR)</div>
+        <div className="section-title">Institutional Holdings (<Term term="13F-HR">13F-HR</Term>)</div>
         {holdings.length === 0 ? <div className="empty-note">No institutional holdings data yet.</div> : (
           <>
             <div className="chart-grid charts-below">
               {topHoldersData.length > 0 && (
-                <HorizontalBarChart data={topHoldersData} barKey="value" labelKey="label" title="Top Holders by Position Value (Latest Quarter)" />
+                <HorizontalBarChart data={topHoldersData} barKey="value" labelKey="label" title="Top Holders by Position Value (Latest Quarter)"
+                  info="The largest institutional positions reported on Form 13F. These filings lag up to 45 days after quarter-end, so they confirm trends rather than predict them." />
               )}
               {managerCountData.length > 1 && (
-                <SimpleBarChart data={managerCountData} barKey="Managers" title="Number of Major Institutions Holding Stock by Quarter" />
+                <SimpleBarChart data={managerCountData} barKey="Managers" title="Number of Major Institutions Holding Stock by Quarter"
+                  info="How many large institutional managers hold the stock each quarter. A rising count signals broadening 'smart money' interest." />
               )}
             </div>
 
@@ -1129,7 +2363,7 @@ function OwnershipTab({ cik }: { cik: string }) {
       {/* ── Beneficial Ownership (SC 13D/13G) ────────────────────────────── */}
       {beneficial.length > 0 && (
         <div className="section">
-          <div className="section-title">Beneficial Ownership — Large Stakes (SC 13D / 13G)</div>
+          <div className="section-title">Beneficial Ownership — Large Stakes (<Term term="SC 13D">SC 13D</Term> / <Term term="SC 13G">13G</Term>)</div>
           <DataTable columns={beneficialCols} rows={beneficial}
             rowKey={(b) => b.accession_number}
             initialSort={{ key: "filed", dir: "desc" }} maxHeight="240px" empty="None."
@@ -1140,7 +2374,7 @@ function OwnershipTab({ cik }: { cik: string }) {
       {/* ── Proposed Sales (Form 144) ─────────────────────────────────────── */}
       {proposed.length > 0 && (
         <div className="section">
-          <div className="section-title">Proposed Insider Sales (Form 144)</div>
+          <div className="section-title">Proposed Insider Sales (<Term term="Form 144">Form 144</Term>)</div>
           <DataTable columns={proposedCols} rows={proposed}
             rowKey={(p) => p.accession_number}
             initialSort={{ key: "filed", dir: "desc" }} maxHeight="200px" empty="None."
@@ -1177,15 +2411,16 @@ function CatalystsTab({ cik }: { cik: string }) {
   const [earnings, setEarnings] = useState<EarningsEvent[]>([]);
   const [lateF, setLateF]       = useState<LateFiling[]>([]);
   const [offers, setOffers]     = useState<SecuritiesOffering[]>([]);
+  const [prices, setPrices]     = useState<DailyPrice[]>([]);
   const [loading, setLoading]   = useState(true);
 
   useEffect(() => {
     setLoading(true);
     Promise.all([
       fetchCorporateEvents(cik), fetchEarningsEvents(cik),
-      fetchLateFilings(cik), fetchSecuritiesOfferings(cik),
-    ]).then(([ev, ea, la, of]) => {
-      setEvents(ev); setEarnings(ea); setLateF(la); setOffers(of);
+      fetchLateFilings(cik), fetchSecuritiesOfferings(cik), fetchPrices(cik),
+    ]).then(([ev, ea, la, of, prc]) => {
+      setEvents(ev); setEarnings(ea); setLateF(la); setOffers(of); setPrices(prc);
       setLoading(false);
     });
   }, [cik]);
@@ -1237,7 +2472,17 @@ function CatalystsTab({ cik }: { cik: string }) {
     { key: "date",    header: "Date",    value: (e) => e.event_date ?? "", render: (e) => <span className="muted">{fmtDate(e.event_date)}</span> },
     { key: "item",    header: "Item",    width: "65px", value: (e) => e.item_code ?? "", render: (e) => <strong>{e.item_code}</strong> },
     { key: "class",   header: "Class",   width: "90px", value: (e) => e.event_class ?? "", render: (e) => <EventClassBadge cls={e.event_class} /> },
-    { key: "summary", header: "Summary", value: (e) => e.summary ?? "", render: (e) => <span className="muted" style={{ maxWidth: 320, display: "block", overflow: "hidden", textOverflow: "ellipsis" }}>{e.summary ?? "—"}</span> },
+    { key: "summary", header: "Summary", value: (e) => e.summary ?? "", render: (e) => <span className="muted" style={{ maxWidth: 280, display: "block", overflow: "hidden", textOverflow: "ellipsis" }}>{e.summary ?? "—"}</span> },
+    {
+      key: "reaction", header: "Px 1d/5d", align: "right", width: "108px",
+      value: (e) => reactionAround(prices, e.event_date ?? e.filed_at).d1 ?? -999,
+      render: (e) => {
+        const r = reactionAround(prices, e.event_date ?? e.filed_at);
+        if (r.d1 == null && r.d5 == null) return <span className="dimmed">—</span>;
+        const cell = (v: number | null) => v == null ? <span className="dimmed">—</span> : <span className={v >= 0 ? "pos" : "neg"}>{fmtDelta(v)}</span>;
+        return <span className="dt-num" title="Price return 1 and 5 trading days after the event">{cell(r.d1)} / {cell(r.d5)}</span>;
+      },
+    },
     { key: "filed",   header: "Filed",   value: (e) => e.filed_at ?? "", render: (e) => <span className="dimmed">{fmtDate(e.filed_at)}</span> },
   ];
 
@@ -1387,14 +2632,19 @@ export default function Page() {
   const [activeTab, setActiveTab] = useState<CompanyTab>("overview");
   const [companies, setCompanies] = useState<Company[]>([]);
   const [filings, setFilings]     = useState<Filing[]>([]);
-  const [sidebarQ, setSidebarQ]   = useState("");
+  const [secIndex, setSecIndex]   = useState<SecCompany[]>([]);
   const [loading, setLoading]     = useState(true);
+  const watch = useWatchlist();
+  const seen = useLastSeen();
 
   // Hash routing
   useEffect(() => {
     function parse() {
       const h = window.location.hash.replace(/^#/, "");
+      if (h === "search") { setView("search"); setActiveCik(null); return; }
       if (h === "feed") { setView("feed"); setActiveCik(null); return; }
+      if (h === "calendar") { setView("calendar"); setActiveCik(null); return; }
+      if (h === "guide") { setView("guide"); setActiveCik(null); return; }
       const m = h.match(/^c=([^/]+)(?:\/(.*))?$/);
       if (m) {
         setView("company");
@@ -1409,9 +2659,15 @@ export default function Page() {
     return () => window.removeEventListener("hashchange", parse);
   }, []);
 
-  // Initial load
+  // Initial load. Reference data (profiles/themes/entities) is fetched once here
+  // and matched client-side thereafter — no per-row or per-page reads.
   useEffect(() => {
-    Promise.all([fetchCompanies(), fetchFilings(200)]).then(([cos, fils]) => {
+    Promise.all([
+      fetchCompanies(), fetchFilings(200),
+      fetchCompanyProfiles(), fetchCompanyThemes(), fetchEntities(),
+    ]).then(([cos, fils, profiles, themes, entities]) => {
+      loadProfiles(profiles, themes);
+      loadEntities(entities);
       setCompanies(cos);
       setFilings(fils);
       setLoading(false);
@@ -1421,10 +2677,57 @@ export default function Page() {
   // Realtime subscription
   useEffect(() => subscribeFilings((f) => setFilings((p) => [f, ...p].slice(0, 200))), []);
 
+  // Bundled SEC index for universal company search (loaded once, client-side).
+  useEffect(() => { loadSecIndex().then(setSecIndex); }, []);
+
+  // First-ever visit: seed the personal watchlist from the ingested companies.
+  useEffect(() => {
+    if (loading) return;
+    watch.seedIfEmpty(companies.map((c) => ({ cik: c.cik, ticker: c.ticker ?? "?", name: c.name ?? c.cik })));
+  }, [loading, companies, watch.seedIfEmpty]);  // eslint-disable-line react-hooks/exhaustive-deps
+
   const navigate = useCallback((hash: string) => { window.location.hash = hash; }, []);
   const openCompany = useCallback((cik: string, tab: CompanyTab = "overview") => {
     navigate(`c=${cik}${tab !== "overview" ? `/${tab}` : ""}`);
   }, [navigate]);
+
+  // Ingested = data already in the warehouse; the rest of the watchlist is pending.
+  const ingestedCiks = useMemo(() => new Set(companies.map((c) => c.cik)), [companies]);
+  const ingestedMap  = useMemo(() => new Map(companies.map((c) => [c.cik, c])), [companies]);
+
+  // The personal watchlist rendered as Company rows (enriched where ingested).
+  const watchCompanies = useMemo<Company[]>(() =>
+    watch.items.map((it) =>
+      ingestedMap.get(it.cik) ?? { cik: it.cik, ticker: it.ticker, name: it.name, sector: null, industry: null },
+    ), [watch.items, ingestedMap]);
+
+  // Union used for name/ticker lookups on the company page (covers pending too).
+  const lookupCompanies = useMemo<Company[]>(() => {
+    const m = new Map<string, Company>(companies.map((c) => [c.cik, c]));
+    for (const c of watchCompanies) if (!m.has(c.cik)) m.set(c.cik, c);
+    return Array.from(m.values());
+  }, [companies, watchCompanies]);
+
+  const handleAdd = useCallback((c: SecCompany) => {
+    const item: WatchItem = { cik: c.cik, ticker: c.ticker, name: c.name };
+    watch.add(item);
+    if (!ingestedCiks.has(c.cik)) void queueWatchlist(item);  // queue for backend ingest
+    openCompany(c.cik);
+  }, [watch, ingestedCiks, openCompany]);
+
+  const handleRemove = useCallback((cik: string) => {
+    watch.remove(cik);
+    if (activeCik === cik) navigate("overview");
+  }, [watch, activeCik, navigate]);
+
+  // CIKs already on the personal watchlist — drives the Search page's add/open state.
+  const watchedCiks = useMemo(() => new Set(watchCompanies.map((c) => c.cik)), [watchCompanies]);
+
+  // New filings since the user's previous visit (drives the Feed nav badge).
+  const newFilings = useMemo(
+    () => filings.filter((f) => seen.isNew(f.filed_at)).length,
+    [filings, seen],
+  );
 
   if (loading) {
     return (
@@ -1437,24 +2740,40 @@ export default function Page() {
   return (
     <div className="app-shell">
       <Sidebar
-        companies={companies} filings={filings}
+        companies={watchCompanies} filings={filings}
         activeCik={activeCik} view={view}
+        ingestedCiks={ingestedCiks}
         onCompany={(cik) => openCompany(cik)}
         onOverview={() => navigate("overview")}
+        onSearch={() => navigate("search")}
         onFeed={() => navigate("feed")}
-        q={sidebarQ} setQ={setSidebarQ}
+        onCalendar={() => navigate("calendar")}
+        onGuide={() => navigate("guide")}
+        onRemove={handleRemove}
+        newFilings={newFilings}
       />
       <main className="main-area">
         <div key={view + activeCik + activeTab} className="page-content">
           {view === "overview" && (
-            <OverviewPage companies={companies} filings={filings} onCompany={openCompany} />
+            <OverviewPage companies={watchCompanies} filings={filings} onCompany={openCompany} isNew={seen.isNew} />
+          )}
+          {view === "search" && (
+            <SearchPage
+              secIndex={secIndex} watched={watchedCiks} ingestedCiks={ingestedCiks}
+              onAdd={handleAdd} onCompany={openCompany}
+            />
           )}
           {view === "feed" && (
             <FeedPage filings={filings} onCompany={openCompany} />
           )}
+          {view === "calendar" && (
+            <CalendarView companies={watchCompanies} onCompany={openCompany} />
+          )}
+          {view === "guide" && <GuidePage />}
           {view === "company" && activeCik && (
             <CompanyPage
-              cik={activeCik} tab={activeTab} companies={companies}
+              cik={activeCik} tab={activeTab} companies={lookupCompanies}
+              pending={!ingestedCiks.has(activeCik)}
               onTab={(tab) => openCompany(activeCik, tab)}
             />
           )}

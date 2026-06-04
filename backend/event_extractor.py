@@ -8,6 +8,7 @@ Offerings:    S-3 / 424B* → securities_offerings (deal object from edgartools)
 """
 
 import logging
+import re
 from typing import Any
 
 from edgar import Company
@@ -15,6 +16,63 @@ from edgar import Company
 import db
 
 logger = logging.getLogger(__name__)
+
+# Earnings press-release (EX-99.1) parsing. Conservative by design: we only fill
+# revenue and diluted EPS from high-confidence headline phrases that large-cap
+# releases use consistently, and leave everything else NULL. Free-text guidance
+# and net-income units vary too much to trust, so we don't guess them.
+_UNIT_MULT = {"trillion": 1e12, "billion": 1e9, "million": 1e6}
+# Require a connector verb + a unit word so we only match a real headline figure.
+_RE_REVENUE = re.compile(
+    r"\brevenues?\s+(?:of|was|were|totaled|totalled|reached|grew to|increased to)\s+"
+    r"\$([\d,]+(?:\.\d+)?)\s*(trillion|billion|million)\b",
+    re.I,
+)
+# EPS must carry a decimal (kills no-decimal false positives like "$583") and sit
+# in a sane per-share range.
+_RE_EPS = re.compile(
+    r"diluted (?:earnings per share|EPS)\s+(?:of|was|were)\s+\$(\d{1,3}\.\d{2})"
+    r"|\$(\d{1,3}\.\d{2})\s+per diluted share",
+    re.I,
+)
+
+
+def _parse_earnings_press_release(filing: Any) -> dict[str, float | None]:
+    """Best-effort revenue + diluted EPS from the EX-99.1 press release.
+
+    Returns {"revenue": float|None, "diluted_eps": float|None}. Never raises:
+    any failure (no exhibit, network, parse) yields Nones so the caller still
+    writes the earnings marker row.
+    """
+    out: dict[str, float | None] = {"revenue": None, "diluted_eps": None}
+    try:
+        ex = next(
+            (a for a in filing.attachments
+             if str(getattr(a, "document_type", "")).upper() == "EX-99.1"),
+            None,
+        )
+        if ex is None:
+            return out
+        text = ex.text
+        text = text() if callable(text) else text
+        norm = re.sub(r"\s+", " ", str(text or ""))
+        if not norm:
+            return out
+
+        m = _RE_REVENUE.search(norm)
+        if m:
+            rev = float(m.group(1).replace(",", "")) * _UNIT_MULT[m.group(2).lower()]
+            if rev >= 1e8:  # sanity floor: ignore sub-$100M stray matches
+                out["revenue"] = rev
+
+        e = _RE_EPS.search(norm)
+        if e:
+            eps = float(e.group(1) or e.group(2))
+            if 0 < eps <= 100:
+                out["diluted_eps"] = eps
+    except Exception:
+        logger.debug("  EX-99.1 parse failed for %s", getattr(filing, "accession_no", "?"))
+    return out
 
 # 8-K item code → event class (README catalyst taxonomy)
 _ITEM_CLASS: dict[str, str] = {
@@ -118,12 +176,14 @@ def _ingest_8k(company: Any, cik: str, ticker: str) -> int:
                 })
 
             if has_earnings:
+                parsed = _parse_earnings_press_release(f)
                 earn_rows.append({
                     "cik": cik, "ticker": ticker,
                     "accession_number": accession_no,
                     "period": _safe_str(getattr(f, "period_of_report", None)),
                     "reported_date": event_date,
-                    "revenue": None, "diluted_eps": None, "net_income": None,
+                    "revenue": parsed["revenue"], "diluted_eps": parsed["diluted_eps"],
+                    "net_income": None,
                     "guidance_action": None,
                     "guidance_low": None, "guidance_high": None,
                     "filed_at": filed_at,

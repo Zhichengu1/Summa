@@ -72,6 +72,83 @@ def upsert_company(row: dict[str, Any]) -> None:
     upsert("companies", row, on_conflict="cik")
 
 
+def upsert_profile(row: dict[str, Any]) -> None:
+    """Upsert a company industry profile, keyed on cik."""
+    upsert("company_profiles", row, on_conflict="cik")
+
+
+def upsert_themes(rows: list[dict[str, Any]], cik: str) -> int:
+    """Replace a company's themes: delete existing rows for the cik, then insert.
+
+    Themes are a small, fully-recomputed set per company, so a delete+insert is
+    simpler and safer than diffing (handles renamed/removed themes cleanly).
+    """
+    client = get_client()
+    try:
+        client.table("company_themes").delete().eq("cik", cik).execute()
+    except Exception:
+        logger.exception("clearing company_themes failed for %s", cik)
+    return upsert_many("company_themes", rows, on_conflict="cik,name")
+
+
+def upsert_entities(rows: list[dict[str, Any]]) -> int:
+    """Upsert the global entity-context registry, keyed on match_key."""
+    return upsert_many("entities", rows, on_conflict="match_key")
+
+
+def fetch_watchlist() -> list[dict[str, Any]]:
+    """Return the dynamic watchlist / ingest queue rows (cik, ticker, name, status)."""
+    try:
+        result = (
+            get_client()
+            .table("watchlist")
+            .select("cik, ticker, name, status")
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        logger.exception("fetch_watchlist failed")
+        return []
+
+
+def mark_watchlist_ingested(cik: str) -> None:
+    """Flip a queued watchlist row to 'ingested' after a successful pull."""
+    try:
+        get_client().table("watchlist").update({"status": "ingested"}).eq("cik", cik).execute()
+    except Exception:
+        logger.exception("mark_watchlist_ingested failed for %s", cik)
+
+
+def fetch_ingest_state() -> dict[str, dict[str, Any]]:
+    """Return {cik: {"last": ISO|None, "datasets": {dataset: ISO}}} for all companies.
+
+    Drives both scheduler levels: `last` for the company-level batch selection, and
+    `datasets` for the per-dataset cadence inside process(). A missing cik means
+    'never ingested' → highest priority and every dataset due.
+    """
+    try:
+        result = get_client().table("companies").select("cik, last_ingested_at, dataset_state").execute()
+        out: dict[str, dict[str, Any]] = {}
+        for r in (result.data or []):
+            ds = r.get("dataset_state")
+            out[r["cik"]] = {"last": r.get("last_ingested_at"), "datasets": ds if isinstance(ds, dict) else {}}
+        return out
+    except Exception:
+        logger.exception("fetch_ingest_state failed")
+        return {}
+
+
+def update_company_state(cik: str, dataset_state: dict[str, str]) -> None:
+    """Persist per-dataset timestamps and stamp last_ingested_at = now (one write)."""
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+        get_client().table("companies").update(
+            {"dataset_state": dataset_state, "last_ingested_at": ts}
+        ).eq("cik", cik).execute()
+    except Exception:
+        logger.exception("update_company_state failed for %s", cik)
+
+
 def get_seen_accessions(table: str, accession_numbers: list[str]) -> set[str]:
     """Return the subset of accession numbers already present in `table`."""
     if not accession_numbers:
