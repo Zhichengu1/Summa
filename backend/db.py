@@ -77,6 +77,11 @@ def upsert_profile(row: dict[str, Any]) -> None:
     upsert("company_profiles", row, on_conflict="cik")
 
 
+def upsert_summary(row: dict[str, Any]) -> None:
+    """Upsert a company's precomputed watchlist-summary row, keyed on cik."""
+    upsert("company_summary", row, on_conflict="cik")
+
+
 def upsert_themes(rows: list[dict[str, Any]], cik: str) -> int:
     """Replace a company's themes: delete existing rows for the cik, then insert.
 
@@ -96,16 +101,37 @@ def upsert_entities(rows: list[dict[str, Any]]) -> int:
     return upsert_many("entities", rows, on_conflict="match_key")
 
 
+# PostgREST returns at most ~1000 rows per request (the instance's default row
+# cap). Any whole-table read therefore has to page, or it silently truncates as
+# the watchlist grows — which would leave companies beyond the cap unscheduled.
+_PAGE = 1000
+
+
+def _select_all(table: str, columns: str) -> list[dict[str, Any]]:
+    """Fetch every row of `table` (selected `columns`) by paging through ranges.
+
+    Scales the scheduler's whole-table reads to any watchlist size: without this,
+    a single `.select().execute()` caps at ~1000 rows and the pipeline would stop
+    seeing (and so stop ingesting) companies past that boundary.
+    """
+    client = get_client()
+    out: list[dict[str, Any]] = []
+    start = 0
+    while True:
+        batch = (
+            client.table(table).select(columns)
+            .range(start, start + _PAGE - 1).execute().data or []
+        )
+        out.extend(batch)
+        if len(batch) < _PAGE:
+            return out
+        start += _PAGE
+
+
 def fetch_watchlist() -> list[dict[str, Any]]:
     """Return the dynamic watchlist / ingest queue rows (cik, ticker, name, status)."""
     try:
-        result = (
-            get_client()
-            .table("watchlist")
-            .select("cik, ticker, name, status")
-            .execute()
-        )
-        return result.data or []
+        return _select_all("watchlist", "cik, ticker, name, status")
     except Exception:
         logger.exception("fetch_watchlist failed")
         return []
@@ -127,9 +153,8 @@ def fetch_ingest_state() -> dict[str, dict[str, Any]]:
     'never ingested' → highest priority and every dataset due.
     """
     try:
-        result = get_client().table("companies").select("cik, last_ingested_at, dataset_state").execute()
         out: dict[str, dict[str, Any]] = {}
-        for r in (result.data or []):
+        for r in _select_all("companies", "cik, last_ingested_at, dataset_state"):
             ds = r.get("dataset_state")
             out[r["cik"]] = {"last": r.get("last_ingested_at"), "datasets": ds if isinstance(ds, dict) else {}}
         return out

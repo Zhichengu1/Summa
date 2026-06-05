@@ -28,6 +28,7 @@ Tuning (env): INGEST_MAX_PER_RUN (default 12); INTERVAL_<DATASET> hours override
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -66,6 +67,10 @@ try:
     import price_ingest
 except Exception:  # pragma: no cover
     price_ingest = None
+try:
+    import summary_ingest
+except Exception:  # pragma: no cover
+    summary_ingest = None
 
 load_dotenv()
 
@@ -115,6 +120,13 @@ def _preflight() -> bool:
 # so a visit is cheap unless a heavy slice is genuinely due.
 MAX_PER_RUN     = int(os.environ.get("INGEST_MAX_PER_RUN", "12"))
 
+# Wall-clock budget (seconds). The loop never *starts* a new company once this
+# much time has elapsed, so a run exits cleanly and commits its per-company state
+# instead of being killed mid-write by the Actions timeout-minutes cap. Set well
+# below that cap to leave room for pip install + the final writes. The next cron
+# tick resumes with the still-stale companies (scheduler orders by staleness).
+TIME_BUDGET_S   = float(os.environ.get("INGEST_TIME_BUDGET_S", "360"))
+
 # Per-dataset cadence (hours): inside a visited company, only refresh datasets
 # whose interval has elapsed. Tuned to each dataset's real update frequency so we
 # never re-parse quarterly XBRL or 13F every visit. 0 = every visit. Env-tunable.
@@ -127,6 +139,7 @@ DATASET_INTERVALS_H: dict[str, float] = {
     "institutional": float(os.environ.get("INTERVAL_INSTITUTIONAL", "168")),  # 13F: quarterly → weekly
     "prices":        float(os.environ.get("INTERVAL_PRICES",        "24")),   # EOD bars: daily
     "reference":     float(os.environ.get("INTERVAL_REFERENCE",     "720")),  # SIC/seed ~static → monthly
+    "summary":       float(os.environ.get("INTERVAL_SUMMARY",       "0")),    # cheap recompute; refresh every visit
 }
 
 
@@ -265,6 +278,9 @@ def process(company: WatchedCompany, datasets: dict[str, str], *, force: bool = 
     if due("prices")        and _run_optional(price_ingest,            "ingest_prices",        cik, ticker): new_state["prices"] = stamp
     if due("reference")     and _run_optional(reference_ingest,        "ingest_profile",       cik, ticker): new_state["reference"] = stamp
 
+    # Summary runs LAST so it aggregates the data the slices above just wrote.
+    if due("summary")       and _run_optional(summary_ingest,          "ingest_summary",       cik, ticker): new_state["summary"] = stamp
+
     db.update_company_state(cik, new_state)   # one write: dataset_state + last_ingested_at
 
 
@@ -281,8 +297,18 @@ def main() -> int:
     logger.info("Summa ingest | %d compan%s (cap %d)",
                 len(companies), "y" if len(companies) == 1 else "ies", MAX_PER_RUN)
     seed_ciks = {c["cik"] for c in WATCHLIST}
+    start = time.monotonic()
     ok = 0
-    for c in companies:
+    for i, c in enumerate(companies):
+        # Never *start* a company past the budget: a partial process() doesn't
+        # persist its state (one write at the end), so stopping between companies
+        # keeps progress resumable and avoids a mid-write kill by the job timeout.
+        elapsed = time.monotonic() - start
+        if i > 0 and elapsed >= TIME_BUDGET_S:
+            logger.info("Time budget reached (%.0fs ≥ %.0fs) — %d/%d done, "
+                        "%d deferred to next tick",
+                        elapsed, TIME_BUDGET_S, ok, len(companies), len(companies) - i)
+            break
         try:
             process(c, state.get(c["cik"], {}).get("datasets", {}), force=force)
             ok += 1

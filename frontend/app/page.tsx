@@ -6,8 +6,12 @@ import { InfoTip, Term } from "../components/InfoTip";
 import {
   ComboChart, MultiLineChart, SimpleBarChart, PairedBarChart,
   StackedBarChart, DivergingBarChart, HorizontalBarChart, CumulativeLineChart, PriceChart,
-} from "../components/charts";
+} from "../components/charts.lazy";
 import { Sparkline } from "../components/Sparkline";
+import {
+  SkeletonChart, LoadingFundamentals, LoadingOwnership, LoadingCatalysts,
+} from "../components/Skeletons";
+import { GuidePage } from "../views/GuidePage";
 import {
   pivotStatement, seriesFor, deriveKpis, yoyGrowth, METRICS,
 } from "../lib/fundamentals";
@@ -20,6 +24,7 @@ import {
   fetchRecentInsider, fetchRecentEarnings, fetchRecentEvents,
   fetchRecentBeneficial, fetchRecentOfferings, fetchRecentLateFilings,
   fetchCompanyProfiles, fetchCompanyThemes, fetchEntities, queueWatchlist,
+  fetchCompanySummaries,
 } from "../lib/data";
 import { profileFor, loadProfiles } from "../lib/taxonomy";
 import { entityContext, loadEntities } from "../lib/entities";
@@ -34,9 +39,10 @@ import {
   type Direction, type TapeItem, type Signal, type CompanyData, type WatchEntry,
 } from "../lib/pulse";
 import { analyzeInsider, TX_CODE_INFO } from "../lib/insider";
-import { derivePriceKpis, reactionAround } from "../lib/prices";
+import { derivePriceKpis, reactionAround, reactionStats } from "../lib/prices";
 import { deriveValuation } from "../lib/valuation";
-import { smaSeries } from "../lib/technicals";
+import { smaSeries, deriveTechnicals, type Technicals } from "../lib/technicals";
+import { nextEarningsEstimate } from "../lib/catalysts";
 import type {
   Company, FinancialFact, Filing,
   InsiderTransaction, InstitutionalHolding,
@@ -175,62 +181,53 @@ function PriceStrip({ k }: { k: ReturnType<typeof derivePriceKpis> }) {
   );
 }
 
-// ─── Skeleton loader ──────────────────────────────────────────────────────────
-
-function SkeletonKpi() {
+// Trader technicals readout — the price-action layer (RSI, distance from the
+// 50/200-day moving averages, volume vs its 30-day average, 52-week position).
+// All values are pre-computed by deriveTechnicals(); this just renders them as a
+// strip alongside the fundamentals so a trader sees momentum at a glance.
+function TechStrip({ t }: { t: Technicals }) {
+  const pct = (v: number | null) => (v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`);
+  const signClass = (v: number | null) => (v == null ? "" : v >= 0 ? "pos" : "neg");
+  const rsiClass = t.rsi14 == null ? "" : t.rsi14 >= 70 ? "neg" : t.rsi14 <= 30 ? "pos" : "";
   return (
-    <div className="skeleton-kpi">
-      <div className="skeleton" style={{ height: 10, width: "45%" }} />
-      <div className="skeleton" style={{ height: 26, width: "65%" }} />
-      <div className="skeleton" style={{ height: 10, width: "55%" }} />
-    </div>
-  );
-}
-
-function SkeletonChart({ height = 220 }: { height?: number }) {
-  return (
-    <div className="skeleton-chart">
-      <div className="skeleton" style={{ height: 10, width: "35%", marginBottom: 14 }} />
-      <div className="skeleton" style={{ height }} />
-    </div>
-  );
-}
-
-function LoadingFundamentals() {
-  return (
-    <div className="skeleton-block">
-      <div className="kpi-strip">
-        {[0, 1, 2, 3, 4, 5].map((i) => <SkeletonKpi key={i} />)}
+    <div className="kpi-strip dense">
+      <div className="kpi">
+        <div className="k-label">RSI-14<InfoTip term="RSI" /></div>
+        <div className={`k-value ${rsiClass}`}>{t.rsi14 == null ? "—" : t.rsi14.toFixed(0)}</div>
+        <div className="k-delta"><span className="muted">{t.rsi14 == null ? "" : t.rsi14 >= 70 ? "overbought" : t.rsi14 <= 30 ? "oversold" : "neutral"}</span></div>
       </div>
-      <SkeletonChart height={300} />
-      <div className="chart-grid">
-        <SkeletonChart /><SkeletonChart /><SkeletonChart /><SkeletonChart />
+      <div className="kpi">
+        <div className="k-label">vs 50d MA<InfoTip term="vs 50-day MA" /></div>
+        <div className={`k-value ${signClass(t.pctFrom50)}`}>{pct(t.pctFrom50)}</div>
+      </div>
+      <div className="kpi">
+        <div className="k-label">vs 200d MA<InfoTip term="vs 200-day MA" /></div>
+        <div className={`k-value ${signClass(t.pctFrom200)}`}>{pct(t.pctFrom200)}</div>
+        {t.cross && (
+          <div className="k-delta">
+            <span className={t.cross === "golden" ? "pos" : "neg"}>
+              {t.cross === "golden" ? "▲ golden cross" : "▼ death cross"}
+            </span>
+          </div>
+        )}
+      </div>
+      <div className="kpi">
+        <div className="k-label">Volume<InfoTip term="Volume Spike" /></div>
+        <div className={`k-value ${t.volSpike != null && t.volSpike >= 2 ? "neg" : ""}`}>{t.volSpike == null ? "—" : `${t.volSpike.toFixed(1)}×`}</div>
+        <div className="k-delta"><span className="muted">vs 30d avg</span></div>
+      </div>
+      <div className="kpi">
+        <div className="k-label">52-wk Range<InfoTip term="% off 52-wk high" /></div>
+        <div className="k-value">
+          {t.new52wHigh ? <span className="pos">At high</span> : t.new52wLow ? <span className="neg">At low</span> : <span className="muted">Mid-range</span>}
+        </div>
       </div>
     </div>
   );
 }
 
-function LoadingOwnership() {
-  return (
-    <div className="skeleton-block">
-      <div className="chart-grid">
-        <SkeletonChart /><SkeletonChart />
-      </div>
-      <SkeletonChart height={180} />
-    </div>
-  );
-}
-
-function LoadingCatalysts() {
-  return (
-    <div className="skeleton-block">
-      <div className="chart-grid">
-        <SkeletonChart /><SkeletonChart />
-      </div>
-      <SkeletonChart height={160} />
-    </div>
-  );
-}
+// Skeleton/loading atoms (SkeletonKpi, SkeletonChart, LoadingFundamentals,
+// LoadingOwnership, LoadingCatalysts) now live in ../components/Skeletons.
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
@@ -428,6 +425,69 @@ function ScannerSection({
   );
 }
 
+// ─── Momentum Scanner (watchlist-wide price action) ─────────────────────────────
+// Pure price-action setups a trader scans for, derived from the technicals snapshot
+// (52-wk breakouts/lows, MA crosses, RSI extremes, volume spikes). Unlike the Live
+// Signals scanner (fundamentals + filings), this is the momentum-only view, ranked
+// by how many setups are firing. Uses the watchlist prices OverviewPage already fetched.
+type MomSetup = { label: string; dir: Direction; tip: string };
+
+function momentumSetups(t: Technicals): MomSetup[] {
+  const out: MomSetup[] = [];
+  if (t.new52wHigh) out.push({ label: "52-wk breakout", dir: "bull", tip: "Closed at a fresh 52-week high — momentum at the top of its range." });
+  if (t.new52wLow) out.push({ label: "52-wk low", dir: "bear", tip: "Closed at a fresh 52-week low." });
+  if (t.cross === "golden") out.push({ label: "Golden cross", dir: "bull", tip: "50-day MA just crossed above the 200-day." });
+  if (t.cross === "death") out.push({ label: "Death cross", dir: "bear", tip: "50-day MA just crossed below the 200-day." });
+  if (t.rsi14 != null && t.rsi14 >= 70) out.push({ label: `RSI ${t.rsi14.toFixed(0)} · overbought`, dir: "bear", tip: "14-day RSI ≥ 70 — possibly overextended." });
+  if (t.rsi14 != null && t.rsi14 <= 30) out.push({ label: `RSI ${t.rsi14.toFixed(0)} · oversold`, dir: "bull", tip: "14-day RSI ≤ 30 — possibly oversold." });
+  if (t.volSpike != null && t.volSpike >= 2) out.push({ label: `Vol ${t.volSpike.toFixed(1)}× avg`, dir: "flag", tip: "Latest volume ≥ 2× the 30-day average." });
+  return out;
+}
+
+function MomentumScanner({
+  companies, tech, onCompany,
+}: { companies: Company[]; tech: Record<string, Technicals>; onCompany: (cik: string) => void }) {
+  const rows = useMemo(
+    () => companies
+      .map((c) => ({ c, setups: tech[c.cik] ? momentumSetups(tech[c.cik]) : [] }))
+      .filter((r) => r.setups.length > 0)
+      .sort((a, b) => b.setups.length - a.setups.length),
+    [companies, tech],
+  );
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="section">
+      <div className="section-title">Momentum · {rows.length} setup{rows.length === 1 ? "" : "s"} firing</div>
+      <div className="scan-list">
+        {rows.map(({ c, setups }) => (
+          <div
+            key={c.cik} className="scan-row" role="button" tabIndex={0}
+            onClick={() => onCompany(c.cik)}
+            onKeyDown={(e) => { if (e.key === "Enter") onCompany(c.cik); }}
+          >
+            <div className="scan-head">
+              <CompanyMark ticker={c.ticker ?? "?"} size={26} />
+              <strong style={{ color: "var(--accent)", letterSpacing: "0.04em" }}>{c.ticker}</strong>
+              <span className="dimmed" style={{ fontSize: 12 }}>{c.name}</span>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              {setups.map((s) => (
+                <span
+                  key={s.label} className={`dir-${s.dir}`} title={s.tip}
+                  style={{ fontSize: 11, fontWeight: 600, padding: "3px 9px", border: "1px solid var(--border-1)", borderRadius: 999, whiteSpace: "nowrap" }}
+                >
+                  {s.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ─── Catalyst Calendar (watchlist-wide event timeline) ──────────────────────────
 function CalendarView({
   companies, onCompany,
@@ -605,25 +665,59 @@ function OverviewPage({
   companies, filings, onCompany, isNew,
 }: { companies: Company[]; filings: Filing[]; onCompany: (cik: string) => void; isNew?: (iso: string | null | undefined) => boolean }) {
   // Per-company recent prices for the sparkline + price columns (one batched fetch).
+  // The same ~1yr series also feeds the per-company technicals → Momentum Scanner.
   const [priceRows, setPriceRows] = useState<Record<string, PriceRow>>({});
+  const [techRows, setTechRows] = useState<Record<string, Technicals>>({});
   const ciks = useMemo(() => companies.map((c) => c.cik), [companies]);
   const cikKey = ciks.join(",");
   useEffect(() => {
-    if (!ciks.length) { setPriceRows({}); return; }
+    if (!ciks.length) { setPriceRows({}); setTechRows({}); return; }
     let cancelled = false;
-    fetchRecentPrices(ciks, 370).then((rows) => {
+    const cikSet = new Set(ciks);
+
+    // Fallback: compute client-side from raw prices (the original path). Capped at
+    // ~80 companies by the 20k-row fetch — used only until company_summary is
+    // populated by the backend, then the scalable path below supersedes it.
+    const computeFromRawPrices = () => {
+      fetchRecentPrices(ciks, 370).then((rows) => {
+        if (cancelled) return;
+        const by = new Map<string, DailyPrice[]>();
+        for (const r of rows) { const a = by.get(r.cik) ?? []; a.push(r); by.set(r.cik, a); }
+        const out: Record<string, PriceRow> = {};
+        const techOut: Record<string, Technicals> = {};
+        for (const [cik, prc] of by) {
+          const k = derivePriceKpis(prc);
+          const closes = prc.map((p) => p.close).filter((x): x is number => x != null);
+          const prev = closes.length > 1 ? closes[closes.length - 2] : null;
+          const chg1d = k.last != null && prev != null && prev !== 0 ? ((k.last - prev) / prev) * 100 : null;
+          out[cik] = { last: k.last, chg1d, offHigh: k.pctOffHigh, spark: closes.slice(-60) };
+          techOut[cik] = deriveTechnicals(prc);
+        }
+        setPriceRows(out);
+        setTechRows(techOut);
+      });
+    };
+
+    // Scalable path: one small paginated read of precomputed summaries (O(companies)
+    // tiny rows, not O(companies × price history)). Map them into the existing
+    // PriceRow / Technicals shapes so the table + Momentum Scanner are unchanged.
+    fetchCompanySummaries().then((summaries) => {
       if (cancelled) return;
-      const by = new Map<string, DailyPrice[]>();
-      for (const r of rows) { const a = by.get(r.cik) ?? []; a.push(r); by.set(r.cik, a); }
-      const out: Record<string, PriceRow> = {};
-      for (const [cik, prc] of by) {
-        const k = derivePriceKpis(prc);
-        const closes = prc.map((p) => p.close).filter((x): x is number => x != null);
-        const prev = closes.length > 1 ? closes[closes.length - 2] : null;
-        const chg1d = k.last != null && prev != null && prev !== 0 ? ((k.last - prev) / prev) * 100 : null;
-        out[cik] = { last: k.last, chg1d, offHigh: k.pctOffHigh, spark: closes.slice(-60) };
+      const scoped = summaries.filter((s) => cikSet.has(s.cik));
+      if (scoped.length === 0) { computeFromRawPrices(); return; }  // not populated yet
+      const pr: Record<string, PriceRow> = {};
+      const tr: Record<string, Technicals> = {};
+      for (const s of scoped) {
+        pr[s.cik] = { last: s.last_close, chg1d: s.chg_1d, offHigh: s.pct_off_high, spark: s.spark ?? [] };
+        tr[s.cik] = {
+          sma50: null, sma200: null, cross: s.ma_cross,
+          pctFrom50: s.pct_from_50, pctFrom200: s.pct_from_200,
+          rsi14: s.rsi14, volSpike: s.vol_spike,
+          new52wHigh: !!s.new_52w_high, new52wLow: !!s.new_52w_low, asOf: s.as_of,
+        };
       }
-      setPriceRows(out);
+      setPriceRows(pr);
+      setTechRows(tr);
     });
     return () => { cancelled = true; };
   }, [cikKey]);  // eslint-disable-line react-hooks/exhaustive-deps
@@ -748,6 +842,9 @@ function OverviewPage({
       {/* What's actionable right now, across the whole watchlist. */}
       <ScannerSection companies={companies} onCompany={onCompany} isNew={isNew} />
 
+      {/* Price-action setups (breakouts, crosses, RSI extremes, volume) across the watchlist. */}
+      <MomentumScanner companies={companies} tech={techRows} onCompany={onCompany} />
+
       <div className="section">
         <div className="section-title">Watchlist · {companies.length} companies</div>
         <DataTable
@@ -775,158 +872,8 @@ function OverviewPage({
 
 // ─── Data Guide page ────────────────────────────────────────────────────────
 //
-// Reference glossary. Every data domain the warehouse tracks is defined here and
-// ranked by how directly it tends to move the share price, so a shareholder knows
-// what to watch first. Tiers are ordered high → low impact intentionally.
-
-type ImpactTier = "high" | "medium" | "signal";
-
-type DataDef = {
-  name: string;
-  source: string;        // SEC form / feed the data comes from
-  where: string;         // where in this app to find it
-  definition: string;    // what the numbers actually are
-  why: string;           // why it moves the stock for shareholders
-};
-
-const IMPACT_TIERS: { tier: ImpactTier; label: string; blurb: string; items: DataDef[] }[] = [
-  {
-    tier: "high",
-    label: "High impact — direct price drivers",
-    blurb: "Disclosures that routinely move a stock the same day they hit the wire. Watch these first.",
-    items: [
-      {
-        name: "Earnings Results & Guidance",
-        source: "8-K · Item 2.02",
-        where: "Company → Catalysts",
-        definition: "Quarterly revenue, diluted EPS, and net income, plus any change to forward guidance (raised / lowered / withdrawn / maintained).",
-        why: "A beat or miss versus analyst expectations is the single most common cause of a large one-day move. A guidance change resets the market's whole forward valuation.",
-      },
-      {
-        name: "Material Corporate Events",
-        source: "8-K",
-        where: "Company → Catalysts",
-        definition: "Classified disclosures of mergers & acquisitions, financial restatements, executive departures, capital returns (buybacks / dividends), and cyber incidents.",
-        why: "An 8-K exists precisely to flag events a reasonable investor would consider important. M&A and restatements can move a stock 20%+ in a session.",
-      },
-      {
-        name: "Activist & Large-Stake Ownership",
-        source: "SC 13D / 13G",
-        where: "Company → Ownership",
-        definition: "A filing triggered when an investor crosses 5% ownership. 13D signals intent to influence the company (activist); 13G is a passive stake.",
-        why: "Activist positions often precede board fights, spin-offs, or buyout pressure. The market reacts to the filer's reputation and the stated purpose of the stake.",
-      },
-      {
-        name: "Insider Transactions",
-        source: "Form 4",
-        where: "Company → Ownership",
-        definition: "Open-market buys and sells by officers and directors, with price, share count, resulting holdings, and whether the trade was under a pre-planned 10b5-1 plan.",
-        why: "Cluster buying by insiders is a well-documented bullish signal; large discretionary selling can signal lost confidence in the near-term outlook.",
-      },
-    ],
-  },
-  {
-    tier: "medium",
-    label: "Medium impact — valuation & capital flows",
-    blurb: "Sets the fair value of the equity and the supply of shares. Moves the price over quarters more than over hours.",
-    items: [
-      {
-        name: "Fundamentals (Financial Statements)",
-        source: "10-K · 10-Q",
-        where: "Company → Fundamentals",
-        definition: "Income statement, balance sheet, and cash-flow trends — revenue growth, margins, debt levels, and free cash flow over time.",
-        why: "These anchor the long-term fair value. Deteriorating margins or rising leverage erode the price gradually even when no single headline lands.",
-      },
-      {
-        name: "Securities Offerings",
-        source: "S-1 · S-3 · 424B",
-        where: "Company → Catalysts",
-        definition: "New issuance of stock or debt and the dollar amount raised.",
-        why: "Equity offerings dilute existing shareholders and usually pressure the price short-term. Debt raises change the company's risk profile and interest burden.",
-      },
-      {
-        name: "Institutional Holdings",
-        source: "13F-HR",
-        where: "Company → Ownership",
-        definition: "Quarterly positions of institutional managers (>$100M AUM): shares held, position value, and quarter-over-quarter change.",
-        why: "Shows 'smart money' accumulation or distribution — but it is filed up to 45 days after quarter-end, so it confirms a trend rather than predicting one.",
-      },
-    ],
-  },
-  {
-    tier: "signal",
-    label: "Signals & red flags — early-warning context",
-    blurb: "Rarely move the price alone, but they front-run the disclosures above. Treat them as leading indicators.",
-    items: [
-      {
-        name: "Late-Filing Notices",
-        source: "NT 10-K · NT 10-Q",
-        where: "Company → Catalysts",
-        definition: "A notification that a required report will be filed late, together with the stated reason.",
-        why: "Often the first public sign of accounting problems, internal-control weakness, or distress — frequently a leading indicator of a sharp decline.",
-      },
-      {
-        name: "Proposed Insider Sales",
-        source: "Form 144",
-        where: "Company → Ownership",
-        definition: "An insider's notice of intent to sell restricted stock — proposed share count and approximate value, before any sale executes.",
-        why: "Signals selling intent ahead of the executed Form 4. Weaker than an actual transaction, but a useful early warning of insider distribution.",
-      },
-      {
-        name: "Filing Volume & Velocity",
-        source: "All forms",
-        where: "Overview · Feed",
-        definition: "How many filings a company submits and how fast, surfaced as the 30-day count and the filing-volume chart.",
-        why: "A sudden burst of 8-Ks or an unusual filing cadence is context, not a verdict — it tells you where to look closer among the higher-impact data.",
-      },
-    ],
-  },
-];
-
-function ImpactPill({ tier }: { tier: ImpactTier }) {
-  const label = tier === "high" ? "High" : tier === "medium" ? "Medium" : "Signal";
-  return <span className={`impact-pill impact-${tier}`}>{label}</span>;
-}
-
-function GuidePage() {
-  return (
-    <div>
-      <div className="page-head">
-        <h1 className="page-title">Data Guide</h1>
-        <div className="page-sub">
-          What every data point means — and how much it tends to move the share price. Ordered most to least impactful.
-        </div>
-      </div>
-
-      {IMPACT_TIERS.map((group) => (
-        <div className="section" key={group.tier}>
-          <div className="guide-tier-head">
-            <ImpactPill tier={group.tier} />
-            <div>
-              <div className={`guide-tier-label tier-${group.tier}`}>{group.label}</div>
-              <div className="guide-tier-blurb">{group.blurb}</div>
-            </div>
-          </div>
-          <div className="guide-grid">
-            {group.items.map((d) => (
-              <div className={`guide-card tier-${group.tier}`} key={d.name}>
-                <div className="guide-card-head">
-                  <span className="guide-card-name">{d.name}</span>
-                  <span className="guide-card-source">{d.source}</span>
-                </div>
-                <div className="guide-def">{d.definition}</div>
-                <div className="guide-why">
-                  <span className="guide-why-label">Why it matters</span> {d.why}
-                </div>
-                <div className="guide-where">Find it in: <span>{d.where}</span></div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
+// The Data Guide view (ImpactTier/DataDef types, IMPACT_TIERS reference data,
+// ImpactPill, GuidePage) now lives in ../views/GuidePage.
 
 // ─── Feed page ────────────────────────────────────────────────────────────────
 
@@ -1046,17 +993,48 @@ function FeedPage({ filings, onCompany }: { filings: Filing[]; onCompany: (cik: 
 
 // ─── Company page ─────────────────────────────────────────────────────────────
 
+// Per-company datasets shared across tabs. Fetched ONCE in CompanyPage and passed
+// down, so switching tabs (Overview → Ownership → Catalysts → Filings) never
+// refetches the same rows. Overview already needs nearly all of these for its
+// scorecard/tape, so lifting them here costs ~one extra small query (proposed
+// sales) up front and saves the per-tab refetch bursts.
+type CompanyAux = {
+  filings: Filing[]; earnings: EarningsEvent[]; events: CorporateEvent[];
+  insider: InsiderTransaction[]; holdings: InstitutionalHolding[];
+  beneficial: BeneficialOwnership[]; offers: SecuritiesOffering[];
+  lateF: LateFiling[]; prices: DailyPrice[]; proposed: ProposedSale[];
+  loading: boolean;
+};
+
+const EMPTY_AUX: CompanyAux = {
+  filings: [], earnings: [], events: [], insider: [], holdings: [],
+  beneficial: [], offers: [], lateF: [], prices: [], proposed: [], loading: true,
+};
+
 function CompanyPage({
   cik, tab, companies, onTab, pending = false,
 }: { cik: string; tab: CompanyTab; companies: Company[]; onTab: (t: CompanyTab) => void; pending?: boolean }) {
   const company = companies.find((c) => c.cik === cik) ?? null;
   const [facts, setFacts] = useState<FinancialFact[]>([]);
   const [loadingFacts, setLoadingFacts] = useState(true);
+  const [aux, setAux] = useState<CompanyAux>(EMPTY_AUX);
 
   useEffect(() => {
     setFacts([]);
     setLoadingFacts(true);
     fetchFinancialFacts(cik).then((d) => { setFacts(d); setLoadingFacts(false); });
+  }, [cik]);
+
+  useEffect(() => {
+    setAux(EMPTY_AUX);
+    Promise.all([
+      fetchFilingsForCik(cik, 50), fetchEarningsEvents(cik), fetchCorporateEvents(cik),
+      fetchInsiderTransactions(cik), fetchInstitutionalHoldings(cik),
+      fetchBeneficialOwnership(cik), fetchSecuritiesOfferings(cik), fetchLateFilings(cik),
+      fetchPrices(cik), fetchProposedSales(cik),
+    ]).then(([filings, earnings, events, insider, holdings, beneficial, offers, lateF, prices, proposed]) => {
+      setAux({ filings, earnings, events, insider, holdings, beneficial, offers, lateF, prices, proposed, loading: false });
+    });
   }, [cik]);
 
   const ticker = company?.ticker ?? "?";
@@ -1102,13 +1080,13 @@ function CompanyPage({
         ))}
       </div>
 
-      {tab === "overview"     && <CompanyOverviewTab cik={cik} facts={facts} loading={loadingFacts} />}
+      {tab === "overview"     && <CompanyOverviewTab facts={facts} loading={loadingFacts} aux={aux} />}
       {tab === "strategy"     && <StrategyTab cik={cik} ticker={ticker} facts={facts} loading={loadingFacts} />}
       {tab === "fundamentals" && <FundamentalsTab facts={facts} loading={loadingFacts} />}
       {tab === "peers"        && <PeersTab cik={cik} peers={companies} />}
-      {tab === "ownership"    && <OwnershipTab cik={cik} />}
-      {tab === "catalysts"    && <CatalystsTab cik={cik} />}
-      {tab === "filings"      && <FilingsTab cik={cik} />}
+      {tab === "ownership"    && <OwnershipTab aux={aux} />}
+      {tab === "catalysts"    && <CatalystsTab aux={aux} />}
+      {tab === "filings"      && <FilingsTab aux={aux} />}
     </div>
   );
 }
@@ -1332,32 +1310,11 @@ function Scorecard({ card }: { card: { dims: ScoreDim[]; overall: Grade; summary
 }
 
 function CompanyOverviewTab({
-  cik, facts, loading,
-}: { cik: string; facts: FinancialFact[]; loading: boolean }) {
-  const [recentFilings, setRecentFilings] = useState<Filing[]>([]);
-  const [earnings, setEarnings]     = useState<EarningsEvent[]>([]);
-  const [events, setEvents]         = useState<CorporateEvent[]>([]);
-  const [insider, setInsider]       = useState<InsiderTransaction[]>([]);
-  const [holdings, setHoldings]     = useState<InstitutionalHolding[]>([]);
-  const [beneficial, setBeneficial] = useState<BeneficialOwnership[]>([]);
-  const [offers, setOffers]         = useState<SecuritiesOffering[]>([]);
-  const [lateF, setLateF]           = useState<LateFiling[]>([]);
-  const [prices, setPrices]         = useState<DailyPrice[]>([]);
-  const [loadingAux, setLoadingAux] = useState(true);
-
-  useEffect(() => {
-    setLoadingAux(true);
-    Promise.all([
-      fetchFilingsForCik(cik, 10), fetchEarningsEvents(cik), fetchCorporateEvents(cik),
-      fetchInsiderTransactions(cik), fetchInstitutionalHoldings(cik),
-      fetchBeneficialOwnership(cik), fetchSecuritiesOfferings(cik), fetchLateFilings(cik),
-      fetchPrices(cik),
-    ]).then(([fil, ea, ev, ins, hol, ben, off, lat, prc]) => {
-      setRecentFilings(fil); setEarnings(ea); setEvents(ev); setInsider(ins);
-      setHoldings(hol); setBeneficial(ben); setOffers(off); setLateF(lat); setPrices(prc);
-      setLoadingAux(false);
-    });
-  }, [cik]);
+  facts, loading, aux,
+}: { facts: FinancialFact[]; loading: boolean; aux: CompanyAux }) {
+  const { earnings, events, insider, holdings, beneficial, offers, lateF, prices } = aux;
+  const recentFilings = useMemo(() => aux.filings.slice(0, 10), [aux.filings]);
+  const loadingAux = aux.loading;
 
   const kpis = useMemo(() => (loading || !facts.length ? [] : deriveKpis(facts, "quarterly")), [facts, loading]);
 
@@ -1374,6 +1331,13 @@ function CompanyOverviewTab({
   const priceKpis = useMemo(() => derivePriceKpis(prices), [prices]);
   const valuation = useMemo(() => deriveValuation(facts, prices), [facts, prices]);
   const priceSma  = useMemo(() => smaSeries(prices), [prices]);
+  const tech      = useMemo(() => deriveTechnicals(prices), [prices]);
+
+  // Trader timing: how the stock has historically moved on earnings, and an
+  // estimate of when the next report lands (from the historical cadence).
+  const earnDates = useMemo(() => earnings.map((e) => e.reported_date ?? e.filed_at), [earnings]);
+  const earnReaction = useMemo(() => reactionStats(prices, earnDates), [prices, earnDates]);
+  const nextEarn = useMemo(() => nextEarningsEstimate(earnDates), [earnDates]);
 
   // Event markers on the price chart: snap each recent event to the close on/before
   // its date so the dot lands on a real bar, colored by the event's direction.
@@ -1444,6 +1408,25 @@ function CompanyOverviewTab({
         {priceKpis.last != null && (
           <>
             <PriceStrip k={priceKpis} />
+            <TechStrip t={tech} />
+            {(earnReaction.avgAbs1d != null || nextEarn) && (
+              <div className="kpi-strip dense">
+                {earnReaction.avgAbs1d != null && (
+                  <div className="kpi">
+                    <div className="k-label">Expected Move<InfoTip term="Expected Move" /></div>
+                    <div className="k-value">±{earnReaction.avgAbs1d.toFixed(1)}%</div>
+                    <div className="k-delta"><span className="muted">1d on earnings · {earnReaction.pctUp1d?.toFixed(0)}% up · n={earnReaction.n}</span></div>
+                  </div>
+                )}
+                {nextEarn && (
+                  <div className="kpi">
+                    <div className="k-label">Next Earnings (est.)<InfoTip term="Next Earnings (est.)" /></div>
+                    <div className={`k-value ${nextEarn.daysAway < 0 ? "neg" : ""}`}>{nextEarn.daysAway >= 0 ? `~${nextEarn.daysAway}d` : "overdue"}</div>
+                    <div className="k-delta"><span className="muted">{fmtDate(nextEarn.estDate)}</span></div>
+                  </div>
+                )}
+              </div>
+            )}
             {valuation.marketCap != null && (
               <div className="kpi-strip dense">
                 <div className="kpi">
@@ -2078,25 +2061,8 @@ function PeersTab({ cik, peers }: { cik: string; peers: Company[] }) {
   );
 }
 
-function OwnershipTab({ cik }: { cik: string }) {
-  const [insider,    setInsider]    = useState<InsiderTransaction[]>([]);
-  const [holdings,   setHoldings]   = useState<InstitutionalHolding[]>([]);
-  const [beneficial, setBeneficial] = useState<BeneficialOwnership[]>([]);
-  const [proposed,   setProposed]   = useState<ProposedSale[]>([]);
-  const [loading,    setLoading]    = useState(true);
-
-  useEffect(() => {
-    setLoading(true);
-    Promise.all([
-      fetchInsiderTransactions(cik),
-      fetchInstitutionalHoldings(cik),
-      fetchBeneficialOwnership(cik),
-      fetchProposedSales(cik),
-    ]).then(([ins, hld, ben, prop]) => {
-      setInsider(ins); setHoldings(hld); setBeneficial(ben); setProposed(prop);
-      setLoading(false);
-    });
-  }, [cik]);
+function OwnershipTab({ aux }: { aux: CompanyAux }) {
+  const { insider, holdings, beneficial, proposed, loading } = aux;
 
   // ── Insider charts ─────────────────────────────────────────────────────────
 
@@ -2406,24 +2372,8 @@ function GuidanceBadge({ action }: { action: string }) {
   return <span style={{ color: c, fontWeight: 600 }}>{action}</span>;
 }
 
-function CatalystsTab({ cik }: { cik: string }) {
-  const [events, setEvents]     = useState<CorporateEvent[]>([]);
-  const [earnings, setEarnings] = useState<EarningsEvent[]>([]);
-  const [lateF, setLateF]       = useState<LateFiling[]>([]);
-  const [offers, setOffers]     = useState<SecuritiesOffering[]>([]);
-  const [prices, setPrices]     = useState<DailyPrice[]>([]);
-  const [loading, setLoading]   = useState(true);
-
-  useEffect(() => {
-    setLoading(true);
-    Promise.all([
-      fetchCorporateEvents(cik), fetchEarningsEvents(cik),
-      fetchLateFilings(cik), fetchSecuritiesOfferings(cik), fetchPrices(cik),
-    ]).then(([ev, ea, la, of, prc]) => {
-      setEvents(ev); setEarnings(ea); setLateF(la); setOffers(of); setPrices(prc);
-      setLoading(false);
-    });
-  }, [cik]);
+function CatalystsTab({ aux }: { aux: CompanyAux }) {
+  const { events, earnings, lateF, offers, prices, loading } = aux;
 
   // ── Chart data ─────────────────────────────────────────────────────────────
 
@@ -2585,14 +2535,8 @@ function CatalystsTab({ cik }: { cik: string }) {
 
 // ─── Filings tab ──────────────────────────────────────────────────────────────
 
-function FilingsTab({ cik }: { cik: string }) {
-  const [filings, setFilings] = useState<Filing[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    setLoading(true);
-    fetchFilingsForCik(cik, 50).then((d) => { setFilings(d); setLoading(false); });
-  }, [cik]);
+function FilingsTab({ aux }: { aux: CompanyAux }) {
+  const { filings, loading } = aux;
 
   const cols: Column<Filing>[] = [
     { key: "form", header: "Form", width: "80px", value: (f) => f.form_type, render: (f) => <FormBadge form={f.form_type} /> },

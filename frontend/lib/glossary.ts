@@ -56,6 +56,10 @@ export const GLOSSARY: Record<string, string> = {
   "RSI": "Relative Strength Index (14-day): a 0–100 momentum gauge. Above 70 is often called 'overbought', below 30 'oversold'. A context clue, not a trade trigger.",
   "52-wk Breakout": "The latest close is a fresh 52-week high — price is at the top of its one-year range, a momentum signal.",
   "Volume Spike": "The latest session's share volume is well above its 30-day average — unusual trading interest that often accompanies news.",
+  "vs 50-day MA": "How far the latest close sits above (+) or below (−) its 50-day simple moving average — the short-to-intermediate trend line. Above it is generally bullish, below it bearish.",
+  "vs 200-day MA": "How far the latest close sits above (+) or below (−) its 200-day simple moving average — the long-term trend line that separates bull and bear regimes.",
+  "Expected Move": "How much the stock has historically moved the day after this kind of event, averaged over recent occurrences. A trader's rough gauge of the swing to expect — magnitude, not direction.",
+  "Next Earnings (est.)": "An estimate of the next earnings date, projected from the company's historical reporting cadence. SEC data has no forward calendar, so treat this as approximate, not confirmed.",
 };
 
 /** Look up a definition by exact key. Returns undefined if not defined. */

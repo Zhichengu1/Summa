@@ -251,7 +251,7 @@ CREATE TABLE IF NOT EXISTS companies (
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     -- Reference data — small, slowly-changing context tables. Populated by the
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     -- backend (SIC mapping + curated seeds, later LLM). Read once per session by the
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     -- frontend and matched client-side; never joined per row. See
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    -- backend/REFERENCE_DATA_SCOPE.md.
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    -- backend/docs/REFERENCE_DATA_SCOPE.md.
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     -- ===========================================================================
 
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     -- Per-company industry classification + strategic narrative.
@@ -327,4 +327,42 @@ CREATE TABLE IF NOT EXISTS companies (
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 DROP POLICY IF EXISTS "anon insert watchlist" ON watchlist;
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 CREATE POLICY "anon insert watchlist" ON watchlist FOR INSERT TO anon WITH CHECK (true);
 
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+-- ===========================================================================
+-- company_summary — ONE small precomputed row per company. Powers the
+-- watchlist-wide surfaces (Overview table, Momentum Scanner) so the frontend
+-- reads a single bounded, paginated query instead of every company's full price
+-- history. This is what lets those views scale to any watchlist size: cost is
+-- O(companies) tiny rows, not O(companies x ~252 price rows). Recomputed by the
+-- backend (summary_ingest.py) on each company visit. Idempotent.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS company_summary (
+    cik              TEXT PRIMARY KEY REFERENCES companies(cik),
+    ticker           TEXT,
+    last_close       NUMERIC,
+    as_of            DATE,
+    chg_1d           NUMERIC,        -- % vs the prior close
+    ret_ytd          NUMERIC,
+    pct_off_high     NUMERIC,        -- % below the trailing 52-week high (<= 0)
+    rsi14            NUMERIC,
+    pct_from_50      NUMERIC,        -- % of last close above/below the 50-day SMA
+    pct_from_200     NUMERIC,
+    ma_cross         TEXT,           -- 'golden' | 'death' | NULL
+    vol_spike        NUMERIC,        -- latest volume / 30-day avg volume
+    new_52w_high     BOOLEAN DEFAULT FALSE,
+    new_52w_low      BOOLEAN DEFAULT FALSE,
+    spark            JSONB,          -- last ~60 closes for the sparkline
+    filings_30d      INT DEFAULT 0,
+    last_filing_form TEXT,
+    last_filing_at   TIMESTAMPTZ,
+    net_insider_90d  NUMERIC,        -- net open-market $ (buys - sells), trailing 90d
+    cluster_buy      BOOLEAN DEFAULT FALSE,
+    updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE company_summary ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON company_summary FROM anon, authenticated;
+GRANT SELECT ON company_summary TO anon;
+DROP POLICY IF EXISTS "anon read company_summary" ON company_summary;
+CREATE POLICY "anon read company_summary" ON company_summary FOR SELECT TO anon USING (true);
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       

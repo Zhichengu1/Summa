@@ -11,6 +11,11 @@ on:
 permissions:
   contents: write
 
+# Opt the Node 20 actions onto the Node 24 runtime early (forced 2026-06-02;
+# Node 20 removed 2026-09-16) so the deprecation warning stops.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   heartbeat:
     runs-on: ubuntu-latest

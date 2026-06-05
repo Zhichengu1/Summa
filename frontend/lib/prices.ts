@@ -105,3 +105,37 @@ export function reactionAround(prices: DailyPrice[], isoDate: string | null | un
   };
   return { d1: ret(base + 1), d5: ret(base + 5) };
 }
+
+export type ReactionStats = {
+  n: number;                 // events with a measurable 1-day reaction
+  avgAbs1d: number | null;   // average ABSOLUTE 1-day move — the "expected move" size
+  avg1d: number | null;      // average SIGNED 1-day move — directional drift
+  pctUp1d: number | null;    // share of events that closed up the next day
+  avgAbs5d: number | null;   // average absolute 5-day move
+};
+
+/**
+ * Aggregate how a stock has historically reacted to a set of event dates — the
+ * expected-move read a trader wants before a catalyst. `avgAbs1d` is the typical
+ * 1-day swing magnitude (up OR down); `pctUp1d` shows the directional skew.
+ * `prices` must be ascending by date.
+ */
+export function reactionStats(
+  prices: DailyPrice[], dates: (string | null | undefined)[],
+): ReactionStats {
+  const r1: number[] = [], r5: number[] = [];
+  for (const d of dates) {
+    const r = reactionAround(prices, d);
+    if (r.d1 != null) r1.push(r.d1);
+    if (r.d5 != null) r5.push(r.d5);
+  }
+  const avg = (xs: number[]) => (xs.length ? xs.reduce((s, v) => s + v, 0) / xs.length : null);
+  const avgAbs = (xs: number[]) => (xs.length ? xs.reduce((s, v) => s + Math.abs(v), 0) / xs.length : null);
+  return {
+    n: r1.length,
+    avgAbs1d: avgAbs(r1),
+    avg1d: avg(r1),
+    pctUp1d: r1.length ? (r1.filter((v) => v > 0).length / r1.length) * 100 : null,
+    avgAbs5d: avgAbs(r5),
+  };
+}

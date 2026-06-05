@@ -6,20 +6,48 @@ import type {
   InsiderTransaction, InstitutionalHolding,
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
   BeneficialOwnership, ProposedSale, DailyPrice,
-  CompanyProfileRow, CompanyThemeRow, EntityRow,
+  CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary,
 } from "./types";
 
+// Whole-table read, paged in 1000-row chunks. Any "fetch every row" query must use
+// this — a bare .select() caps at PostgREST's default row limit and silently drops
+// rows as the watchlist grows (companies > ~1000, themes > ~250). Returns [] on error.
+async function selectAllPaged<T>(
+  table: string, columns: string, order?: { col: string; asc?: boolean },
+): Promise<T[]> {
+  const PAGE = 1000;
+  const out: T[] = [];
+  for (let start = 0; ; start += PAGE) {
+    let q = supabase.from(table).select(columns).range(start, start + PAGE - 1);
+    if (order) q = q.order(order.col, { ascending: order.asc ?? true });
+    const { data, error } = await q;
+    if (error || !data || data.length === 0) break;
+    out.push(...(data as T[]));
+    if (data.length < PAGE) break;
+  }
+  return out;
+}
+
+// One small precomputed row per company (company_summary), paged so the read scales
+// to any watchlist size. Replaces fetching every company's full price history
+// client-side (which capped out ~80 companies). Returns [] so callers fall back.
+export async function fetchCompanySummaries(): Promise<CompanySummary[]> {
+  return selectAllPaged<CompanySummary>(
+    "company_summary",
+    "cik, ticker, last_close, as_of, chg_1d, ret_ytd, pct_off_high, rsi14, pct_from_50, pct_from_200, ma_cross, vol_spike, new_52w_high, new_52w_low, spark, filings_30d, last_filing_form, last_filing_at, net_insider_90d, cluster_buy",
+  );
+}
+
 export async function fetchCompanies(): Promise<Company[]> {
-  const { data, error } = await supabase
-    .from("companies")
-    .select("cik, ticker, name, sector, industry")
-    .order("ticker", { ascending: true });
-  if (error || !data || data.length === 0) {
+  const data = await selectAllPaged<Company>(
+    "companies", "cik, ticker, name, sector, industry", { col: "ticker" },
+  );
+  if (data.length === 0) {
     return CORE_WATCHLIST.map((c) => ({
       cik: c.cik, ticker: c.ticker, name: c.name, sector: null, industry: null,
     }));
   }
-  return data as Company[];
+  return data;
 }
 
 export async function fetchFilings(limit = 200): Promise<Filing[]> {
@@ -264,28 +292,15 @@ export async function fetchRecentLateFilings(ciks?: string[], limit = 200): Prom
 // All three return [] on error so the embedded seeds remain the fallback.
 
 export async function fetchCompanyProfiles(): Promise<CompanyProfileRow[]> {
-  const { data, error } = await supabase
-    .from("company_profiles")
-    .select("cik, sector, industry, thesis");
-  if (error || !data) return [];
-  return data as CompanyProfileRow[];
+  return selectAllPaged<CompanyProfileRow>("company_profiles", "cik, sector, industry, thesis");
 }
 
 export async function fetchCompanyThemes(): Promise<CompanyThemeRow[]> {
-  const { data, error } = await supabase
-    .from("company_themes")
-    .select("cik, name, note, rank")
-    .order("rank", { ascending: true });
-  if (error || !data) return [];
-  return data as CompanyThemeRow[];
+  return selectAllPaged<CompanyThemeRow>("company_themes", "cik, name, note, rank", { col: "rank" });
 }
 
 export async function fetchEntities(): Promise<EntityRow[]> {
-  const { data, error } = await supabase
-    .from("entities")
-    .select("match_key, kind, note");
-  if (error || !data) return [];
-  return data as EntityRow[];
+  return selectAllPaged<EntityRow>("entities", "match_key, kind, note");
 }
 
 // Queue a company for backend ingestion (the one anon-writable table). Inserts a

@@ -148,6 +148,32 @@ export type DailyPrice = {
   volume: number | null;
 };
 
+// One precomputed row per company (backend summary_ingest.py → company_summary).
+// Lets the watchlist-wide surfaces read one small paginated query instead of every
+// company's full price history, so they scale to any watchlist size.
+export type CompanySummary = {
+  cik: string;
+  ticker: string | null;
+  last_close: number | null;
+  as_of: string | null;
+  chg_1d: number | null;
+  ret_ytd: number | null;
+  pct_off_high: number | null;
+  rsi14: number | null;
+  pct_from_50: number | null;
+  pct_from_200: number | null;
+  ma_cross: "golden" | "death" | null;
+  vol_spike: number | null;
+  new_52w_high: boolean | null;
+  new_52w_low: boolean | null;
+  spark: number[] | null;
+  filings_30d: number | null;
+  last_filing_form: string | null;
+  last_filing_at: string | null;
+  net_insider_90d: number | null;
+  cluster_buy: boolean | null;
+};
+
 export type StatementKind = "income" | "balance" | "cashflow";
 export type PeriodType = "annual" | "quarterly";
 

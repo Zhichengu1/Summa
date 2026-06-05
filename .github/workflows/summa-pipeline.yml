@@ -18,6 +18,13 @@ concurrency:
 permissions:
   contents: read
 
+# actions/checkout@v4 + setup-python@v5 ship a Node 20 runtime, which GitHub is
+# deprecating (forced to Node 24 on 2026-06-02; Node 20 removed 2026-09-16). Opt
+# in early so the runner uses Node 24 now and the deprecation warning stops; both
+# actions support it.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -46,4 +53,8 @@ jobs:
           # Per-run budget — keeps each tick within the 8-min cap. Tune freely.
           # Per-dataset cadence (INTERVAL_FUNDAMENTALS, ...) uses code defaults.
           INGEST_MAX_PER_RUN: "12"
+          # Wall-clock budget: stop starting new companies after 6 min so the run
+          # exits cleanly and commits state instead of being killed at the 8-min
+          # timeout-minutes cap. The ~2-min margin covers pip install + final writes.
+          INGEST_TIME_BUDGET_S: "360"
         run: python main.py

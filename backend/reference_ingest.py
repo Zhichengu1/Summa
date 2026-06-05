@@ -7,7 +7,7 @@ seeds/profiles.yaml. The seed supplies the specific `industry`, the strategic
 company with no seed, SIC still yields a usable sector + industry, so the feature
 works for any ticker, not just the curated watchlist.
 
-See backend/REFERENCE_DATA_SCOPE.md. LLM theme/thesis extraction is Phase B.
+See backend/docs/REFERENCE_DATA_SCOPE.md. LLM theme/thesis extraction is Phase B.
 """
 
 import logging
