@@ -239,3 +239,28 @@ def delete_old_filings(days: int = 90) -> int:
     except Exception:
         logger.exception("delete_old_filings failed")
         return 0
+
+
+def prune_old_prices(days: int = 760) -> int:
+    """Delete `daily_prices` bars older than `days` to bound storage growth.
+
+    `daily_prices` is the only structured table that grows unbounded with time:
+    price_ingest re-pulls a rolling ~2-year window each run and upserts, but never
+    deletes, so bars older than that window accumulate forever and are never
+    refreshed. We keep ~2 years + a margin (the most the frontend/summary read is
+    ~400 sessions ≈ 1.6y) and prune the stale tail. Pruned rows are outside the
+    ingest window, so nothing the app uses is lost. Monthly cadence (cleanup.py).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        result = (
+            get_client()
+            .table("daily_prices")
+            .delete()
+            .lt("date", cutoff)
+            .execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_prices failed")
+        return 0

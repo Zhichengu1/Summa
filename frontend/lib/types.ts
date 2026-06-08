@@ -64,6 +64,29 @@ export type InstitutionalHolding = {
   filed_at: string | null;
 };
 
+// One tracked 13F manager's top positions across ALL stocks (backend
+// institutional_extractor.ingest_manager_portfolios → manager_portfolios).
+// Powers the Managers view: "what does Vanguard / BlackRock actually invest in."
+export type ManagerPortfolio = {
+  manager_cik: string;
+  manager_name: string;
+  period_of_report: string;
+  accession_number: string | null;
+  rank: number | null;
+  cusip: string;
+  ticker: string | null;
+  issuer: string | null;
+  shares: number | null;
+  value: number | null;
+  pct_of_portfolio: number | null;
+  // Quarter-over-quarter move vs the manager's prior 13F (what they bought/sold).
+  prior_shares: number | null;
+  prior_value: number | null;
+  share_change: number | null;
+  action: "new" | "added" | "trimmed" | "unchanged" | "exited" | null;
+  filed_at: string | null;
+};
+
 export type BeneficialOwnership = {
   cik: string;
   ticker: string | null;
@@ -176,6 +199,12 @@ export type CompanySummary = {
 
 export type StatementKind = "income" | "balance" | "cashflow";
 export type PeriodType = "annual" | "quarterly";
+
+// ─── View routing ───────────────────────────────────────────────────────────────
+// The top-level dashboard view and the per-company tab. Shared by the root Page,
+// the Sidebar, and CompanyPage so the hash router and the components agree.
+export type MainView = "overview" | "search" | "feed" | "calendar" | "managers" | "guide" | "company";
+export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings";
 
 // ─── Reference data (backend-populated; read once per session) ──────────────────
 export type CompanyProfileRow = {

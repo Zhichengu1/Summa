@@ -365,4 +365,44 @@ GRANT SELECT ON company_summary TO anon;
 DROP POLICY IF EXISTS "anon read company_summary" ON company_summary;
 CREATE POLICY "anon read company_summary" ON company_summary FOR SELECT TO anon USING (true);
 
+-- ===========================================================================
+-- manager_portfolios — each tracked 13F manager's TOP holdings across ALL
+-- stocks (not just the watchlist), plus the quarter-over-quarter MOVE for each
+-- position (what they bought vs sold vs exited). Powers the Managers view
+-- ("what does Vanguard / BlackRock actually invest in, and what are they
+-- buying/selling"). One row per (manager, quarter, security). Bounded and
+-- slowly-changing. Written by the global pass in institutional_extractor.py
+-- (ingest_manager_portfolios), which reuses the 13F cache the per-company
+-- institutional ingest already populates and diffs it against the prior quarter
+-- already stored here — no extra EDGAR load. Idempotent.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS manager_portfolios (
+    id                BIGSERIAL PRIMARY KEY,
+    manager_cik       TEXT        NOT NULL,
+    manager_name      TEXT        NOT NULL,   -- curated label (e.g. 'BLACKROCK')
+    period_of_report  DATE        NOT NULL,   -- 13F quarter end
+    accession_number  TEXT,
+    rank              INT,                    -- 1 = largest position that quarter
+    cusip             TEXT        NOT NULL,   -- the stable 13F security id
+    ticker            TEXT,
+    issuer            TEXT,                   -- security/issuer name
+    shares            DOUBLE PRECISION,
+    value             DOUBLE PRECISION,       -- USD position value
+    pct_of_portfolio  DOUBLE PRECISION,       -- value / total 13F value
+    -- Quarter-over-quarter move vs the manager's prior 13F (what they did).
+    prior_shares      DOUBLE PRECISION,       -- shares held the prior quarter (NULL = not in prior top holdings)
+    prior_value       DOUBLE PRECISION,       -- USD value the prior quarter
+    share_change      DOUBLE PRECISION,       -- shares - prior_shares (signed)
+    action            TEXT,                   -- 'new'|'added'|'trimmed'|'unchanged'|'exited'
+    filed_at          TIMESTAMPTZ,
+    UNIQUE (manager_cik, period_of_report, cusip)
+);
+CREATE INDEX IF NOT EXISTS idx_mgrport_mgr ON manager_portfolios (manager_cik, period_of_report DESC, value DESC);
+
+ALTER TABLE manager_portfolios ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON manager_portfolios FROM anon, authenticated;
+GRANT SELECT ON manager_portfolios TO anon;
+DROP POLICY IF EXISTS "anon read manager_portfolios" ON manager_portfolios;
+CREATE POLICY "anon read manager_portfolios" ON manager_portfolios FOR SELECT TO anon USING (true);
+
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        

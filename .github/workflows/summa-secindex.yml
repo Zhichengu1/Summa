@@ -38,7 +38,7 @@ jobs:
         env:
           # SEC fair-access requires a descriptive User-Agent on the request.
           EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
-        run: python build_sec_index.py     # stdlib only, no pip install needed
+        run: python -m tools.build_sec_index   # stdlib only, no pip install needed
 
       - name: Commit if changed
         run: |

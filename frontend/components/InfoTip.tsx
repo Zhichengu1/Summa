@@ -8,7 +8,7 @@
 // `def` may be passed directly, or omitted with `term` to look the text up in the
 // shared GLOSSARY.
 
-import { defOf } from "../lib/glossary";
+import { defOf } from "../lib/domain/glossary";
 
 function resolve(def?: string, term?: string): string | undefined {
   if (def) return def;

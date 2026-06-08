@@ -35,40 +35,40 @@ from dotenv import load_dotenv
 from edgar import set_identity
 
 import db
-import data_ingest
-import filings_ingest
+from ingest import data_ingest
+from ingest import filings_ingest
 from watchlist import WATCHLIST, WatchedCompany, get_active_watchlist
 
 try:
-    import insider_extractor
+    from extractors import insider_extractor
 except Exception:  # pragma: no cover
     insider_extractor = None
 try:
-    import institutional_extractor
+    from extractors import institutional_extractor
 except Exception:  # pragma: no cover
     institutional_extractor = None
 try:
-    import event_extractor
+    from extractors import event_extractor
 except Exception:  # pragma: no cover
     event_extractor = None
 try:
-    import ownership_extractor
+    from extractors import ownership_extractor
 except Exception:  # pragma: no cover
     ownership_extractor = None
 try:
-    import reference_ingest
+    from ingest import reference_ingest
 except Exception:  # pragma: no cover
     reference_ingest = None
 try:
-    import entity_ingest
+    from ingest import entity_ingest
 except Exception:  # pragma: no cover
     entity_ingest = None
 try:
-    import price_ingest
+    from ingest import price_ingest
 except Exception:  # pragma: no cover
     price_ingest = None
 try:
-    import summary_ingest
+    from ingest import summary_ingest
 except Exception:  # pragma: no cover
     summary_ingest = None
 
@@ -317,8 +317,12 @@ def main() -> int:
                 db.mark_watchlist_ingested(c["cik"])
         except Exception:
             logger.exception("Failed for %s", c["ticker"])
-    # Global reference data (runs once, not per company).
+    # Global passes (run once, not per company).
     _run_optional(entity_ingest, "ingest_entities")
+    # Manager portfolios ride the 13F cache populated above; no-ops if no
+    # company's institutional cadence was due this run (so it tracks the weekly
+    # 13F cadence with zero extra EDGAR load).
+    _run_optional(institutional_extractor, "ingest_manager_portfolios")
     logger.info("Done | %d/%d companies processed", ok, len(companies))
     return 0 if ok else 1
 

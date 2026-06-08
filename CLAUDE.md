@@ -16,7 +16,7 @@ research dashboard. GitHub Actions runs a Python ingest (`backend/main.py`) ever
 filings feed, insider transactions, institutional holdings, beneficial ownership,
 proposed sales, earnings, corporate events, late filings, securities offerings —
 plus end-of-day prices, and writes everything to Supabase (Postgres). A Next.js 14
-frontend (static export) reads from Supabase through `lib/data.ts` (anon key) and
+frontend (static export) reads from Supabase through `lib/data/data.ts` (anon key) and
 renders an interactive per-company research UI with a live filings feed.
 
 **Core principle:** ingest once, cheaply, and spread the work across runs. Each
@@ -41,20 +41,25 @@ Summa/
 │   ├── main.py                   ← entry point; staged-cadence orchestrator
 │   ├── db.py                     ← Supabase service-role client + upsert helpers
 │   ├── watchlist.py              ← SEED list + get_active_watchlist() (SEED ∪ watchlist table)
-│   ├── data_ingest.py            ← fundamentals (XBRL) → financial_facts
-│   ├── filings_ingest.py         ← narrative filings feed → filings
-│   ├── event_extractor.py        ← earnings/corporate events/late filings/offerings
-│   ├── insider_extractor.py      ← Form 4 → insider_transactions
-│   ├── institutional_extractor.py← 13F-HR → institutional_holdings
-│   ├── ownership_extractor.py    ← SC 13D/13G + Form 144 → beneficial_ownership / proposed_sales
-│   ├── price_ingest.py           ← Yahoo EOD bars → daily_prices (only non-SEC source)
-│   ├── summary_ingest.py         ← precomputes company_summary (price+technicals+activity)
-│   ├── reference_ingest.py       ← SIC industry/theme → company_profiles / company_themes
-│   ├── entity_ingest.py          ← seeds/entities.yaml → entities registry (global, runs once)
-│   ├── build_sec_index.py        ← rebuilds frontend/public/sec-companies.json (stdlib only)
-│   ├── cleanup.py                ← monthly retention maintenance
-│   ├── gemini_enricher.py        ← OPTIONAL Phase-2 enrichment (not in ingest path)
-│   ├── discord_notify.py         ← OPTIONAL Phase-2 alerts (not in ingest path)
+│   ├── edgar_cache.py            ← get_company(cik): per-run shared edgartools Company cache
+│   ├── ingest/                   ← per-company dataset ingestors (from ingest import …)
+│   │   ├── data_ingest.py        ← fundamentals (XBRL) → financial_facts
+│   │   ├── filings_ingest.py     ← narrative filings feed → filings
+│   │   ├── price_ingest.py       ← Yahoo EOD bars → daily_prices (only non-SEC source)
+│   │   ├── summary_ingest.py     ← precomputes company_summary (price+technicals+activity)
+│   │   ├── reference_ingest.py   ← SIC industry/theme → company_profiles / company_themes
+│   │   └── entity_ingest.py      ← seeds/entities.yaml → entities registry (global, runs once)
+│   ├── extractors/               ← SEC-form extractors (from extractors import …)
+│   │   ├── event_extractor.py    ← earnings/corporate events/late filings/offerings
+│   │   ├── insider_extractor.py  ← Form 4 → insider_transactions
+│   │   ├── institutional_extractor.py ← 13F-HR → institutional_holdings / manager_portfolios
+│   │   └── ownership_extractor.py ← SC 13D/13G + Form 144 → beneficial_ownership / proposed_sales
+│   ├── enrichment/               ← OPTIONAL Phase-2 channels (not in the ingest path)
+│   │   ├── gemini_enricher.py    ← Gemini enrichment
+│   │   └── discord_notify.py     ← Discord alerts
+│   ├── tools/                    ← standalone maintenance scripts (python -m tools.<name>)
+│   │   ├── build_sec_index.py    ← rebuilds frontend/public/sec-companies.json (stdlib only)
+│   │   └── cleanup.py            ← monthly retention maintenance
 │   ├── seeds/                    ← entities.yaml, profiles.yaml (curated reference data)
 │   ├── docs/                     ← backend design docs (REFERENCE_DATA_SCOPE.md)
 │   ├── requirements.txt
@@ -62,27 +67,49 @@ Summa/
 │
 ├── .github/workflows/
 │   ├── summa-pipeline.yml         ← */10 min ingest (main.py)
-│   ├── summa-cleanup.yml          ← monthly retention (cleanup.py)
-│   ├── summa-secindex.yml         ← weekly SEC index rebuild (build_sec_index.py)
+│   ├── summa-cleanup.yml          ← monthly retention (python -m tools.cleanup)
+│   ├── summa-secindex.yml         ← weekly SEC index rebuild (python -m tools.build_sec_index)
 │   └── keepalive.yml              ← weekly heartbeat commit (keeps crons alive)
 │
 └── frontend/                      ← Next.js 14 static export
     ├── app/
-    │   ├── page.tsx               ← main dashboard (large; being split — see below)
+    │   ├── page.tsx               ← thin root shell: hash router + initial data load + layout (~190 lines)
     │   ├── layout.tsx, globals.css, error.tsx, not-found.tsx
-    ├── components/                ← DataTable, InfoTip, Sparkline, charts, Skeletons
-    ├── views/                     ← top-level page views extracted from page.tsx (GuidePage)
-    ├── lib/                       ← data access + domain logic (see below)
+    ├── components/                ← shared presentational atoms (CSS-classes only, no data deps),
+    │   │                            grouped by kind. Core atoms sit at the root; clustered
+    │   │                            families live in subfolders:
+    │   │                            (root)   DataTable, InfoTip, Skeletons, NameContext,
+    │   │                                     SignalCard, TapeRow, Scorecard
+    │   ├── charts/                    charts, charts.lazy, Sparkline (viz primitives)
+    │   ├── badges/                    FormBadge, EventClassBadge, GuidanceBadge, DirMark, CompanyMark
+    │   └── strips/                    PriceStrip, TechStrip, KpiTile (metric strips)
+    ├── views/                     ← top-level page views (own their data/effects):
+    │   │                            Sidebar, OverviewPage, ScannerSection (+ MomentumScanner),
+    │   │                            SearchPage, FeedPage, CalendarView, ManagersPage, GuidePage
+    │   └── company/               ← the per-company page + its tabs:
+    │                                CompanyPage, CompanyOverviewTab, StrategyTab, FundamentalsTab,
+    │                                PeersTab, OwnershipTab, CatalystsTab, FilingsTab, companyAux.ts (shared CompanyAux)
+    ├── lib/                       ← data access + domain logic, grouped by role (see below)
+    │   ├── data/                    supabase.ts, data.ts, watchlist.ts
+    │   ├── hooks/                   useWatchlist.ts, useLastSeen.ts, useWatchlistPulse.ts
+    │   ├── domain/                  fundamentals, pulse, scorecard, technicals, valuation,
+    │   │                            insider, catalysts, prices, taxonomy, entities, glossary, secIndex
+    │   ├── utils/                   format.ts, url.ts
+    │   └── types.ts                 row + view-routing types (stays at lib root, imported everywhere)
     └── public/sec-companies.json  ← bundled SEC company index (universal search)
 ```
 
 ### Frontend `lib/` modules
 
-`supabase.ts` (anon client) · `data.ts` (all fetch* + `subscribeFilings` Realtime) ·
-`types.ts` (row types) · `fundamentals.ts` · `pulse.ts` (tape/signals) · `format.ts` ·
-`taxonomy.ts` · `entities.ts` · `insider.ts` · `prices.ts` (incl. `reactionStats`) ·
-`valuation.ts` · `technicals.ts` · `catalysts.ts` (next-earnings estimate) ·
-`secIndex.ts` · `glossary.ts` · `watchlist.ts` / `useWatchlist.ts` / `useLastSeen.ts`.
+`lib/` is grouped by role — **`data/`**: `supabase.ts` (anon client), `data.ts` (all fetch* +
+`subscribeFilings` Realtime), `watchlist.ts` (`CORE_WATCHLIST` seed). **`hooks/`**:
+`useWatchlist.ts` / `useLastSeen.ts` / `useWatchlistPulse.ts` (watchlist-wide catalyst fetch
+shared by Scanner + Calendar). **`domain/`** (pure logic): `fundamentals.ts` · `pulse.ts`
+(tape/signals) · `taxonomy.ts` · `entities.ts` · `insider.ts` · `prices.ts` (incl.
+`reactionStats`) · `valuation.ts` · `technicals.ts` · `catalysts.ts` (next-earnings estimate) ·
+`scorecard.ts` (`buildScorecard` + Grade types) · `secIndex.ts` · `glossary.ts`. **`utils/`**:
+`format.ts` · `url.ts` (`safeHref` guard). **`lib/types.ts`** (row + `MainView`/`CompanyTab`
+types) stays at the `lib/` root because it is imported everywhere.
 
 ---
 
@@ -134,34 +161,62 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
   `db.py` upsert helpers.
 - Extractors expose `ingest_<dataset>(cik, ticker[, name])` and are invoked through
   `main._run_optional()`.
+- **edgartools `Company` always via `edgar_cache.get_company(cik)`, never `Company(cik)`
+  directly.** Constructing it per dataset reloads the company's full filings index from
+  EDGAR each time; `get_company` shares one `Company` per CIK across all ingestors for the
+  run, so a company due for N datasets loads its index once (1 EDGAR request, not N) and the
+  rest filter it in-memory. The cache is per-process, so it resets each Actions run.
+- **Package layout & imports.** Scripts are grouped by role under `backend/`:
+  `ingest/` (per-company ingestors), `extractors/` (SEC-form parsers), `enrichment/`
+  (optional Phase-2), `tools/` (standalone maintenance). `main.py`, `db.py`,
+  `watchlist.py` stay at the `backend/` root. Because the root is always on `sys.path`
+  (the entry point `main.py` runs from `backend/`), modules in the subpackages still
+  import the core flat — `import db`, `from watchlist import …`. `main.py` imports the
+  rest via the subpackage, e.g. `from ingest import data_ingest`,
+  `from extractors import insider_extractor`. The `tools/` scripts are run as modules
+  from `backend/`: `python -m tools.cleanup`, `python -m tools.build_sec_index` (NOT
+  `python tools/cleanup.py`, which puts `tools/` on the path instead of `backend/` and
+  breaks `import db`). A `tools/`-relative `__file__` path is two parents up from the
+  repo root; an `ingest/`- or `extractors/`-relative one is one parent up from `backend/`.
 
 ---
 
 ## TypeScript / Frontend Conventions
 
 - Strict mode, no `any`. Functional components only.
-- `lib/supabase.ts` is the only place the anon client is created; `lib/data.ts` is the
-  only data-access layer (no API routes).
+- `lib/data/supabase.ts` is the only place the anon client is created; `lib/data/data.ts`
+  is the only data-access layer (no API routes).
 - `useMemo` for derived/filtered arrays.
 - Design tokens via CSS custom properties in `globals.css`; component-specific layout
   via inline styles. No hardcoded hex in JSX where a token exists.
 - No `dangerouslySetInnerHTML`. URL props pass through a `safeHref`-style guard.
 
-### Splitting `page.tsx` (in progress)
+### Component / view structure
 
-`app/page.tsx` is the large single-file dashboard. It is being incrementally split.
-Two reference patterns are already in place — follow them:
+`app/page.tsx` is now a thin root shell (~190 lines): hash router, the one-time
+initial data load, the Realtime filings subscription, the personal-watchlist state,
+and the top-level layout that routes a `MainView` to a view. Everything visual lives
+in `components/` and `views/`. Three layers, imported strictly downward
+(`app → views → components → lib`):
 
-- **Leaf/atom components → `components/`** (e.g. `Skeletons.tsx`): pure presentational,
-  CSS-classes-only, no data deps. Extract these first; views depend on them.
-- **Self-contained views → `views/`** (e.g. `GuidePage.tsx`): a top-level page view that
-  owns its data/types and depends only on CSS. Move the view + its private data/types
-  together, export the view, import it into `page.tsx`.
+- **Atoms → `components/`**: pure presentational, CSS-classes-only, no data fetching
+  (e.g. `CompanyMark`, `FormBadge`, `SignalCard`, `Scorecard`). Grouped by kind — core
+  atoms at the root, families in `components/charts/`, `components/badges/`,
+  `components/strips/`. May take primitive/row props; render logic only. Shared freely by views.
+- **Views → `views/`**: a top-level dashboard view that owns its own data/effects/derived
+  state (e.g. `OverviewPage`, `FeedPage`, `CalendarView`). The per-company page and its
+  tabs live under `views/company/`; the tabs share the `CompanyAux` bundle fetched once in
+  `CompanyPage` (`views/company/companyAux.ts`) — never refetch per tab.
+- **Pure logic → `lib/`**: anything non-visual, grouped by role —
+  `lib/data/` (Supabase + fetchers), `lib/hooks/` (React hooks), `lib/domain/` (pure
+  logic, e.g. `buildScorecard` in `domain/scorecard.ts`), `lib/utils/` (e.g. `safeHref`
+  in `utils/url.ts`). Components/views import it.
 
-When extracting, run `npx tsc --noEmit` in `frontend/` to confirm a clean move. Good
-next candidates: the remaining badge atoms (`FormBadge`, `CompanyMark`, `NameContext`,
-`DirMark`, `EventClassBadge`, `GuidanceBadge`) and the larger views (`FeedPage`,
-`CalendarView`, `SearchPage`, the company tabs).
+Conventions: imports are relative (matching the existing files), not the `@/` alias.
+Each view/atom that uses hooks or browser APIs carries `"use client"`. View-routing
+types (`MainView`, `CompanyTab`) live in `lib/types.ts` (kept at the `lib/` root). **Run `npx tsc --noEmit` in
+`frontend/` after any move** to confirm a clean extraction; a leaf-first order keeps the
+graph acyclic.
 
 ---
 
@@ -175,7 +230,8 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `financial_facts` | (cik, statement, period, …) | XBRL fundamentals (income/balance/cash-flow) |
 | `filings` | `accession_number` | Narrative filings feed (10-K/10-Q/8-K/DEF 14A) + section text |
 | `insider_transactions` | accession/txn | Form 4 open-market buys/sells |
-| `institutional_holdings` | cik+period | 13F-HR positions |
+| `institutional_holdings` | cik+period | 13F-HR positions in watchlist companies (per-company holders view) |
+| `manager_portfolios` | manager_cik+period+cusip | Each tracked 13F manager's top-N holdings across **all** stocks + their quarter-over-quarter buy/sell move per position (the Managers view) |
 | `beneficial_ownership` | accession | SC 13D/13G ≥5% stakes |
 | `proposed_sales` | accession | Form 144 proposed insider sales |
 | `earnings_events` | cik+date | 8-K Item 2.02 results/guidance |
@@ -192,9 +248,17 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 **RLS:** anon → SELECT on warehouse tables, SELECT+INSERT on `watchlist`. Scraper uses
 service_role (bypasses RLS).
 
-**Retention** (`cleanup.py` / `db.py`): narrative `filings` section text is nulled at
-**30 days**; `filings` feed rows are deleted at **90 days**. Structured warehouse tables
-(fundamentals, holdings, events, prices) are retained.
+**Retention** (`tools/cleanup.py` / `db.py`, monthly): narrative `filings` section text
+is nulled at **30 days**; `filings` feed rows are deleted at **90 days**; `daily_prices`
+bars are pruned beyond **~760 days (~2y)** — the only structured table that grows
+unbounded with time (price_ingest re-pulls a rolling 2y window and upserts but never
+deletes, so older bars accumulate forever). All other structured warehouse tables
+(fundamentals, holdings, events) are small/bounded per company and retained.
+
+> The price reads (`fetchPrices`, `summary_ingest`) fetch the most-recent N sessions via
+> `order(date desc).limit(N)` then reverse to ascending. Do **not** revert these to
+> `order(date asc).limit(N)` — ascending+limit returns the *oldest* rows once a company
+> exceeds N bars, so the latest price/technicals would silently go stale.
 
 ---
 
@@ -218,6 +282,10 @@ service_role (bypasses RLS).
         db.update_company_state() write.
       Non-seed companies get flipped to 'ingested' in the watchlist table.
 6. entity_ingest.ingest_entities() — global, runs once per run (not per company).
+7. institutional_extractor.ingest_manager_portfolios() — global, once per run. Writes
+   each tracked manager's top-N holdings (manager_portfolios) by reusing the 13F cache
+   the per-company institutional ingest already populated; no-ops if no company's 13F
+   was due this run, so it rides the weekly institutional cadence with zero extra EDGAR load.
 ```
 
 **Cadence defaults** (`DATASET_INTERVALS_H`, all env-overridable via `INTERVAL_*`):
@@ -265,12 +333,14 @@ project directory — OneDrive file locking interferes with Turbopack's file wat
 
 ## Adding Features
 
-**New dataset/extractor:** add `ingest_<dataset>(cik, ticker)` in a `backend/*.py`
-module; import it in `main.py` (in the optional `try/except` block); add it to
+**New dataset/extractor:** add `ingest_<dataset>(cik, ticker)` in a module under
+`backend/ingest/` (precompute/feed ingestors) or `backend/extractors/` (SEC-form
+parsers); import it in `main.py` (in the optional `try/except` block) as
+`from ingest import …` / `from extractors import …`; add it to
 `DATASET_INTERVALS_H` with a sensible cadence; wire it into `process()` via
 `_run_optional()` so it fails soft and stamps only on success. Add the table +
 indexes + RLS SELECT policy to `schema.sql` (`CREATE TABLE IF NOT EXISTS`), and a
-`db.upsert_*` helper. Add a `fetch*` in `frontend/lib/data.ts` and a row type in
+`db.upsert_*` helper. Add a `fetch*` in `frontend/lib/data/data.ts` and a row type in
 `lib/types.ts` to surface it.
 
 **New frontend view:** add it under `views/` (self-contained) or extract from
@@ -280,8 +350,9 @@ indexes + RLS SELECT policy to `schema.sql` (`CREATE TABLE IF NOT EXISTS`), and 
 
 ## Known Gaps / TODO
 
-- **`page.tsx` is still large** (~2.6k lines). Continue the incremental split using the
-  `components/` (leaf) and `views/` (view) patterns above.
+- **`page.tsx` split is done** — the dashboard is now a thin root shell (~190 lines) over
+  `components/` (atoms) + `views/` (views, incl. `views/company/` tabs). Keep new UI in
+  that structure; see "Component / view structure" above.
 - **No ESLint config** committed — `npm run lint` (`next lint`) prompts interactively and
   can't gate CI yet. Add `.eslintrc.json` (extends `next/core-web-vitals`) when ready.
 - **`schema.sql` must stay populated.** It is the single source of truth for the
@@ -307,7 +378,7 @@ Gemini's free tier are never approached because work-per-run is capped.
 "read every row" query silently truncates as tables grow. Use the paged helpers:
 - Backend: `db._select_all(table, cols)` — used by `fetch_ingest_state` / `fetch_watchlist`
   (without it the scheduler goes blind past ~1000 companies and stops ingesting them).
-- Frontend: `selectAllPaged<T>()` in `lib/data.ts` — used by `fetchCompanies`,
+- Frontend: `selectAllPaged<T>()` in `lib/data/data.ts` — used by `fetchCompanies`,
   `fetchCompanyProfiles`, `fetchCompanyThemes`, `fetchEntities`, `fetchCompanySummaries`.
 
 **Watchlist-wide surfaces read the precompute, not raw history.** The Overview table and
@@ -317,17 +388,25 @@ This replaced fetching every company's ~1yr of `daily_prices` in one 20k-row que
 silently truncated at **~80 companies**. `OverviewPage` falls back to the old client-side
 raw-price path only when `company_summary` is empty (i.e. before the migration is applied).
 
+**Live Signals scanner** (`useWatchlistPulse` → `fetchRecent*`) — *addressed.* The six
+cross-watchlist fetchers go through `fetchRecentScoped`, which (1) **chunks** `.in("cik", …)`
+into batches of 150 so the request URL never 414s at any watchlist size, and (2) scopes by a
+**per-table recency window** (sized to each signal's lookback in `pulse.ts buildSignals` —
+insider 120d, earnings 220d, events 150d, beneficial 600d, offerings 400d, late 600d) instead
+of a fixed global row cap, so per-company coverage no longer thins as busier names fill a cap.
+`buildSignals` remains the single source of truth (the scanner and per-company cockpit share
+it); the window only changes which rows it sees. Bounded by recency × personal-watchlist size,
+which is inherently small. A `cap` per fetch is only a safety valve. (A full backend precompute
+would scale to unlimited size but forks the signal logic — deferred unless a huge shared/global
+scanner is needed.)
+
 **Known remaining N-limits (address before the watchlist gets large):**
-- **Live Signals scanner** (`useWatchlistPulse`) still fetches recent rows with fixed caps
-  (insider 400, events 300, …) and `.in("cik", ciks)`. Coverage *thins* past a few hundred
-  companies, and the `.in()` URL can 414 past ~500–1000. Fix: migrate it to read from
-  `company_summary` (already carries `net_insider_90d` / `cluster_buy`) + a small
-  recent-events precompute, same pattern as the Overview.
 - **`fetchFilings(200)`** powers the global feed — fine as a feed, but it's a recent-200
   window, not per-company coverage.
-- **Supabase storage (500 MB free).** Structured tables (`daily_prices`, `financial_facts`,
-  holdings) grow with N×time and are *not* pruned (only the `filings` feed is). At large N
-  add retention/rollup for `daily_prices` (e.g. keep ~1yr of daily + monthly beyond).
+- **Supabase storage (500 MB free).** `daily_prices` is now pruned to ~2y (`prune_old_prices`
+  in `tools/cleanup.py`, monthly) — it was the only structured table growing unbounded with
+  time. `financial_facts` / holdings grow with N×time but are small per company and retained;
+  add rollup only if they become a problem.
 
 ---
 
@@ -411,7 +490,7 @@ never on filings.
   `momentum_score`, each row showing breadth (N companies), capital flow, a stage badge,
   and the companies driving it (drill into the company page). Plus a capital-allocation-
   by-sector chart (R&D/CapEx flow) and a "Next Trend" highlight.
-- **`fetchThemeTrends()`** in `lib/data.ts`: one `SELECT`, cached per session (slowly-
+- **`fetchThemeTrends()`** in `lib/data/data.ts`: one `SELECT`, cached per session (slowly-
   changing, matched client-side) — same read-budget discipline as reference data.
 - Reuses existing patterns: lazy chart wrappers (`charts.lazy`), `DataTable`, `SignalCard`.
 
@@ -439,7 +518,11 @@ never on filings.
 
 **Why `page.tsx` started as one large file:** shared `Filing`/row types, formatters,
 and design-token references made an early split create prop-drilling/context overhead.
-Now being split deliberately, leaves-first, with `tsc` verifying each move.
+It was split deliberately, leaves-first, with `tsc` verifying each move — now a thin
+root shell over `components/` (atoms) + `views/` (views + `views/company/` tabs), with
+pure logic pushed down to `lib/` (`domain/scorecard.ts`, `utils/url.ts`, `hooks/useWatchlistPulse.ts`).
+The shared types/formatters that once justified one file now live in `lib/` and are
+imported, so the prop-drilling concern no longer applies.
 
 **Why Turbopack for dev:** `next dev --turbopack` bypasses webpack, cutting startup time
 and avoiding the file-locking hangs seen on Windows + OneDrive.

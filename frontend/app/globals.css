@@ -371,6 +371,42 @@ a:hover { text-decoration: underline; }
 .chip.active { background: var(--bg-3); color: var(--fg-0); border-color: var(--accent); }
 .chip-sep { color: var(--border-1); font-size: 14px; padding: 0 2px; user-select: none; align-self: center; }
 
+/* ── Managers view: top-holding ticker tags + clickable holding link ─────────── */
+.mgr-toplist { display: flex; flex-wrap: wrap; gap: 5px; }
+.mgr-tk {
+  font-size: 10px; font-family: var(--font-mono); letter-spacing: 0.03em;
+  padding: 2px 6px; border-radius: 4px; background: var(--bg-2);
+  border: 1px solid var(--border-1); color: var(--fg-2);
+}
+.mgr-link { cursor: pointer; }
+.mgr-link:hover { text-decoration: underline; }
+
+/* Source-filing link (opens the 13F on SEC EDGAR) */
+.mgr-file {
+  font-size: 11px; font-family: var(--font-mono); color: var(--accent);
+  text-decoration: none; white-space: nowrap;
+}
+.mgr-file:hover { text-decoration: underline; }
+
+/* Buy/sell text + move indicators */
+.buy  { color: var(--pos); }
+.sell { color: var(--neg); }
+.mgr-moves { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mgr-move { font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
+.mgr-move.buy  { color: var(--pos); }
+.mgr-move.sell { color: var(--neg); }
+
+/* Action badge (New buy / Added / Trimmed / Sold out / Hold) */
+.mgr-act {
+  font-size: 10px; letter-spacing: 0.02em; padding: 2px 7px; border-radius: 4px;
+  border: 1px solid transparent; white-space: nowrap; font-family: var(--font-mono);
+}
+.mgr-act.act-new  { color: var(--pos); background: rgba(63,185,80,0.12);  border-color: rgba(63,185,80,0.35); }
+.mgr-act.act-add  { color: var(--pos); background: rgba(63,185,80,0.07); }
+.mgr-act.act-trim { color: var(--warn); background: rgba(245,166,35,0.08); }
+.mgr-act.act-exit { color: var(--neg); background: rgba(240,82,82,0.12); border-color: rgba(240,82,82,0.35); }
+.mgr-act.act-hold { color: var(--fg-3); }
+
 /* ── Live indicator ────────────────────────────────────────────────────────── */
 @keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 .live-dot {
