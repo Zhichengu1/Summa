@@ -55,4 +55,6 @@ jobs:
           SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:   ${{ secrets.SUPABASE_KEY }}
           EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
+          # SEC fair-access throttle (default 9 in edgartools; set explicitly).
+          EDGAR_RATE_LIMIT_PER_SEC: "9"
         run: python -m tools.backfill_manager_quarters --quarters ${{ github.event.inputs.quarters || '2' }}

@@ -313,7 +313,12 @@ Backend (`backend/.env`, mapped from `${{ secrets.* }}` in the workflows):
 `SUPABASE_URL`, `SUPABASE_KEY` (service_role), `EDGAR_IDENTITY` (SEC User-Agent, e.g.
 `"Summa/1.0 (you@example.com)"`), and — Phase-2 only — `GEMINI_API_KEY`,
 `DISCORD_WEBHOOK_URL`. Tuning: `INGEST_MAX_PER_RUN` (default 12), `INGEST_TIME_BUDGET_S`
-(default 360), `INTERVAL_<DATASET>` overrides.
+(default 360), `INTERVAL_<DATASET>` overrides. `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
+edgartools; SEC's ceiling is ~10/s) — read by edgartools **at import time**, so it must be
+set in the environment (workflow `env:` / `backend/.env`) before `main.py` imports `edgar`,
+not assigned in Python. Set to `"9"` in the EDGAR workflows (pipeline, 13F-quarter).
+edgartools is pinned `>=5.36.0,<6` in `requirements.txt`; the 5.x line is what enforces this
+default throttle.
 
 Frontend (`frontend/.env.local`): `NEXT_PUBLIC_SUPABASE_URL`,
 `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
