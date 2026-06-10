@@ -59,7 +59,8 @@ Summa/
 │   │   └── discord_notify.py     ← Discord alerts
 │   ├── tools/                    ← standalone maintenance scripts (python -m tools.<name>)
 │   │   ├── build_sec_index.py    ← rebuilds frontend/public/sec-companies.json (stdlib only)
-│   │   └── cleanup.py            ← monthly retention maintenance
+│   │   ├── cleanup.py            ← monthly retention maintenance
+│   │   └── backfill_manager_quarters.py ← seeds prior 13F quarters so the Institutional Investors latest-vs-prior comparison works immediately (idempotent)
 │   ├── seeds/                    ← entities.yaml, profiles.yaml (curated reference data)
 │   ├── docs/                     ← backend design docs (REFERENCE_DATA_SCOPE.md)
 │   ├── requirements.txt
@@ -69,6 +70,7 @@ Summa/
 │   ├── summa-pipeline.yml         ← */10 min ingest (main.py)
 │   ├── summa-cleanup.yml          ← monthly retention (python -m tools.cleanup)
 │   ├── summa-secindex.yml         ← weekly SEC index rebuild (python -m tools.build_sec_index)
+│   ├── summa-13f-quarter.yml      ← post-deadline (16th of Feb/May/Aug/Nov) 13F quarter roll-forward (python -m tools.backfill_manager_quarters)
 │   └── keepalive.yml              ← weekly heartbeat commit (keeps crons alive)
 │
 └── frontend/                      ← Next.js 14 static export
@@ -250,9 +252,12 @@ service_role (bypasses RLS).
 
 **Retention** (`tools/cleanup.py` / `db.py`, monthly): narrative `filings` section text
 is nulled at **30 days**; `filings` feed rows are deleted at **90 days**; `daily_prices`
-bars are pruned beyond **~760 days (~2y)** — the only structured table that grows
-unbounded with time (price_ingest re-pulls a rolling 2y window and upserts but never
-deletes, so older bars accumulate forever). All other structured warehouse tables
+bars are pruned beyond **~760 days (~2y)** (price_ingest re-pulls a rolling 2y window and
+upserts but never deletes, so older bars accumulate forever); `manager_portfolios` is
+bounded to the **latest 4 13F filing quarters** (`prune_manager_portfolios`) — it gains a
+quarter (~managers × top-N + exits) every cycle, and the Investors view only reads each
+manager's latest two quarters, so older quarters are dead weight that widened both the
+frontend fetch and the backend `_prior_lookup` scan. All other structured warehouse tables
 (fundamentals, holdings, events) are small/bounded per company and retained.
 
 > The price reads (`fetchPrices`, `summary_ingest`) fetch the most-recent N sessions via
@@ -277,20 +282,28 @@ deletes, so older bars accumulate forever). All other structured warehouse table
 5. For each company (until INGEST_TIME_BUDGET_S wall-clock budget):
       process(): for each dataset whose cadence is due —
         filings_ingest, data_ingest (fundamentals), then optional extractors
-        (events, insider, ownership, institutional, prices, reference) via
-        _run_optional(); stamp only datasets that ran; one final
-        db.update_company_state() write.
+        (events, insider, ownership, prices, reference) via _run_optional(); stamp
+        only datasets that ran; one final db.update_company_state() write.
+        13F institutional is NOT cadence-driven per company — `ingest_institutional`
+        runs only ONCE per company (first ingest / --force) to seed its first holder
+        coverage; ongoing refresh is the global pass (#7).
       Non-seed companies get flipped to 'ingested' in the watchlist table.
 6. entity_ingest.ingest_entities() — global, runs once per run (not per company).
-7. institutional_extractor.ingest_manager_portfolios() — global, once per run. Writes
-   each tracked manager's top-N holdings (manager_portfolios) by reusing the 13F cache
-   the per-company institutional ingest already populated; no-ops if no company's 13F
-   was due this run, so it rides the weekly institutional cadence with zero extra EDGAR load.
+7. institutional_extractor.ingest_institutional_global() — global, once per run.
+   Incrementally pulls any manager 13Fs MISSING for the current filing quarter
+   (`_populate_cache(only_missing=True)` skips managers already on file via one small
+   `_managers_done` query), then writes per-company `institutional_holdings` for the
+   WHOLE active watchlist + the `manager_portfolios` snapshot/diff in one pass. Once a
+   quarter is captured it no-ops with a single query and zero EDGAR — so the heavy 13F
+   fetch happens once per QUARTER, independent of run frequency and watchlist size.
+   (The manager 13Fs are global/quarterly data; pulling them once and fanning out to
+   all companies is what makes institutional scale with the watchlist.)
 ```
 
 **Cadence defaults** (`DATASET_INTERVALS_H`, all env-overridable via `INTERVAL_*`):
 filings 0 (every visit) · events 12h · insider 24h · ownership 48h · fundamentals 168h ·
-institutional 168h · prices 24h · reference 720h.
+prices 24h · reference 720h. (13F institutional is global/quarterly — see step 7 — not a
+per-company `DATASET_INTERVALS_H` entry.)
 
 ---
 
@@ -403,10 +416,12 @@ scanner is needed.)
 **Known remaining N-limits (address before the watchlist gets large):**
 - **`fetchFilings(200)`** powers the global feed — fine as a feed, but it's a recent-200
   window, not per-company coverage.
-- **Supabase storage (500 MB free).** `daily_prices` is now pruned to ~2y (`prune_old_prices`
-  in `tools/cleanup.py`, monthly) — it was the only structured table growing unbounded with
-  time. `financial_facts` / holdings grow with N×time but are small per company and retained;
-  add rollup only if they become a problem.
+- **Supabase storage (500 MB free).** Two structured tables grew unbounded with time and are
+  now pruned monthly (`tools/cleanup.py`): `daily_prices` to ~2y (`prune_old_prices`) and
+  `manager_portfolios` to the latest 4 13F filing quarters (`prune_manager_portfolios`, which
+  also caps the Investors view's `fetchManagerPortfolios` read — it only uses each manager's
+  latest two quarters). `financial_facts` / holdings grow with N×time but are small per company
+  and retained; add rollup only if they become a problem.
 
 ---
 

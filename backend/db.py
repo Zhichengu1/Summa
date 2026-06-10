@@ -264,3 +264,38 @@ def prune_old_prices(days: int = 760) -> int:
     except Exception:
         logger.exception("prune_old_prices failed")
         return 0
+
+
+def prune_manager_portfolios(keep_quarters: int = 4) -> int:
+    """Delete `manager_portfolios` rows older than the latest `keep_quarters` filing quarters.
+
+    `manager_portfolios` gains one filing quarter (~managers × top-N positions +
+    exits) every 13F cycle and is otherwise never pruned, so it grows unbounded with
+    time. The Institutional Investors view only ever uses each manager's latest
+    quarter (display) and the one before it (the buy/sell diff + emerging-consensus
+    baseline); the frontend's 400-day window spans ~4 quarter-ends. Keeping the latest
+    `keep_quarters` distinct `period_of_report` quarters preserves every displayed
+    value and the prior-quarter baseline (with a late-filer margin) while bounding both
+    the frontend `fetchManagerPortfolios` read and the backend `_prior_lookup`
+    full-table scan as quarters accumulate. Monthly cadence (cleanup.py).
+    """
+    try:
+        periods = sorted(
+            {r["period_of_report"] for r in _select_all("manager_portfolios", "period_of_report")
+             if r.get("period_of_report")},
+            reverse=True,
+        )
+        if len(periods) <= keep_quarters:
+            return 0
+        cutoff = periods[keep_quarters - 1]  # oldest quarter we keep; delete strictly older
+        result = (
+            get_client()
+            .table("manager_portfolios")
+            .delete()
+            .lt("period_of_report", cutoff)
+            .execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_manager_portfolios failed")
+        return 0

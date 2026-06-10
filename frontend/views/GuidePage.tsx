@@ -72,7 +72,7 @@ const IMPACT_TIERS: { tier: ImpactTier; label: string; blurb: string; items: Dat
         name: "Institutional Holdings",
         source: "13F-HR",
         where: "Company → Ownership",
-        definition: "Quarterly positions of institutional managers (>$100M AUM): shares held, position value, and quarter-over-quarter change.",
+        definition: "Quarterly positions of institutional investors (>$100M AUM): shares held, position value, and quarter-over-quarter change.",
         why: "Shows 'smart money' accumulation or distribution — but it is filed up to 45 days after quarter-end, so it confirms a trend rather than predicting one.",
       },
     ],

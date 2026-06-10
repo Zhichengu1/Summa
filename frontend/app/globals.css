@@ -381,6 +381,14 @@ a:hover { text-decoration: underline; }
 .mgr-link { cursor: pointer; }
 .mgr-link:hover { text-decoration: underline; }
 
+/* Investor picker for the Overlap tab — a wrapping, scroll-capped chip cloud */
+.mgr-compare-chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  max-height: 132px; overflow-y: auto;
+  padding: 8px; border: 1px solid var(--border-1); border-radius: 6px;
+  background: var(--bg-1);
+}
+
 /* Source-filing link (opens the 13F on SEC EDGAR) */
 .mgr-file {
   font-size: 11px; font-family: var(--font-mono); color: var(--accent);

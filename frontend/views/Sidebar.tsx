@@ -48,7 +48,7 @@ export function Sidebar({
           ◷ Calendar
         </div>
         <div className={`nav-item${view === "managers" ? " active" : ""}`} onClick={onManagers}>
-          ⬡ Managers
+          ⬡ Institutional Investors
         </div>
         <div className={`nav-item${view === "guide" ? " active" : ""}`} onClick={onGuide}>
           ◇ Data Guide

@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 FEED_RETENTION_DAYS = 90    # feed rows are deleted past 3 months
 PRICE_RETENTION_DAYS = 760  # daily_prices kept ~2y (matches the price_ingest pull)
+MANAGER_KEEP_QUARTERS = 4   # manager_portfolios kept to the latest 4 13F filing quarters
 
 # Note: the current ingest stores only filing metadata in `filings` (no narrative
 # section text), and feed rows are deleted wholesale at FEED_RETENTION_DAYS, so
@@ -39,11 +40,13 @@ PRICE_RETENTION_DAYS = 760  # daily_prices kept ~2y (matches the price_ingest pu
 
 
 def run_cleanup() -> None:
-    """Prune the two time-growing tables: the filings feed and daily_prices.
+    """Prune the time-growing tables: the filings feed, daily_prices, and
+    manager_portfolios.
 
     Everything else (fundamentals, holdings, events, summaries) is small or
-    bounded per company and retained. `daily_prices` is the only structured table
-    that grows unbounded with time, so it gets its own retention window.
+    bounded per company and retained. `daily_prices` grows unbounded with time, so
+    it gets a rolling ~2-year window; `manager_portfolios` grows one 13F quarter per
+    cycle, so it is bounded to the latest few filing quarters the Investors view reads.
     """
     deleted = db.delete_old_filings(FEED_RETENTION_DAYS)
     logger.info("Deleted %d feed filings older than %d days (3-month window)",
@@ -52,6 +55,10 @@ def run_cleanup() -> None:
     pruned = db.prune_old_prices(PRICE_RETENTION_DAYS)
     logger.info("Pruned %d daily_prices bars older than %d days (~2-year window)",
                 pruned, PRICE_RETENTION_DAYS)
+
+    mgr_pruned = db.prune_manager_portfolios(MANAGER_KEEP_QUARTERS)
+    logger.info("Pruned %d manager_portfolios rows beyond the latest %d filing quarters",
+                mgr_pruned, MANAGER_KEEP_QUARTERS)
 
 
 if __name__ == "__main__":

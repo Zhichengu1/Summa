@@ -136,7 +136,9 @@ DATASET_INTERVALS_H: dict[str, float] = {
     "insider":       float(os.environ.get("INTERVAL_INSIDER",       "24")),   # Form 4 daily-ish
     "ownership":     float(os.environ.get("INTERVAL_OWNERSHIP",     "48")),   # 13D/G, 144 occasional
     "fundamentals":  float(os.environ.get("INTERVAL_FUNDAMENTALS",  "168")),  # XBRL: quarterly → weekly
-    "institutional": float(os.environ.get("INTERVAL_INSTITUTIONAL", "168")),  # 13F: quarterly → weekly
+    # NOTE: 13F institutional is NOT a per-company dataset — it is a global, quarterly
+    # roll-forward (institutional_extractor.ingest_institutional_global, wired in main()).
+    # Per-company only runs once for first-time/forced coverage (see process()).
     "prices":        float(os.environ.get("INTERVAL_PRICES",        "24")),   # EOD bars: daily
     "reference":     float(os.environ.get("INTERVAL_REFERENCE",     "720")),  # SIC/seed ~static → monthly
     "summary":       float(os.environ.get("INTERVAL_SUMMARY",       "0")),    # cheap recompute; refresh every visit
@@ -274,7 +276,10 @@ def process(company: WatchedCompany, datasets: dict[str, str], *, force: bool = 
     if due("events")        and _run_optional(event_extractor,         "ingest_events",        cik, ticker): new_state["events"] = stamp
     if due("insider")       and _run_optional(insider_extractor,       "ingest_insider",       cik, ticker): new_state["insider"] = stamp
     if due("ownership")     and _run_optional(ownership_extractor,     "ingest_ownership",     cik, ticker): new_state["ownership"] = stamp
-    if due("institutional") and _run_optional(institutional_extractor, "ingest_institutional", cik, ticker): new_state["institutional"] = stamp
+    # 13F is global/quarterly (ingest_institutional_global below). Per-company runs
+    # only ONCE — to give a brand-new or force-ingested company its first holder
+    # coverage; ongoing refresh is the global pass's job.
+    if (force or "institutional" not in datasets) and _run_optional(institutional_extractor, "ingest_institutional", cik, ticker): new_state["institutional"] = stamp
     if due("prices")        and _run_optional(price_ingest,            "ingest_prices",        cik, ticker): new_state["prices"] = stamp
     if due("reference")     and _run_optional(reference_ingest,        "ingest_profile",       cik, ticker): new_state["reference"] = stamp
 
@@ -319,10 +324,12 @@ def main() -> int:
             logger.exception("Failed for %s", c["ticker"])
     # Global passes (run once, not per company).
     _run_optional(entity_ingest, "ingest_entities")
-    # Manager portfolios ride the 13F cache populated above; no-ops if no
-    # company's institutional cadence was due this run (so it tracks the weekly
-    # 13F cadence with zero extra EDGAR load).
-    _run_optional(institutional_extractor, "ingest_manager_portfolios")
+    # Institutional 13F roll-forward (global, quarterly): incrementally pulls any
+    # manager filings missing for the current quarter, then refreshes per-company
+    # holders + manager_portfolios for the WHOLE watchlist in one pass. No-ops (one
+    # small query, no EDGAR) once the quarter is captured, so cost is O(1) per quarter
+    # regardless of watchlist size.
+    _run_optional(institutional_extractor, "ingest_institutional_global")
     logger.info("Done | %d/%d companies processed", ok, len(companies))
     return 0 if ok else 1
 

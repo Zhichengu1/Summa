@@ -110,13 +110,30 @@ export async function fetchInstitutionalHoldings(cik: string): Promise<Instituti
 }
 
 // 13F is a quarterly filing, filed up to 45 days after quarter-end, so the only
-// meaningful "latest" window is the most recent quarter-end(s) — not a 30-day
-// window (which would be empty for most of the quarter). ~200 days reliably spans
-// the latest ~2 quarter-ends, so a manager that reported a touch earlier still
-// appears, and any latest-period filter on the client still resolves correctly.
-const MANAGER_LOOKBACK_DAYS = 200;
+// meaningful "latest" window is the most recent quarter-end(s) — not a 30-day window
+// (which would be empty for most of the quarter). Each current-quarter row already
+// carries its move vs the prior quarter (action / share_change / prior_* are
+// precomputed at ingest), so the view does NOT need the prior quarter's rows — only
+// each manager's latest. Even a late filer's latest period is ≤ ~226 days old right
+// before the next deadline, so 280 days robustly captures every active manager's
+// newest quarter (and usually the one before it, for an exact comparison label)
+// while fetching ~1–2 quarters instead of 4 — fewer paged round trips, lower latency.
+const MANAGER_LOOKBACK_DAYS = 280;
 function managerSince(): string {
   return new Date(Date.now() - MANAGER_LOOKBACK_DAYS * 86400_000)
+    .toISOString().slice(0, 10);
+}
+
+// The Managers view's emerging-consensus lens compares each manager's LATEST 13F
+// against its PRIOR one, so its fetch must ALWAYS include at least the two most
+// recent quarters — not "usually," forever as quarters roll. The 280-day window
+// above can miss the prior quarter in the worst timing case: a late filer whose
+// latest period is ~226 days old has a prior quarter ~318 days back, beyond 280.
+// 400 days (~4–5 quarters) clears that margin in every case, so the comparison
+// never silently loses the prior quarter over time. Still small + paged + cached.
+const MANAGER_PORTFOLIO_LOOKBACK_DAYS = 400;
+function managerPortfolioSince(): string {
+  return new Date(Date.now() - MANAGER_PORTFOLIO_LOOKBACK_DAYS * 86400_000)
     .toISOString().slice(0, 10);
 }
 
@@ -125,19 +142,26 @@ function managerSince(): string {
 // grouped client-side — same read-budget discipline as the reference tables.
 // Powers the Managers view ("what does Vanguard / BlackRock actually invest in").
 //
-// The view only ever shows each manager's LATEST reported quarter, and every
-// current-quarter row already carries its buy/sell move vs the prior quarter
-// (action / share_change / prior_* are precomputed at ingest). So we only fetch
-// the most recent quarter-ends, not the manager_portfolios table's full history —
-// the older quarters exist purely as the backend's diff source; rollup() then
-// keeps each manager's newest.
-export async function fetchManagerPortfolios(): Promise<ManagerPortfolio[]> {
-  return selectAllPaged<ManagerPortfolio>(
-    "manager_portfolios",
-    "manager_cik, manager_name, period_of_report, accession_number, rank, cusip, ticker, issuer, shares, value, pct_of_portfolio, prior_shares, prior_value, share_change, action, filed_at",
-    { col: "value", asc: false },
-    { col: "period_of_report", value: managerSince() },
-  );
+// The leaderboard shows each manager's LATEST quarter (deltas pre-baked), while the
+// emerging-consensus lens additionally diffs it against the manager's PRIOR quarter.
+// So we fetch the most recent two-or-more quarter-ends (MANAGER_PORTFOLIO_LOOKBACK_DAYS,
+// sized to always include the prior quarter), not the table's full history; rollup()
+// then keeps each manager's newest as "now" and the one before it as "prior."
+//
+// manager_portfolios is slowly-changing (refreshed once per quarter), so the read is
+// memoized for the session: the first Institutional Investors visit pays the paged
+// fetch, repeat visits resolve the cached promise instantly. A full reload re-fetches.
+let _managerPortfoliosCache: Promise<ManagerPortfolio[]> | null = null;
+export function fetchManagerPortfolios(): Promise<ManagerPortfolio[]> {
+  if (!_managerPortfoliosCache) {
+    _managerPortfoliosCache = selectAllPaged<ManagerPortfolio>(
+      "manager_portfolios",
+      "manager_cik, manager_name, period_of_report, accession_number, rank, cusip, ticker, issuer, shares, value, pct_of_portfolio, prior_shares, prior_value, share_change, action, filed_at",
+      { col: "value", asc: false },
+      { col: "period_of_report", value: managerPortfolioSince() },
+    ).catch((e) => { _managerPortfoliosCache = null; throw e; });  // don't cache failures
+  }
+  return _managerPortfoliosCache;
 }
 
 // Holdings where THIS company is the filing manager — i.e. the equity stakes it

@@ -1,0 +1,58 @@
+name: summa-13f-quarter
+
+# Rolls the Institutional Investors latest-vs-prior comparison forward as soon as
+# a new 13F quarter is released. 13F-HR is due 45 days after quarter-end
+# (Feb/May/Aug/Nov 15), so this fires the morning after each deadline and pulls the
+# new quarter into manager_portfolios with its quarter-over-quarter diff. The main
+# */10-min pipeline would also pick it up within ~a week on the weekly institutional
+# cadence; this just makes detection prompt. backfill_manager_quarters is
+# idempotent (upsert), so firing alongside the main pipeline is harmless, and it
+# also bootstraps the prior quarter on a fresh warehouse.
+
+on:
+  schedule:
+    # 08:00 UTC on the 16th of Feb/May/Aug/Nov — the day after each 13F deadline.
+    - cron: "0 8 16 2,5,8,11 *"
+  workflow_dispatch:
+    inputs:
+      quarters:
+        description: "How many recent filing quarters to (re)load"
+        default: "2"
+
+concurrency:
+  group: summa-13f-quarter
+  cancel-in-progress: false   # never interrupt an in-flight write to Supabase
+
+permissions:
+  contents: read
+
+# Opt the Node 20 actions onto the Node 24 runtime (forced 2026-06-02; Node 20
+# removed 2026-09-16) so the deprecation warning stops. Keep consistent with the
+# other workflows.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15        # fetching ~50 managers x N quarters from EDGAR
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Pull the latest 13F quarter into the comparison
+        working-directory: backend
+        env:
+          SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:   ${{ secrets.SUPABASE_KEY }}
+          EDGAR_IDENTITY: ${{ secrets.EDGAR_IDENTITY }}
+        run: python -m tools.backfill_manager_quarters --quarters ${{ github.event.inputs.quarters || '2' }}

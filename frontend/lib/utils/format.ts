@@ -28,11 +28,16 @@ export function fmtDelta(v: number | null | undefined, digits = 1): string {
   return `${v > 0 ? "+" : ""}${v.toFixed(digits)}%`;
 }
 
-export function fmtDate(iso: string | null | undefined): string {
+export function fmtDate(iso: string | null | undefined, opts?: { utc?: boolean }): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+  // utc: format a bare DATE (e.g. a 13F period_of_report) without the local-timezone
+  // day-shift that drags a midnight-UTC date back a day in US zones.
+  return d.toLocaleDateString("en-US", {
+    year: "numeric", month: "short", day: "numeric",
+    timeZone: opts?.utc ? "UTC" : undefined,
+  });
 }
 
 export function fmtPeriodLabel(iso: string, periodType: "annual" | "quarterly"): string {
