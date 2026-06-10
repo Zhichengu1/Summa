@@ -1,4 +1,7 @@
-edgartools>=2.0.0
+# Pinned to the 5.x line: 5.x enforces SEC fair-access by default (9 req/s, env
+# EDGAR_RATE_LIMIT_PER_SEC). Upper bound guards against a future breaking major
+# silently landing in a CI run. Bump the floor/ceiling deliberately when upgrading.
+edgartools>=5.36.0,<6
 supabase>=2.25.1
 python-dotenv>=1.0.0
 pandas>=2.0.0

@@ -48,6 +48,10 @@ jobs:
           SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
           EDGAR_IDENTITY:      ${{ secrets.EDGAR_IDENTITY }}
+          # SEC fair-access throttle. edgartools reads this at import time and
+          # defaults to 9 (SEC's ~10 req/s ceiling); set explicitly so the limit
+          # is documented and survives a future change to the library default.
+          EDGAR_RATE_LIMIT_PER_SEC: "9"
           GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           # Per-run budget — keeps each tick within the 8-min cap. Tune freely.
