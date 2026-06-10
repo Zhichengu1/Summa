@@ -6,6 +6,6 @@ supabase>=2.25.1
 python-dotenv>=1.0.0
 pandas>=2.0.0
 requests>=2.31.0
-PyYAML>=6.0
+PyYAML>=6.0.3
 # Phase 2 enrichment channels (optional, not used by the Phase 1 ingest):
 google-generativeai>=0.8.0
