@@ -4,7 +4,7 @@
 edgartools>=5.36.0,<6
 supabase>=2.25.1
 python-dotenv>=1.0.0
-pandas>=2.0.0
+pandas>=3.0.3
 requests>=2.31.0
 PyYAML>=6.0
 # Phase 2 enrichment channels (optional, not used by the Phase 1 ingest):
