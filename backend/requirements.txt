@@ -2,7 +2,7 @@
 # EDGAR_RATE_LIMIT_PER_SEC). Upper bound guards against a future breaking major
 # silently landing in a CI run. Bump the floor/ceiling deliberately when upgrading.
 edgartools>=5.36.0,<6
-supabase>=2.25.1
+supabase>=2.31.0
 python-dotenv>=1.0.0
 pandas>=2.0.0
 requests>=2.31.0
