@@ -1,0 +1,30 @@
+# Keeps dependencies — and the SHA-pinned GitHub Actions — current and patched.
+# Dependabot opens PRs that bump a pin to the next reviewed version (with the
+# matching SHA), so pinning for supply-chain safety doesn't mean going stale.
+version: 2
+updates:
+  # GitHub Actions used in .github/workflows/*.yml (the SHA pins).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+
+  # Python backend pipeline.
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+
+  # Next.js frontend.
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    # Lockstep React/Next majors are intentional — review those by hand.
+    open-pull-requests-limit: 5

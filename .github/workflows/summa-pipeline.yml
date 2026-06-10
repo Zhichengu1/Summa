@@ -18,7 +18,7 @@ concurrency:
 permissions:
   contents: read
 
-# actions/checkout@v4 + setup-python@v5 ship a Node 20 runtime, which GitHub is
+# actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 + setup-python@v5 ship a Node 20 runtime, which GitHub is
 # deprecating (forced to Node 24 on 2026-06-02; Node 20 removed 2026-09-16). Opt
 # in early so the runner uses Node 24 now and the deprecation warning stops; both
 # actions support it.
@@ -28,11 +28,11 @@ env:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 8        # hard cap so runs never overlap the next cron tick
+    timeout-minutes: 9        # hard cap < the 10-min cron interval so a run never overlaps the next tick
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -54,11 +54,13 @@ jobs:
           EDGAR_RATE_LIMIT_PER_SEC: "9"
           GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          # Per-run budget — keeps each tick within the 8-min cap. Tune freely.
+          # Per-run budget. Public repo ⇒ Actions minutes are free/unlimited, so the
+          # cap is sized for coverage latency (how fast a full watchlist sweep finishes),
+          # not billing. Real ceiling is EDGAR's 9 req/s + the wall-clock budget below.
           # Per-dataset cadence (INTERVAL_FUNDAMENTALS, ...) uses code defaults.
-          INGEST_MAX_PER_RUN: "12"
-          # Wall-clock budget: stop starting new companies after 6 min so the run
-          # exits cleanly and commits state instead of being killed at the 8-min
-          # timeout-minutes cap. The ~2-min margin covers pip install + final writes.
-          INGEST_TIME_BUDGET_S: "360"
+          INGEST_MAX_PER_RUN: "25"
+          # Wall-clock budget: stop *starting* new companies after 7 min so the run
+          # finishes (final state write) before the 9-min timeout and well inside the
+          # 10-min cron interval. The ~2-min margin covers cached pip install + writes.
+          INGEST_TIME_BUDGET_S: "420"
         run: python main.py
