@@ -14,7 +14,7 @@
     "react-dom": "^18.3.1",
     "@supabase/supabase-js": "^2.47.10",
     "@supabase/ssr": "^0.5.2",
-    "recharts": "^2.15.0"
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "typescript": "^5.7.2",
