@@ -1,0 +1,35 @@
+# gitleaks config for Summa — extends the built-in ruleset and adds the
+# specific credentials this project uses (Supabase, Gemini, Discord, EDGAR).
+# Used by both the local pre-commit hook (.githooks/pre-commit) and the
+# secret-scan GitHub Action.
+
+[extend]
+useDefault = true   # keep all built-in rules (AWS, Google, generic JWTs, etc.)
+
+[[rules]]
+id = "supabase-jwt"
+description = "Supabase anon/service_role JWT"
+# Supabase keys are JWTs that always start with this header segment.
+regex = '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'''
+
+[[rules]]
+id = "gemini-api-key"
+description = "Google / Gemini API key"
+regex = '''AIzaSy[A-Za-z0-9_-]{33}'''
+
+[[rules]]
+id = "discord-webhook"
+description = "Discord webhook URL"
+regex = '''https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+'''
+
+# Allowlist the placeholder templates — they contain no real secrets.
+[allowlist]
+description = "Ignore env templates and documentation placeholders"
+paths = [
+  '''backend/\.env\.example''',
+  '''frontend/\.env\.example''',
+]
+regexes = [
+  '''your-service-role-key-here''',
+  '''xxxxxxxxxxxx\.supabase\.co''',
+]
