@@ -3,7 +3,7 @@
 # silently landing in a CI run. Bump the floor/ceiling deliberately when upgrading.
 edgartools>=5.36.0,<6
 supabase>=2.25.1
-python-dotenv>=1.0.0
+python-dotenv>=1.2.2
 pandas>=2.0.0
 requests>=2.31.0
 PyYAML>=6.0
