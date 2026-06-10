@@ -1,5 +1,10 @@
 # Summa — Phase 1: Data Foundation **+ Visualization**
 
+[![CI](https://github.com/Zhichengu1/Summa/actions/workflows/ci.yml/badge.svg)](https://github.com/Zhichengu1/Summa/actions/workflows/ci.yml)
+[![secret-scan](https://github.com/Zhichengu1/Summa/actions/workflows/secret-scan.yml/badge.svg)](https://github.com/Zhichengu1/Summa/actions/workflows/secret-scan.yml)
+[![pipeline](https://github.com/Zhichengu1/Summa/actions/workflows/summa-pipeline.yml/badge.svg)](https://github.com/Zhichengu1/Summa/actions/workflows/summa-pipeline.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > Updates the earlier "data only" Phase 1. Phase 1 now ships **two** things: (1) the data warehouse — every price-relevant SEC dataset via edgartools — and (2) the [13f.info](https://13f.info)-style UI to **see and explore** every one of those datasets. By the end of Phase 1 you can open any watchlist company and read its fundamentals, ownership, and catalysts in dense sortable tables and clean charts.
 
 **Phase 1 boundary (revised).** In scope: data ingestion **and** its visualization. Out of scope until Phase 2+: anything *derived* — signal/factor computation, the composite score, cross-company factor screening, backtesting. You can't chart a factor you haven't computed yet; Phase 1 visualizes the raw SEC data, Phase 2+ visualizes the analysis built on it.

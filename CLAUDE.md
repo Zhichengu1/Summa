@@ -71,7 +71,9 @@ Summa/
 │   ├── summa-cleanup.yml          ← monthly retention (python -m tools.cleanup)
 │   ├── summa-secindex.yml         ← weekly SEC index rebuild (python -m tools.build_sec_index)
 │   ├── summa-13f-quarter.yml      ← post-deadline (16th of Feb/May/Aug/Nov) 13F quarter roll-forward (python -m tools.backfill_manager_quarters)
-│   └── keepalive.yml              ← weekly heartbeat commit (keeps crons alive)
+│   ├── keepalive.yml              ← weekly heartbeat commit (keeps crons alive)
+│   ├── ci.yml                     ← push/PR quality gate: frontend tsc --noEmit + backend compileall
+│   └── secret-scan.yml            ← push/PR gitleaks credential scan (.gitleaks.toml)
 │
 └── frontend/                      ← Next.js 14 static export
     ├── app/
@@ -371,8 +373,10 @@ indexes + RLS SELECT policy to `schema.sql` (`CREATE TABLE IF NOT EXISTS`), and 
 - **`page.tsx` split is done** — the dashboard is now a thin root shell (~190 lines) over
   `components/` (atoms) + `views/` (views, incl. `views/company/` tabs). Keep new UI in
   that structure; see "Component / view structure" above.
-- **No ESLint config** committed — `npm run lint` (`next lint`) prompts interactively and
-  can't gate CI yet. Add `.eslintrc.json` (extends `next/core-web-vitals`) when ready.
+- **CI gate is typecheck-only** — `ci.yml` runs `tsc --noEmit` (frontend) + `compileall`
+  (backend) on push/PR, but there is still **no ESLint config** committed (`next lint`
+  prompts interactively and can't gate CI). Add `.eslintrc.json` (extends
+  `next/core-web-vitals`) and an `npm run lint` step in `ci.yml` when ready.
 - **`schema.sql` must stay populated.** It is the single source of truth for the
   warehouse and must be applied in Supabase before the backend can write. Do not commit
   it empty.
