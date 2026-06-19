@@ -23,6 +23,7 @@ import type { Company, Filing, DailyPrice } from "../lib/types";
 
 type PriceRow = { last: number | null; chg1d: number | null; offHigh: number | null; spark: number[] };
 
+
 export function OverviewPage({
   companies, filings, onCompany, isNew,
 }: { companies: Company[]; filings: Filing[]; onCompany: (cik: string) => void; isNew?: (iso: string | null | undefined) => boolean }) {

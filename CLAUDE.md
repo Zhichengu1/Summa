@@ -397,6 +397,15 @@ indexes + RLS SELECT policy to `schema.sql` (`CREATE TABLE IF NOT EXISTS`), and 
 - **`schema.sql` must stay populated.** It is the single source of truth for the
   warehouse and must be applied in Supabase before the backend can write. Do not commit
   it empty.
+- **Supabase Branching is intentionally NOT used.** Schema is applied by hand via the SQL
+  Editor (invariant #3); there is no `supabase/` dir, `config.toml`, or `migrations/`. If a
+  red **"Supabase Preview"** check appears on commits (`context deadline exceeded` reading
+  `api.supabase.com/.../config/...`), it's the Supabase Branching integration timing out on
+  the management API — not a repo/code problem and not fixable in-repo. Disable it: remove
+  the repo from the Supabase GitHub App (github.com → Settings → Applications → Supabase →
+  Configure) **or** dashboard → branch dropdown → Manage branches → Disable branching. Do
+  not add a `supabase/` project to "fix" it — that would adopt migration-based schema
+  management and conflict with the hand-applied `schema.sql` workflow.
 
 ---
 
