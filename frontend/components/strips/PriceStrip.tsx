@@ -1,6 +1,6 @@
 // PriceStrip — compact EOD-price metric strip: last close, distance from the
-// 52-week high, and trailing returns. Returns are colored; the price feed is
-// end-of-day, not realtime.
+// 52-week high/low, trailing returns across windows, drawdown, and liquidity.
+// Returns are colored; the price feed is end-of-day, not realtime.
 import { InfoTip } from "../InfoTip";
 import { fmtUSD, fmtPct, fmtDelta, fmtDate } from "../../lib/utils/format";
 import type { derivePriceKpis } from "../../lib/domain/prices";
@@ -25,9 +25,30 @@ export function PriceStrip({ k }: { k: ReturnType<typeof derivePriceKpis> }) {
           {k.pctOffHigh == null ? "—" : fmtPct(k.pctOffHigh)}
         </div>
       </div>
-      <Ret label="YTD" v={k.retYTD} />
-      <Ret label="3M" v={k.ret3M} />
+      <div className="kpi">
+        <div className="k-label">Off 52-wk Low<InfoTip term="% off 52-wk low" /></div>
+        <div className={`k-value ${k.pctOffLow == null ? "" : k.pctOffLow < 5 ? "neg" : k.pctOffLow > 50 ? "pos" : ""}`}>
+          {k.pctOffLow == null ? "—" : `+${fmtPct(k.pctOffLow)}`}
+        </div>
+      </div>
+      <Ret label="1W" v={k.ret1W} />
       <Ret label="1M" v={k.ret1M} />
+      <Ret label="3M" v={k.ret3M} />
+      <Ret label="6M" v={k.ret6M} />
+      <Ret label="YTD" v={k.retYTD} />
+      <Ret label="1Y" v={k.ret1Y} />
+      <div className="kpi">
+        <div className="k-label">Max Drawdown<InfoTip term="Max Drawdown" /></div>
+        <div className={`k-value ${k.maxDrawdown == null ? "" : k.maxDrawdown < -25 ? "neg" : ""}`}>
+          {k.maxDrawdown == null ? "—" : fmtPct(k.maxDrawdown)}
+        </div>
+        <div className="k-delta"><span className="muted">trailing 52w</span></div>
+      </div>
+      <div className="kpi">
+        <div className="k-label">Avg $ Vol<InfoTip term="Avg $ Vol" /></div>
+        <div className="k-value">{fmtUSD(k.avgDollarVol)}</div>
+        <div className="k-delta"><span className="muted">30d / day</span></div>
+      </div>
     </div>
   );
 }

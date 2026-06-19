@@ -1,7 +1,8 @@
 // TechStrip — trader technicals readout (the price-action layer): RSI, distance
-// from the 50/200-day moving averages, volume vs its 30-day average, and 52-week
-// position. All values are pre-computed by deriveTechnicals(); this just renders
-// them as a strip alongside the fundamentals so a trader sees momentum at a glance.
+// from the 50/200-day moving averages, and volume vs its 30-day average. All values
+// are pre-computed by deriveTechnicals(); this just renders them as a strip alongside
+// the fundamentals so a trader sees momentum at a glance. (52-week position is shown
+// once, precisely, by PriceStrip's "Off 52-wk High".)
 import { InfoTip } from "../InfoTip";
 import type { Technicals } from "../../lib/domain/technicals";
 
@@ -37,10 +38,14 @@ export function TechStrip({ t }: { t: Technicals }) {
         <div className="k-delta"><span className="muted">vs 30d avg</span></div>
       </div>
       <div className="kpi">
-        <div className="k-label">52-wk Range<InfoTip term="% off 52-wk high" /></div>
-        <div className="k-value">
-          {t.new52wHigh ? <span className="pos">At high</span> : t.new52wLow ? <span className="neg">At low</span> : <span className="muted">Mid-range</span>}
-        </div>
+        <div className="k-label">Volatility<InfoTip term="Volatility" /></div>
+        <div className="k-value">{t.histVol == null ? "—" : `${t.histVol.toFixed(0)}%`}</div>
+        <div className="k-delta"><span className="muted">annualized</span></div>
+      </div>
+      <div className="kpi">
+        <div className="k-label">ATR<InfoTip term="ATR" /></div>
+        <div className="k-value">{t.atrPct == null ? "—" : `${t.atrPct.toFixed(1)}%`}</div>
+        <div className="k-delta"><span className="muted">typical daily range</span></div>
       </div>
     </div>
   );

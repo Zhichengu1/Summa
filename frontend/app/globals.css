@@ -160,6 +160,16 @@ a:hover { text-decoration: underline; }
 }
 .flag-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
 
+/* Latest close + day change shown per watchlist row (from company_summary) */
+.company-row .px {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 1px; flex-shrink: 0; font-family: var(--font-mono); line-height: 1.1;
+}
+.company-row .px .px-last { font-size: 11px; font-weight: 600; color: var(--fg-1); }
+.company-row .px .px-chg  { font-size: 9px; font-weight: 700; }
+.company-row .px .px-chg.pos { color: var(--pos); }
+.company-row .px .px-chg.neg { color: var(--neg); }
+
 /* Pending (queued, not-yet-ingested) indicator + per-row remove button */
 .company-row .pending-dot { font-size: 10px; flex-shrink: 0; opacity: 0.8; }
 .company-row .row-remove {

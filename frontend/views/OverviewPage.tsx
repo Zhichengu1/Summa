@@ -74,7 +74,7 @@ export function OverviewPage({
         tr[s.cik] = {
           sma50: null, sma200: null, cross: s.ma_cross,
           pctFrom50: s.pct_from_50, pctFrom200: s.pct_from_200,
-          rsi14: s.rsi14, volSpike: s.vol_spike,
+          rsi14: s.rsi14, volSpike: s.vol_spike, atrPct: null, histVol: null,
           new52wHigh: !!s.new_52w_high, new52wLow: !!s.new_52w_low, asOf: s.as_of,
         };
       }

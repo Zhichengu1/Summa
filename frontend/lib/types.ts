@@ -160,6 +160,24 @@ export type SecuritiesOffering = {
   filed_at: string | null;
 };
 
+// One row per IPO-lifecycle filing (backend ipo_extractor → ipos). The IPOs view
+// groups these by issuer (cik) into one card per IPO with its most-advanced status.
+export type Ipo = {
+  cik: string;
+  accession_number: string;
+  company_name: string | null;
+  ticker: string | null;
+  form: string | null;
+  status: "filed" | "updated" | "priced" | "withdrawn" | null;
+  is_spac: boolean | null;
+  price: number | null;       // offering price per share (priced only)
+  shares: number | null;      // shares offered
+  proceeds: number | null;    // gross proceeds, USD
+  offering_type: string | null;
+  filing_url: string | null;
+  filed_at: string | null;
+};
+
 export type DailyPrice = {
   cik: string;
   ticker: string | null;
@@ -203,7 +221,7 @@ export type PeriodType = "annual" | "quarterly";
 // ─── View routing ───────────────────────────────────────────────────────────────
 // The top-level dashboard view and the per-company tab. Shared by the root Page,
 // the Sidebar, and CompanyPage so the hash router and the components agree.
-export type MainView = "overview" | "search" | "feed" | "calendar" | "managers" | "guide" | "company";
+export type MainView = "overview" | "search" | "feed" | "calendar" | "managers" | "ipos" | "guide" | "company";
 export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings";
 
 // ─── Reference data (backend-populated; read once per session) ──────────────────

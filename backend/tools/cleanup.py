@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 FEED_RETENTION_DAYS = 90    # feed rows are deleted past 3 months
 PRICE_RETENTION_DAYS = 760  # daily_prices kept ~2y (matches the price_ingest pull)
 MANAGER_KEEP_QUARTERS = 4   # manager_portfolios kept to the latest 4 13F filing quarters
+IPO_RETENTION_DAYS = 120    # ipos pipeline rows pruned past ~4 months of inactivity
 
 # Note: the current ingest stores only filing metadata in `filings` (no narrative
 # section text), and feed rows are deleted wholesale at FEED_RETENTION_DAYS, so
@@ -59,6 +60,9 @@ def run_cleanup() -> None:
     mgr_pruned = db.prune_manager_portfolios(MANAGER_KEEP_QUARTERS)
     logger.info("Pruned %d manager_portfolios rows beyond the latest %d filing quarters",
                 mgr_pruned, MANAGER_KEEP_QUARTERS)
+
+    ipo_pruned = db.prune_old_ipos(IPO_RETENTION_DAYS)
+    logger.info("Pruned %d ipos rows older than %d days", ipo_pruned, IPO_RETENTION_DAYS)
 
 
 if __name__ == "__main__":

@@ -53,7 +53,8 @@ Summa/
 │   │   ├── event_extractor.py    ← earnings/corporate events/late filings/offerings
 │   │   ├── insider_extractor.py  ← Form 4 → insider_transactions
 │   │   ├── institutional_extractor.py ← 13F-HR → institutional_holdings / manager_portfolios
-│   │   └── ownership_extractor.py ← SC 13D/13G + Form 144 → beneficial_ownership / proposed_sales
+│   │   ├── ownership_extractor.py ← SC 13D/13G + Form 144 → beneficial_ownership / proposed_sales
+│   │   └── ipo_extractor.py       ← GLOBAL: recent S-1/F-1/424B/RW across the market → ipos
 │   ├── enrichment/               ← OPTIONAL Phase-2 channels (not in the ingest path)
 │   │   ├── gemini_enricher.py    ← Gemini enrichment
 │   │   └── discord_notify.py     ← Discord alerts
@@ -89,7 +90,7 @@ Summa/
     │   └── strips/                    PriceStrip, TechStrip, KpiTile (metric strips)
     ├── views/                     ← top-level page views (own their data/effects):
     │   │                            Sidebar, OverviewPage, ScannerSection (+ MomentumScanner),
-    │   │                            SearchPage, FeedPage, CalendarView, ManagersPage, GuidePage
+    │   │                            SearchPage, FeedPage, CalendarView, ManagersPage, IposPage, GuidePage
     │   └── company/               ← the per-company page + its tabs:
     │                                CompanyPage, CompanyOverviewTab, StrategyTab, FundamentalsTab,
     │                                PeersTab, OwnershipTab, CatalystsTab, FilingsTab, companyAux.ts (shared CompanyAux)
@@ -241,7 +242,8 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `earnings_events` | cik+date | 8-K Item 2.02 results/guidance |
 | `corporate_events` | accession | Classified material 8-K events |
 | `late_filings` | accession | NT 10-K / NT 10-Q notices |
-| `securities_offerings` | accession | S-1/S-3/424B issuance |
+| `securities_offerings` | accession | S-1/S-3/424B issuance (watchlist companies) |
+| `ipos` | accession | GLOBAL active-IPO pipeline: market-wide S-1/F-1/424B/RW lifecycle filings (the IPOs view groups by issuer, ranks by capital raised / gross proceeds, and hides SPAC + sub-$10M micro-offerings by default) |
 | `daily_prices` | cik+date | Yahoo EOD bars |
 | `company_profiles` | `cik` | SIC industry/sector |
 | `company_themes` | cik+name | Recomputed theme tags (delete+insert per cik) |
@@ -259,8 +261,10 @@ upserts but never deletes, so older bars accumulate forever); `manager_portfolio
 bounded to the **latest 4 13F filing quarters** (`prune_manager_portfolios`) — it gains a
 quarter (~managers × top-N + exits) every cycle, and the Investors view only reads each
 manager's latest two quarters, so older quarters are dead weight that widened both the
-frontend fetch and the backend `_prior_lookup` scan. All other structured warehouse tables
-(fundamentals, holdings, events) are small/bounded per company and retained.
+frontend fetch and the backend `_prior_lookup` scan; `ipos` rows are pruned past **120 days**
+(`prune_old_ipos`) since the IPO pipeline is a rolling recent-activity surface. All other
+structured warehouse tables (fundamentals, holdings, events) are small/bounded per company
+and retained.
 
 > The price reads (`fetchPrices`, `summary_ingest`) fetch the most-recent N sessions via
 > `order(date desc).limit(N)` then reverse to ascending. Do **not** revert these to
@@ -300,6 +304,18 @@ frontend fetch and the backend `_prior_lookup` scan. All other structured wareho
    fetch happens once per QUARTER, independent of run frequency and watchlist size.
    (The manager 13Fs are global/quarterly data; pulling them once and fanning out to
    all companies is what makes institutional scale with the watchlist.)
+8. ipo_extractor.ingest_ipos_global() — global, once per run. Pulls IPO-lifecycle
+   forms (S-1/F-1 registrations, S-1/A amendments, 424B pricings, RW withdrawals)
+   from TWO sources and upserts one `ipos` row per filing: (1a) the real-time
+   current-filings feed (`get_current_filings`) for TODAY's filings — so a same-day
+   pricing shows immediately, not a day late; (1b) a shallow historical quarterly
+   index scan (`get_filings`, yesterday back ~10 days) as a downtime safety net behind
+   the feed. Incremental:
+   already-stored accessions are skipped via
+   `db.get_seen_accessions`, and the expensive prospectus parse (`.obj()` → Deal
+   price/shares/proceeds) runs ONLY for new 424B pricings, so most runs are cheap
+   metadata-only index reads. Market-wide — independent of the watchlist. Window is
+   `IPO_WINDOW_DAYS` (default 10); rows are pruned past 120d by cleanup.py.
 ```
 
 **Cadence defaults** (`DATASET_INTERVALS_H`, all env-overridable via `INTERVAL_*`):
@@ -315,7 +331,8 @@ Backend (`backend/.env`, mapped from `${{ secrets.* }}` in the workflows):
 `SUPABASE_URL`, `SUPABASE_KEY` (service_role), `EDGAR_IDENTITY` (SEC User-Agent, e.g.
 `"Summa/1.0 (you@example.com)"`), and — Phase-2 only — `GEMINI_API_KEY`,
 `DISCORD_WEBHOOK_URL`. Tuning: `INGEST_MAX_PER_RUN` (default 12), `INGEST_TIME_BUDGET_S`
-(default 360), `INTERVAL_<DATASET>` overrides. `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
+(default 360), `INTERVAL_<DATASET>` overrides, `IPO_WINDOW_DAYS` (default 10; raise for
+a one-off IPO backfill on an empty table). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
 edgartools; SEC's ceiling is ~10/s) — read by edgartools **at import time**, so it must be
 set in the environment (workflow `env:` / `backend/.env`) before `main.py` imports `edgar`,
 not assigned in Python. Set to `"9"` in the EDGAR workflows (pipeline, 13F-quarter).

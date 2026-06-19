@@ -18,18 +18,20 @@ const SearchPage = dynamic(() => import("../views/SearchPage").then((m) => ({ de
 const FeedPage = dynamic(() => import("../views/FeedPage").then((m) => ({ default: m.FeedPage })), { ssr: false, loading: viewLoading });
 const CalendarView = dynamic(() => import("../views/CalendarView").then((m) => ({ default: m.CalendarView })), { ssr: false, loading: viewLoading });
 const ManagersPage = dynamic(() => import("../views/ManagersPage").then((m) => ({ default: m.ManagersPage })), { ssr: false, loading: viewLoading });
+const IposPage = dynamic(() => import("../views/IposPage").then((m) => ({ default: m.IposPage })), { ssr: false, loading: viewLoading });
 const GuidePage = dynamic(() => import("../views/GuidePage").then((m) => ({ default: m.GuidePage })), { ssr: false, loading: viewLoading });
 const CompanyPage = dynamic(() => import("../views/company/CompanyPage").then((m) => ({ default: m.CompanyPage })), { ssr: false, loading: viewLoading });
 import {
   fetchCompanies, fetchFilings, subscribeFilings,
   fetchCompanyProfiles, fetchCompanyThemes, fetchEntities, queueWatchlist,
+  fetchCompanySummaries,
 } from "../lib/data/data";
 import { loadProfiles } from "../lib/domain/taxonomy";
 import { loadEntities } from "../lib/domain/entities";
 import { useWatchlist, type WatchItem } from "../lib/hooks/useWatchlist";
 import { useLastSeen } from "../lib/hooks/useLastSeen";
 import { loadSecIndex, searchSec, type SecCompany } from "../lib/domain/secIndex";
-import type { Company, Filing, MainView, CompanyTab } from "../lib/types";
+import type { Company, Filing, MainView, CompanyTab, CompanySummary } from "../lib/types";
 
 export default function Page() {
   const [view, setView]           = useState<MainView>("overview");
@@ -38,6 +40,7 @@ export default function Page() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [filings, setFilings]     = useState<Filing[]>([]);
   const [secIndex, setSecIndex]   = useState<SecCompany[]>([]);
+  const [summaries, setSummaries] = useState<CompanySummary[]>([]);
   const [loading, setLoading]     = useState(true);
   const watch = useWatchlist();
   const seen = useLastSeen();
@@ -50,6 +53,7 @@ export default function Page() {
       if (h === "feed") { setView("feed"); setActiveCik(null); return; }
       if (h === "calendar") { setView("calendar"); setActiveCik(null); return; }
       if (h === "managers") { setView("managers"); setActiveCik(null); return; }
+      if (h === "ipos") { setView("ipos"); setActiveCik(null); return; }
       if (h === "guide") { setView("guide"); setActiveCik(null); return; }
       const m = h.match(/^c=([^/]+)(?:\/(.*))?$/);
       if (m) {
@@ -78,6 +82,10 @@ export default function Page() {
       setFilings(fils);
       setLoading(false);
     });
+    // Precomputed price summaries (one tiny row/company) power the watchlist
+    // last-close + day-change shown in the sidebar. Loaded separately so the
+    // first paint isn't blocked on it.
+    fetchCompanySummaries().then(setSummaries);
   }, []);
 
   // Realtime subscription
@@ -98,6 +106,9 @@ export default function Page() {
   const openCompany = useCallback((cik: string, tab: CompanyTab = "overview") => {
     navigate(`c=${cik}${tab !== "overview" ? `/${tab}` : ""}`);
   }, [navigate]);
+
+  // Per-company latest close + day change, keyed by cik (for the sidebar prices).
+  const priceMap = useMemo(() => new Map(summaries.map((s) => [s.cik, s])), [summaries]);
 
   // Ingested = data already in the warehouse; the rest of the watchlist is pending.
   const ingestedCiks = useMemo(() => new Set(companies.map((c) => c.cik)), [companies]);
@@ -150,13 +161,14 @@ export default function Page() {
       <Sidebar
         companies={watchCompanies} filings={filings}
         activeCik={activeCik} view={view}
-        ingestedCiks={ingestedCiks}
+        ingestedCiks={ingestedCiks} prices={priceMap}
         onCompany={(cik) => openCompany(cik)}
         onOverview={() => navigate("overview")}
         onSearch={() => navigate("search")}
         onFeed={() => navigate("feed")}
         onCalendar={() => navigate("calendar")}
         onManagers={() => navigate("managers")}
+        onIpos={() => navigate("ipos")}
         onGuide={() => navigate("guide")}
         onRemove={handleRemove}
         newFilings={newFilings}
@@ -181,6 +193,7 @@ export default function Page() {
           {view === "managers" && (
             <ManagersPage companies={watchCompanies} onCompany={openCompany} />
           )}
+          {view === "ipos" && <IposPage />}
           {view === "guide" && <GuidePage />}
           {view === "company" && activeCik && (
             <CompanyPage

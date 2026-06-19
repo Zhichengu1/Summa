@@ -5,12 +5,18 @@ import type { DailyPrice } from "../types";
 export type PriceKpis = {
   last: number | null;          // latest close
   asOf: string | null;          // date of latest close
+  ret1W: number | null;         // % return vs ~1 week ago
   ret1M: number | null;         // % return vs ~1 month ago
   ret3M: number | null;         // % return vs ~3 months ago
+  ret6M: number | null;         // % return vs ~6 months ago
   retYTD: number | null;        // % return vs first close of the year
+  ret1Y: number | null;         // % return vs ~1 year ago
   high52: number | null;        // trailing 52-week high close
   low52: number | null;         // trailing 52-week low close
   pctOffHigh: number | null;    // % below the 52-week high (≤0; 0 = at the high)
+  pctOffLow: number | null;     // % above the 52-week low (≥0; 0 = at the low)
+  maxDrawdown: number | null;   // largest peak-to-trough drop over trailing 52w (≤0)
+  avgDollarVol: number | null;  // 30-session avg of close × volume (liquidity, $)
 };
 
 export type PricePoint = { x: string; Close: number };
@@ -36,20 +42,30 @@ function pctChange(now: number | null, then: number | null): number | null {
 export function derivePriceKpis(prices: DailyPrice[]): PriceKpis {
   const withClose = prices.filter((p) => p.close != null);
   if (withClose.length === 0) {
-    return { last: null, asOf: null, ret1M: null, ret3M: null, retYTD: null, high52: null, low52: null, pctOffHigh: null };
+    return {
+      last: null, asOf: null, ret1W: null, ret1M: null, ret3M: null, ret6M: null,
+      retYTD: null, ret1Y: null, high52: null, low52: null, pctOffHigh: null,
+      pctOffLow: null, maxDrawdown: null, avgDollarVol: null,
+    };
   }
   const lastRow = withClose[withClose.length - 1];
   const last = lastRow.close as number;
   const now = new Date(lastRow.date).getTime();
 
-  // Trailing 52 weeks for the high/low band.
+  // Trailing 52 weeks for the high/low band + max drawdown (running peak → trough).
   const yearAgo = now - 365 * DAY;
   let high52 = -Infinity, low52 = Infinity;
+  let peak = -Infinity, maxDrawdown = 0;
   for (const p of withClose) {
     if (new Date(p.date).getTime() < yearAgo) continue;
     const c = p.close as number;
     if (c > high52) high52 = c;
     if (c < low52) low52 = c;
+    if (c > peak) peak = c;
+    if (peak > 0) {
+      const dd = ((c - peak) / peak) * 100;
+      if (dd < maxDrawdown) maxDrawdown = dd;
+    }
   }
   if (!Number.isFinite(high52)) high52 = last;
   if (!Number.isFinite(low52)) low52 = last;
@@ -58,15 +74,30 @@ export function derivePriceKpis(prices: DailyPrice[]): PriceKpis {
   const yearStart = new Date(Date.UTC(new Date(lastRow.date).getUTCFullYear(), 0, 1)).getTime();
   const ytdBase = withClose.find((p) => new Date(p.date).getTime() >= yearStart)?.close ?? null;
 
+  // Dollar volume (liquidity): 30-session average of close × volume.
+  const recent = withClose.slice(-30);
+  const dollarVols = recent
+    .filter((p) => p.volume != null)
+    .map((p) => (p.close as number) * (p.volume as number));
+  const avgDollarVol = dollarVols.length
+    ? dollarVols.reduce((s, v) => s + v, 0) / dollarVols.length
+    : null;
+
   return {
     last,
     asOf: lastRow.date,
+    ret1W: pctChange(last, closeAsOf(withClose, now - 7 * DAY)),
     ret1M: pctChange(last, closeAsOf(withClose, now - 30 * DAY)),
     ret3M: pctChange(last, closeAsOf(withClose, now - 91 * DAY)),
+    ret6M: pctChange(last, closeAsOf(withClose, now - 182 * DAY)),
     retYTD: pctChange(last, ytdBase),
+    ret1Y: pctChange(last, closeAsOf(withClose, now - 365 * DAY)),
     high52,
     low52,
     pctOffHigh: high52 > 0 ? ((last - high52) / high52) * 100 : null,
+    pctOffLow: low52 > 0 ? ((last - low52) / low52) * 100 : null,
+    maxDrawdown: Number.isFinite(maxDrawdown) ? maxDrawdown : null,
+    avgDollarVol,
   };
 }
 

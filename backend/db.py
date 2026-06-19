@@ -101,6 +101,11 @@ def upsert_entities(rows: list[dict[str, Any]]) -> int:
     return upsert_many("entities", rows, on_conflict="match_key")
 
 
+def upsert_ipos(rows: list[dict[str, Any]]) -> int:
+    """Upsert IPO-lifecycle filings, keyed on accession_number."""
+    return upsert_many("ipos", rows, on_conflict="accession_number")
+
+
 # PostgREST returns at most ~1000 rows per request (the instance's default row
 # cap). Any whole-table read therefore has to page, or it silently truncates as
 # the watchlist grows — which would leave companies beyond the cap unscheduled.
@@ -175,21 +180,27 @@ def update_company_state(cik: str, dataset_state: dict[str, str]) -> None:
 
 
 def get_seen_accessions(table: str, accession_numbers: list[str]) -> set[str]:
-    """Return the subset of accession numbers already present in `table`."""
+    """Return the subset of accession numbers already present in `table`.
+
+    The `.in_(...)` list is chunked: an accession is ~20 chars, so a few hundred
+    in one filter blows past PostgREST's URL-length limit and 414s (the global IPO
+    pass passes ~300/run). Chunking keeps each request URL bounded at any scale.
+    """
     if not accession_numbers:
         return set()
-    try:
-        result = (
-            get_client()
-            .table(table)
-            .select("accession_number")
-            .in_("accession_number", accession_numbers)
-            .execute()
-        )
-        return {r["accession_number"] for r in (result.data or [])}
-    except Exception:
-        logger.exception("get_seen_accessions failed for %s", table)
-        return set()
+    seen: set[str] = set()
+    client = get_client()
+    for i in range(0, len(accession_numbers), 150):
+        batch = accession_numbers[i : i + 150]
+        try:
+            result = (
+                client.table(table).select("accession_number")
+                .in_("accession_number", batch).execute()
+            )
+            seen.update(r["accession_number"] for r in (result.data or []))
+        except Exception:
+            logger.exception("get_seen_accessions failed for %s", table)
+    return seen
 
 
 # ─── Cleanup ──────────────────────────────────────────────────────────────────
@@ -263,6 +274,30 @@ def prune_old_prices(days: int = 760) -> int:
         return len(result.data or [])
     except Exception:
         logger.exception("prune_old_prices failed")
+        return 0
+
+
+def prune_old_ipos(days: int = 120) -> int:
+    """Delete `ipos` rows whose latest filing is older than `days`.
+
+    The IPO pipeline is a rolling recent-activity surface: a registration that
+    neither prices nor withdraws within the window is stale, and priced/withdrawn
+    deals age out of "active". The extractor's own ~3-week scan window keeps ingest
+    bounded; this prunes the persisted tail so the table stays small. Monthly
+    cadence (cleanup.py).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        result = (
+            get_client()
+            .table("ipos")
+            .delete()
+            .lt("filed_at", cutoff)
+            .execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_ipos failed")
         return 0
 
 

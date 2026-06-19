@@ -71,6 +71,10 @@ try:
     from ingest import summary_ingest
 except Exception:  # pragma: no cover
     summary_ingest = None
+try:
+    from extractors import ipo_extractor
+except Exception:  # pragma: no cover
+    ipo_extractor = None
 
 load_dotenv()
 
@@ -330,6 +334,11 @@ def main() -> int:
     # small query, no EDGAR) once the quarter is captured, so cost is O(1) per quarter
     # regardless of watchlist size.
     _run_optional(institutional_extractor, "ingest_institutional_global")
+    # Active IPO pipeline (global, market-wide): scans the EDGAR index for recent
+    # S-1/F-1 registrations + 424B pricings, incrementally (already-stored
+    # accessions skipped). Independent of the watchlist — these are companies not
+    # yet tracked. Cheap per run (metadata index; parses only new pricings).
+    _run_optional(ipo_extractor, "ingest_ipos_global")
     logger.info("Done | %d/%d companies processed", ok, len(companies))
     return 0 if ok else 1
 

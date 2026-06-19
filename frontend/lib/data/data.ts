@@ -6,7 +6,7 @@ import type {
   InsiderTransaction, InstitutionalHolding, ManagerPortfolio,
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
   BeneficialOwnership, ProposedSale, DailyPrice,
-  CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary,
+  CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary, Ipo,
 } from "../types";
 
 // Whole-table read, paged in 1000-row chunks. Any "fetch every row" query must use
@@ -37,6 +37,17 @@ export async function fetchCompanySummaries(): Promise<CompanySummary[]> {
   return selectAllPaged<CompanySummary>(
     "company_summary",
     "cik, ticker, last_close, as_of, chg_1d, ret_ytd, pct_off_high, rsi14, pct_from_50, pct_from_200, ma_cross, vol_spike, new_52w_high, new_52w_low, spark, filings_30d, last_filing_form, last_filing_at, net_insider_90d, cluster_buy",
+  );
+}
+
+// Active IPO pipeline — one row per IPO-lifecycle filing (S-1/F-1, 424B, RW),
+// global/market-wide (not watchlist-scoped). Paged so it scales; newest first.
+// The IPOs view groups these by issuer client-side.
+export async function fetchIpos(): Promise<Ipo[]> {
+  return selectAllPaged<Ipo>(
+    "ipos",
+    "cik, accession_number, company_name, ticker, form, status, is_spac, price, shares, proceeds, offering_type, filing_url, filed_at",
+    { col: "filed_at", asc: false },
   );
 }
 

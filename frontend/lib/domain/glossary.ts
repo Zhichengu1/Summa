@@ -44,6 +44,11 @@ export const GLOSSARY: Record<string, string> = {
   "Cluster buying": "Several different insiders at the same company buying on the open market within a short window — one of the most reliable bullish insider signals, since it reflects shared conviction rather than one person's circumstances.",
   "EOD price": "End-of-day closing price from the public market feed. Updated daily after the close, not in realtime — a reference for returns and 52-week context, not a live quote.",
   "% off 52-wk high": "How far the latest close sits below the highest close of the trailing 52 weeks. Near 0% means the stock is at its one-year peak; a large negative means it has pulled back from it.",
+  "% off 52-wk low": "How far the latest close sits above the lowest close of the trailing 52 weeks. Near 0% means the stock is near its one-year floor; a large positive means it has recovered well off the bottom.",
+  "Max Drawdown": "The largest peak-to-trough decline in the closing price over the trailing 52 weeks — the worst loss a holder would have suffered buying the high and selling the low. A gauge of downside risk.",
+  "Avg $ Vol": "Average daily dollar volume over the last 30 sessions (close × shares traded). A liquidity measure — how much money changes hands in the stock on a typical day.",
+  "ATR": "Average True Range (14-day), shown as a percent of price. The typical size of a daily high-to-low swing — a direct read on how much the stock moves day to day.",
+  "Volatility": "Annualized historical volatility from the last ~30 daily returns (their standard deviation scaled by √252). Higher means a wider typical swing; it's the same 'realized vol' options traders compare against implied vol.",
 
   // ── Valuation ────────────────────────────────────────────────────────────────
   "Market Cap": "The total market value of a company's equity — latest share price times shares outstanding. Uses weighted-average diluted shares as a close proxy.",

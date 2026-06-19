@@ -4,17 +4,19 @@
 import { useMemo } from "react";
 
 import { CompanyMark } from "../components/badges/CompanyMark";
-import type { Company, Filing, MainView } from "../lib/types";
+import { fmtPct } from "../lib/utils/format";
+import type { Company, Filing, MainView, CompanySummary } from "../lib/types";
 
 export function Sidebar({
-  companies, filings, activeCik, view, ingestedCiks,
-  onCompany, onOverview, onSearch, onFeed, onCalendar, onManagers, onGuide, onRemove, newFilings = 0,
+  companies, filings, activeCik, view, ingestedCiks, prices,
+  onCompany, onOverview, onSearch, onFeed, onCalendar, onManagers, onIpos, onGuide, onRemove, newFilings = 0,
 }: {
   companies: Company[]; filings: Filing[];
   activeCik: string | null; view: MainView;
   ingestedCiks: Set<string>;
+  prices: Map<string, CompanySummary>;
   onCompany: (cik: string) => void;
-  onOverview: () => void; onSearch: () => void; onFeed: () => void; onCalendar: () => void; onManagers: () => void; onGuide: () => void;
+  onOverview: () => void; onSearch: () => void; onFeed: () => void; onCalendar: () => void; onManagers: () => void; onIpos: () => void; onGuide: () => void;
   onRemove: (cik: string) => void;
   newFilings?: number;
 }) {
@@ -50,6 +52,9 @@ export function Sidebar({
         <div className={`nav-item${view === "managers" ? " active" : ""}`} onClick={onManagers}>
           ⬡ Institutional Investors
         </div>
+        <div className={`nav-item${view === "ipos" ? " active" : ""}`} onClick={onIpos}>
+          ◆ IPOs
+        </div>
         <div className={`nav-item${view === "guide" ? " active" : ""}`} onClick={onGuide}>
           ◇ Data Guide
         </div>
@@ -62,6 +67,8 @@ export function Sidebar({
         {companies.map((c) => {
           const cnt = recent30.get(c.cik) ?? 0;
           const pending = !ingestedCiks.has(c.cik);
+          const px = prices.get(c.cik);
+          const chg = px?.chg_1d ?? null;
           return (
             <div
               key={c.cik}
@@ -71,6 +78,16 @@ export function Sidebar({
               <CompanyMark ticker={c.ticker ?? "?"} size={22} />
               <span className="tkr">{c.ticker}</span>
               <span className="nm">{c.name}</span>
+              {px?.last_close != null && (
+                <span className="px" title={px.as_of ? `As of ${px.as_of}` : undefined}>
+                  <span className="px-last">{px.last_close.toFixed(2)}</span>
+                  {chg != null && (
+                    <span className={`px-chg ${chg >= 0 ? "pos" : "neg"}`}>
+                      {chg >= 0 ? "+" : ""}{fmtPct(chg)}
+                    </span>
+                  )}
+                </span>
+              )}
               {pending ? <span className="pending-dot" title="Queued — data appears after the next pipeline run">⏳</span>
                        : cnt > 0 ? <span className="cnt">{cnt}</span> : null}
               <button
