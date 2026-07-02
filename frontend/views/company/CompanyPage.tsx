@@ -9,7 +9,7 @@ import { CompanyMark } from "../../components/badges/CompanyMark";
 import {
   fetchFinancialFacts, fetchFilingsForCik, fetchEarningsEvents, fetchCorporateEvents,
   fetchInsiderTransactions, fetchInstitutionalHoldings, fetchBeneficialOwnership,
-  fetchSecuritiesOfferings, fetchLateFilings, fetchPrices, fetchProposedSales,
+  fetchSecuritiesOfferings, fetchLateFilings, fetchPrices, fetchProposedSales, fetchNewsForCik,
 } from "../../lib/data/data";
 import { profileFor } from "../../lib/domain/taxonomy";
 import type { Company, CompanyTab, FinancialFact } from "../../lib/types";
@@ -26,6 +26,7 @@ const PeersTab = dynamic(() => import("./PeersTab").then((m) => ({ default: m.Pe
 const OwnershipTab = dynamic(() => import("./OwnershipTab").then((m) => ({ default: m.OwnershipTab })), { ssr: false, loading: tabLoading });
 const CatalystsTab = dynamic(() => import("./CatalystsTab").then((m) => ({ default: m.CatalystsTab })), { ssr: false, loading: tabLoading });
 const FilingsTab = dynamic(() => import("./FilingsTab").then((m) => ({ default: m.FilingsTab })), { ssr: false, loading: tabLoading });
+const NewsTab = dynamic(() => import("./NewsTab").then((m) => ({ default: m.NewsTab })), { ssr: false, loading: tabLoading });
 
 export function CompanyPage({
   cik, tab, companies, onTab, pending = false,
@@ -47,15 +48,26 @@ export function CompanyPage({
       fetchFilingsForCik(cik, 50), fetchEarningsEvents(cik), fetchCorporateEvents(cik),
       fetchInsiderTransactions(cik), fetchInstitutionalHoldings(cik),
       fetchBeneficialOwnership(cik), fetchSecuritiesOfferings(cik), fetchLateFilings(cik),
-      fetchPrices(cik), fetchProposedSales(cik),
-    ]).then(([filings, earnings, events, insider, holdings, beneficial, offers, lateF, prices, proposed]) => {
-      setAux({ filings, earnings, events, insider, holdings, beneficial, offers, lateF, prices, proposed, loading: false });
+      fetchPrices(cik), fetchProposedSales(cik), fetchNewsForCik(cik),
+    ]).then(([filings, earnings, events, insider, holdings, beneficial, offers, lateF, prices, proposed, news]) => {
+      setAux({ filings, earnings, events, insider, holdings, beneficial, offers, lateF, prices, proposed, news, loading: false });
     });
   }, [cik]);
 
   const ticker = company?.ticker ?? "?";
   const name = company?.name ?? cik;
   const profile = profileFor(ticker, company?.sector, company?.industry, cik);
+
+  // Sticky-header quote: last close + day change from the bars already fetched
+  // into aux (ascending) — no extra query.
+  const quote = useMemo(() => {
+    const bars = aux.prices.filter((p) => p.close != null);
+    if (bars.length === 0) return null;
+    const last = bars[bars.length - 1];
+    const prev = bars.length > 1 ? bars[bars.length - 2] : null;
+    const chg = prev?.close ? ((last.close! - prev.close) / prev.close) * 100 : null;
+    return { close: last.close!, chg, asOf: last.date };
+  }, [aux.prices]);
 
   const TABS: { key: CompanyTab; label: string }[] = useMemo(() => [
     { key: "overview",      label: "Overview" },
@@ -65,20 +77,32 @@ export function CompanyPage({
     { key: "ownership",     label: "Ownership" },
     { key: "catalysts",     label: "Catalysts" },
     { key: "filings",       label: "Filings" },
+    { key: "news",          label: "News" },
   ], []);
 
   return (
     <div>
-      <div className="page-head-row">
-        <CompanyMark ticker={ticker} size={44} />
+      <div className="company-hero">
+        <CompanyMark ticker={ticker} size={40} />
         <div style={{ minWidth: 0 }}>
-          <h1 className="page-title">{name}</h1>
+          <h1 className="page-title" style={{ fontSize: 18 }}>{name}</h1>
           <div className="page-sub" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
             <span>{ticker} · CIK {cik}</span>
             {profile && profile.sector !== "—" && <span className="cat-chip sector">{profile.sector}</span>}
             {profile && profile.industry !== "—" && <span className="cat-chip">{profile.industry}</span>}
           </div>
         </div>
+        {quote && (
+          <div className="hero-price">
+            <div className="hero-last">${quote.close.toFixed(2)}</div>
+            {quote.chg != null && (
+              <div className={`hero-chg ${quote.chg >= 0 ? "pos" : "neg"}`}>
+                {quote.chg >= 0 ? "▲" : "▼"} {quote.chg >= 0 ? "+" : ""}{quote.chg.toFixed(2)}%
+              </div>
+            )}
+            {quote.asOf && <div className="hero-asof">as of {quote.asOf}</div>}
+          </div>
+        )}
       </div>
 
       {pending && (
@@ -103,6 +127,7 @@ export function CompanyPage({
       {tab === "ownership"    && <OwnershipTab aux={aux} />}
       {tab === "catalysts"    && <CatalystsTab aux={aux} />}
       {tab === "filings"      && <FilingsTab aux={aux} />}
+      {tab === "news"         && <NewsTab aux={aux} ticker={ticker} />}
     </div>
   );
 }

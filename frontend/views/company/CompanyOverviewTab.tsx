@@ -64,7 +64,7 @@ export function CompanyOverviewTab({
   // its date so the dot lands on a real bar, colored by the event's direction.
   const priceMarkers = useMemo(() => {
     if (priceSma.length < 2) return [];
-    const dirColor: Record<string, string> = { bull: "#3fb950", bear: "#f05252", flag: "#f5a623", neutral: "#7aa2f7" };
+    const dirColor: Record<string, string> = { bull: "#22c55e", bear: "#ef4444", flag: "#f59e0b", neutral: "#60a5fa" };
     const out: { x: string; y: number; color: string }[] = [];
     for (const ev of events.slice(0, 24)) {
       const d = ev.event_date ?? ev.filed_at;

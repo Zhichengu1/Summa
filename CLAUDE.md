@@ -25,7 +25,11 @@ only refreshes if its own cadence has elapsed. Coverage scales by spreading work
 across runs, not by doing more per run.
 
 > Optional Phase-2 enrichment channels (`gemini_enricher.py`, `discord_notify.py`)
-> exist but are **not** part of the Phase-1 ingest path.
+> exist but are **not** part of the Phase-1 ingest path — with one exception:
+> `news_ingest.py` calls `discord_notify.notify_news()` to push a Discord alert for
+> genuinely-new headlines. It's opt-in (no-op unless `DISCORD_WEBHOOK_URL` is set),
+> fail-soft (a webhook error never breaks ingest), and suppressed on a company's
+> first-ever news seed so it only ever alerts on the incremental delta.
 
 ---
 
@@ -42,10 +46,13 @@ Summa/
 │   ├── db.py                     ← Supabase service-role client + upsert helpers
 │   ├── watchlist.py              ← SEED list + get_active_watchlist() (SEED ∪ watchlist table)
 │   ├── edgar_cache.py            ← get_company(cik): per-run shared edgartools Company cache
+│   ├── news_score.py             ← composite catalyst scorer: event×source×fundamentals×directness×move (company + market news)
 │   ├── ingest/                   ← per-company dataset ingestors (from ingest import …)
 │   │   ├── data_ingest.py        ← fundamentals (XBRL) → financial_facts
 │   │   ├── filings_ingest.py     ← narrative filings feed → filings
-│   │   ├── price_ingest.py       ← Yahoo EOD bars → daily_prices (only non-SEC source)
+│   │   ├── price_ingest.py       ← Yahoo EOD bars → daily_prices (non-SEC source)
+│   │   ├── news_ingest.py        ← Google News RSS → company_news (per-company, non-SEC source)
+│   │   ├── market_news_ingest.py ← GLOBAL curated market-mover RSS (SEC/Fed/FDA/PRN) → market_news
 │   │   ├── summary_ingest.py     ← precomputes company_summary (price+technicals+activity)
 │   │   ├── reference_ingest.py   ← SIC industry/theme → company_profiles / company_themes
 │   │   └── entity_ingest.py      ← seeds/entities.yaml → entities registry (global, runs once)
@@ -57,9 +64,10 @@ Summa/
 │   │   └── ipo_extractor.py       ← GLOBAL: recent S-1/F-1/424B/RW across the market → ipos
 │   ├── enrichment/               ← OPTIONAL Phase-2 channels (not in the ingest path)
 │   │   ├── gemini_enricher.py    ← Gemini enrichment
-│   │   └── discord_notify.py     ← Discord alerts
+│   │   └── discord_notify.py     ← Discord alerts (filing embeds + notify_news for new headlines)
 │   ├── tools/                    ← standalone maintenance scripts (python -m tools.<name>)
 │   │   ├── build_sec_index.py    ← rebuilds frontend/public/sec-companies.json (stdlib only)
+│   │   ├── refresh_news.py       ← lightweight news-only entry point (edgar-free; summa-news */5)
 │   │   ├── cleanup.py            ← monthly retention maintenance
 │   │   └── backfill_manager_quarters.py ← seeds prior 13F quarters so the Institutional Investors latest-vs-prior comparison works immediately (idempotent)
 │   ├── seeds/                    ← entities.yaml, profiles.yaml (curated reference data)
@@ -69,6 +77,7 @@ Summa/
 │
 ├── .github/workflows/
 │   ├── summa-pipeline.yml         ← */10 min ingest (main.py)
+│   ├── summa-news.yml             ← */5 min fast news-only refresh (tools.refresh_news; requirements-news.txt, edgar-free)
 │   ├── summa-cleanup.yml          ← monthly retention (python -m tools.cleanup)
 │   ├── summa-secindex.yml         ← weekly SEC index rebuild (python -m tools.build_sec_index)
 │   ├── summa-13f-quarter.yml      ← post-deadline (16th of Feb/May/Aug/Nov) 13F quarter roll-forward (python -m tools.backfill_manager_quarters)
@@ -89,11 +98,12 @@ Summa/
     │   ├── badges/                    FormBadge, EventClassBadge, GuidanceBadge, DirMark, CompanyMark
     │   └── strips/                    PriceStrip, TechStrip, KpiTile (metric strips)
     ├── views/                     ← top-level page views (own their data/effects):
-    │   │                            Sidebar, OverviewPage, ScannerSection (+ MomentumScanner),
-    │   │                            SearchPage, FeedPage, CalendarView, ManagersPage, IposPage, GuidePage
+    │   │                            Sidebar, TopBar (command bar: SEC-index ticker search + market
+    │   │                            session status/ET clock), OverviewPage, ScannerSection (+ MomentumScanner),
+    │   │                            SearchPage, FeedPage, NewsPage, CalendarView, ManagersPage, IposPage, GuidePage
     │   └── company/               ← the per-company page + its tabs:
     │                                CompanyPage, CompanyOverviewTab, StrategyTab, FundamentalsTab,
-    │                                PeersTab, OwnershipTab, CatalystsTab, FilingsTab, companyAux.ts (shared CompanyAux)
+    │                                PeersTab, OwnershipTab, CatalystsTab, FilingsTab, NewsTab, companyAux.ts (shared CompanyAux)
     ├── lib/                       ← data access + domain logic, grouped by role (see below)
     │   ├── data/                    supabase.ts, data.ts, watchlist.ts
     │   ├── hooks/                   useWatchlist.ts, useLastSeen.ts, useWatchlistPulse.ts
@@ -107,7 +117,7 @@ Summa/
 ### Frontend `lib/` modules
 
 `lib/` is grouped by role — **`data/`**: `supabase.ts` (anon client), `data.ts` (all fetch* +
-`subscribeFilings` Realtime), `watchlist.ts` (`CORE_WATCHLIST` seed). **`hooks/`**:
+`subscribeFilings` / `subscribeNews` Realtime), `watchlist.ts` (`CORE_WATCHLIST` seed). **`hooks/`**:
 `useWatchlist.ts` / `useLastSeen.ts` / `useWatchlistPulse.ts` (watchlist-wide catalyst fetch
 shared by Scanner + Calendar). **`domain/`** (pure logic): `fundamentals.ts` · `pulse.ts`
 (tape/signals) · `taxonomy.ts` · `entities.ts` · `insider.ts` · `prices.ts` (incl.
@@ -148,8 +158,16 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
    data flows in through GitHub Actions.
 9. **All credentials via environment variables.** Nothing hardcoded. Backend reads
    `backend/.env` (gitignored); frontend reads `frontend/.env.local` (gitignored).
-10. **Yahoo Finance is the only non-SEC data source** (`price_ingest.py`). Everything
-    else originates from EDGAR.
+10. **Non-SEC data sources are all free/keyless and fail-soft:** Yahoo Finance EOD
+    prices (`price_ingest.py`), Google News RSS per-company headlines
+    (`news_ingest.py`), and the curated market-mover RSS feeds in
+    `market_news_ingest.py` (Federal Reserve press/speeches/testimony · BEA macro data ·
+    SEC · FDA · FTC · CFTC · White House executive actions · PR Newswire → the global
+    `market_news` "Top Intelligence" feed). SEC EDGAR remains the source for
+    all structured filings data. Any new source must keep the same contract: keyless,
+    zero-cost, and fail-soft (a dead feed logs and is skipped, never aborting a run).
+    (Reuters/Bloomberg are intentionally NOT added — no free RSS; their coverage
+    already reaches `company_news` via Google News.)
 11. **GitHub Actions Node runtime:** every workflow sets
     `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"` (Node 20 → 24 migration). Keep new
     workflows consistent.
@@ -194,6 +212,16 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
 - `useMemo` for derived/filtered arrays.
 - Design tokens via CSS custom properties in `globals.css`; component-specific layout
   via inline styles. No hardcoded hex in JSX where a token exists.
+- **Design language (2026-07):** modern trading platform — deep-navy surfaces
+  (`--bg-0 #0a0e17` → panels `#111726`), electric-blue accent (`--accent #3b82f6`),
+  Inter (`--font-sans`) for UI with JetBrains Mono reserved for numerals/prices,
+  soft radius-10/12 panels with `--shadow-1`, glass (blur) top bar + sticky company
+  hero, segmented-control tabs. Chart series palette in `components/charts/charts.tsx`
+  is fixed-order and CVD-validated against the `#111726` panel
+  (blue `#3b82f6` → amber `#d97706` → teal `#0d9488` → violet `#8b5cf6` → pink `#db2777`);
+  `--pos #22c55e` / `--neg #ef4444` are status colors, never reused as series. The
+  scroll container is `.page-scroll` (inside `.main-area`, below the fixed `.topbar`) —
+  sticky elements (`.company-hero`, `.news-day`) stick to it, not the window.
 - No `dangerouslySetInnerHTML`. URL props pass through a `safeHref`-style guard.
 
 ### Component / view structure
@@ -245,6 +273,8 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `securities_offerings` | accession | S-1/S-3/424B issuance (watchlist companies) |
 | `ipos` | accession | GLOBAL active-IPO pipeline: market-wide S-1/F-1/424B/RW lifecycle filings (the IPOs view groups by issuer, ranks by capital raised / gross proceeds, and hides SPAC + sub-$10M micro-offerings by default) |
 | `daily_prices` | cik+date | Yahoo EOD bars |
+| `company_news` | (cik, guid) | Trader-important Google News headlines per company (recency + importance gated at ingest; 30-day rolling window) |
+| `market_news` | `guid` | GLOBAL curated market-mover feed (SEC/Fed/FDA/PRN), importance-filtered (30-day window) |
 | `company_profiles` | `cik` | SIC industry/sector |
 | `company_themes` | cik+name | Recomputed theme tags (delete+insert per cik) |
 | `entities` | `match_key` | Global entity-context registry (seeded) |
@@ -262,9 +292,11 @@ bounded to the **latest 4 13F filing quarters** (`prune_manager_portfolios`) —
 quarter (~managers × top-N + exits) every cycle, and the Investors view only reads each
 manager's latest two quarters, so older quarters are dead weight that widened both the
 frontend fetch and the backend `_prior_lookup` scan; `ipos` rows are pruned past **120 days**
-(`prune_old_ipos`) since the IPO pipeline is a rolling recent-activity surface. All other
-structured warehouse tables (fundamentals, holdings, events) are small/bounded per company
-and retained.
+(`prune_old_ipos`) since the IPO pipeline is a rolling recent-activity surface;
+`company_news` headlines are pruned past **30 days** (`prune_old_news`) — a rolling
+recent-headlines surface, not an archive; `market_news` is likewise pruned past **30
+days** (`prune_old_market_news`). All other structured warehouse tables
+(fundamentals, holdings, events) are small/bounded per company and retained.
 
 > The price reads (`fetchPrices`, `summary_ingest`) fetch the most-recent N sessions via
 > `order(date desc).limit(N)` then reverse to ascending. Do **not** revert these to
@@ -316,12 +348,20 @@ and retained.
    price/shares/proceeds) runs ONLY for new 424B pricings, so most runs are cheap
    metadata-only index reads. Market-wide — independent of the watchlist. Window is
    `IPO_WINDOW_DAYS` (default 10); rows are pruned past 120d by cleanup.py.
+9. market_news_ingest.ingest_market_news_global() — global, once per run. Polls the
+   curated free federal/gov + macro RSS feeds (Fed press/speeches/testimony · BEA ·
+   SEC · FDA · FTC · CFTC · White House · PR Newswire), scores each
+   headline for trader-importance, and stores ONLY market-movers above
+   `MARKET_NEWS_MIN_SCORE` (strict) into `market_news`. Fail-soft per feed, writes only
+   new items (`db.get_seen_market_guids`), and alerts the top new items to Discord
+   (`notify_market_news`). Powers the frontend "Top Intelligence" feed.
 ```
 
 **Cadence defaults** (`DATASET_INTERVALS_H`, all env-overridable via `INTERVAL_*`):
 filings 0 (every visit) · events 12h · insider 24h · ownership 48h · fundamentals 168h ·
-prices 24h · reference 720h. (13F institutional is global/quarterly — see step 7 — not a
-per-company `DATASET_INTERVALS_H` entry.)
+prices 24h · news 1h (hourly poll — safely inside free tier; Realtime pushes new rows to the
+UI instantly; `INTERVAL_NEWS` tunes it) · reference 720h. (13F institutional is global/quarterly — see step 7
+— not a per-company `DATASET_INTERVALS_H` entry.)
 
 ---
 
@@ -332,7 +372,12 @@ Backend (`backend/.env`, mapped from `${{ secrets.* }}` in the workflows):
 `"Summa/1.0 (you@example.com)"`), and — Phase-2 only — `GEMINI_API_KEY`,
 `DISCORD_WEBHOOK_URL`. Tuning: `INGEST_MAX_PER_RUN` (default 12), `INGEST_TIME_BUDGET_S`
 (default 360), `INTERVAL_<DATASET>` overrides, `IPO_WINDOW_DAYS` (default 10; raise for
-a one-off IPO backfill on an empty table). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
+a one-off IPO backfill on an empty table). News tuning: `INTERVAL_NEWS` (hours, default 1),
+`NEWS_MAX_ITEMS` (per-company Google feed cap, default 100), `NEWS_MAX_AGE_DAYS` (recency
+window, default 45), `NEWS_MIN_SCORE` (catalyst KEEP threshold, default 3; `news_score.py`),
+`NEWS_ALERT_SCORE` (catalyst WEBHOOK threshold — only Notable+ alerted, default 6),
+`MARKET_NEWS_MIN_SCORE` (strict market threshold, default 3), `MARKET_NEWS_FEEDS` (override the curated source list as
+`label|url|weight` comma-separated). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
 edgartools; SEC's ceiling is ~10/s) — read by edgartools **at import time**, so it must be
 set in the environment (workflow `env:` / `backend/.env`) before `main.py` imports `edgar`,
 not assigned in Python. Set to `"9"` in the EDGAR workflows (pipeline, 13F-quarter).

@@ -43,10 +43,10 @@ const LARGE = 100_000_000;
 const RANK: Record<IpoStatus, number> = { filed: 0, updated: 1, priced: 2, withdrawn: 3 };
 
 const STATUS_STYLE: Record<IpoStatus, { label: string; bg: string; fg: string }> = {
-  filed:     { label: "Filed",     bg: "var(--chip-bg, #1e2530)", fg: "var(--fg-3)" },
-  updated:   { label: "Updated",   bg: "rgba(80,140,255,0.15)",   fg: "#6aa0ff" },
-  priced:    { label: "Priced",    bg: "rgba(60,200,120,0.16)",   fg: "#3fc878" },
-  withdrawn: { label: "Withdrawn", bg: "rgba(220,80,80,0.15)",    fg: "#e06a6a" },
+  filed:     { label: "Filed",     bg: "var(--bg-2)",            fg: "var(--fg-3)" },
+  updated:   { label: "Updated",   bg: "rgba(59,130,246,0.15)",  fg: "#60a5fa" },
+  priced:    { label: "Priced",    bg: "rgba(34,197,94,0.16)",   fg: "#22c55e" },
+  withdrawn: { label: "Withdrawn", bg: "rgba(239,68,68,0.15)",   fg: "#ef4444" },
 };
 
 function StatusBadge({ status }: { status: IpoStatus }) {
@@ -180,11 +180,11 @@ export function IposPage() {
             {t && (
               <span style={{
                 fontSize: 9, fontWeight: 800, letterSpacing: 0.5, padding: "1px 5px", borderRadius: 3,
-                color: t === "mega" ? "#ffb84d" : "#3fc878",
-                background: t === "mega" ? "rgba(255,184,77,0.14)" : "rgba(60,200,120,0.12)",
+                color: t === "mega" ? "#f59e0b" : "#22c55e",
+                background: t === "mega" ? "rgba(245,158,11,0.14)" : "rgba(34,197,94,0.12)",
               }}>{t === "mega" ? "MEGA" : "HOT"}</span>
             )}
-            {c.isSpac && <span className="dimmed" style={{ fontSize: 10, border: "1px solid var(--border)", borderRadius: 3, padding: "0 4px" }}>SPAC</span>}
+            {c.isSpac && <span className="dimmed" style={{ fontSize: 10, border: "1px solid var(--border-1)", borderRadius: 3, padding: "0 4px" }}>SPAC</span>}
           </span>
         );
       } },
@@ -195,7 +195,7 @@ export function IposPage() {
     { key: "proceeds", header: "Raised", width: "100px", align: "right", value: (c) => c.proceeds ?? -1,
       render: (c) => {
         const t = tier(c.proceeds);
-        return <span style={{ fontWeight: 700, color: t === "mega" ? "#ffb84d" : t === "large" ? "#3fc878" : "var(--fg-2)" }}>
+        return <span style={{ fontWeight: 700, color: t === "mega" ? "#f59e0b" : t === "large" ? "#22c55e" : "var(--fg-2)" }}>
           {c.proceeds != null ? fmtUSD(c.proceeds) : "—"}
         </span>;
       } },

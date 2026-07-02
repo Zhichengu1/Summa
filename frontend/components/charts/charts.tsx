@@ -11,14 +11,16 @@ import { InfoTip } from "../InfoTip";
 
 const AXIS = { fontSize: 11, fill: "var(--fg-2)", fontFamily: "var(--font-mono)" } as const;
 const GRID = "var(--border-1)";
-const ACCENT = "#4fd4c2";
-const POS = "#3fb950";
-const NEG = "#f05252";
-const SERIES = [ACCENT, "#7aa2f7", "#f5a623", "#bb9af7", "#3fb950"];
+const ACCENT = "#3b82f6";
+const POS = "#22c55e";
+const NEG = "#ef4444";
+// Categorical series — fixed order, validated (six-checks) on the #111726 panel:
+// blue → amber → teal → violet → pink; status POS/NEG never reused as series.
+const SERIES = [ACCENT, "#d97706", "#0d9488", "#8b5cf6", "#db2777"];
 
 // Faint accent wash drawn behind the hovered category/point.
-const CURSOR_FILL = { fill: "rgba(79,212,194,0.08)" };
-const CURSOR_LINE = { stroke: "rgba(79,212,194,0.35)", strokeWidth: 1 };
+const CURSOR_FILL = { fill: "rgba(59,130,246,0.08)" };
+const CURSOR_LINE = { stroke: "rgba(59,130,246,0.35)", strokeWidth: 1 };
 
 function fmtTick(v: number): string {
   const a = Math.abs(v);
@@ -108,7 +110,7 @@ export function ComboChart({
         <Tooltip cursor={CURSOR_FILL} content={<ChartTip fmt={fmtSmart} />} />
         <Legend wrapperStyle={legendStyle} onClick={(o) => toggle(o.dataKey)} />
         <Bar yAxisId="l" dataKey={barKey} name={barName} hide={isHidden(barKey)} fill={ACCENT} fillOpacity={0.7} radius={[2, 2, 0, 0]} />
-        <Line yAxisId="r" dataKey={lineKey} name={lineName} hide={isHidden(lineKey)} stroke="#f5a623" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} connectNulls />
+        <Line yAxisId="r" dataKey={lineKey} name={lineName} hide={isHidden(lineKey)} stroke="#d97706" strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} connectNulls />
       </ComposedChart>
     </ChartFrame>
   );
@@ -267,8 +269,8 @@ export function PriceChart({
         <Tooltip cursor={CURSOR_LINE} content={<ChartTip fmt={fmtMoney} />} />
         <Legend wrapperStyle={legendStyle} onClick={(o) => toggle(o.dataKey)} />
         <Line dataKey="Close" name="Close" hide={isHidden("Close")} stroke={ACCENT} strokeWidth={1.5} dot={false} connectNulls />
-        <Line dataKey="SMA50" name="50d" hide={isHidden("SMA50")} stroke="#7aa2f7" strokeWidth={1} dot={false} connectNulls />
-        <Line dataKey="SMA200" name="200d" hide={isHidden("SMA200")} stroke="#f5a623" strokeWidth={1} dot={false} connectNulls />
+        <Line dataKey="SMA50" name="50d" hide={isHidden("SMA50")} stroke="#0d9488" strokeWidth={1} dot={false} connectNulls />
+        <Line dataKey="SMA200" name="200d" hide={isHidden("SMA200")} stroke="#d97706" strokeWidth={1} dot={false} connectNulls />
         {(markers ?? []).map((m, i) => (
           <ReferenceDot key={i} x={m.x} y={m.y} r={3.5} fill={m.color} stroke="var(--bg-0)" strokeWidth={1} ifOverflow="extendDomain" />
         ))}

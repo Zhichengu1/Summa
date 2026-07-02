@@ -6,7 +6,7 @@ import type {
   InsiderTransaction, InstitutionalHolding, ManagerPortfolio,
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
   BeneficialOwnership, ProposedSale, DailyPrice,
-  CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary, Ipo,
+  CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary, Ipo, NewsItem, MarketNews,
 } from "../types";
 
 // Whole-table read, paged in 1000-row chunks. Any "fetch every row" query must use
@@ -61,6 +61,57 @@ export async function fetchCompanies(): Promise<Company[]> {
     }));
   }
   return data;
+}
+
+// Watchlist-wide news feed — recent Google News headlines across every ingested
+// company (company_news), newest first. Powers the top-level News view (a
+// recent-`limit` window, mirroring fetchFilings). Returns [] on error.
+export async function fetchNews(limit = 500): Promise<NewsItem[]> {
+  const { data, error } = await supabase
+    .from("company_news")
+    .select("cik, ticker, company_name, guid, title, link, source, summary, published_at, importance, category")
+    .order("published_at", { ascending: false })
+    .limit(limit);
+  if (error || !data) return [];
+  return data as NewsItem[];
+}
+
+// Recent headlines for one company (company_news), newest first — for the
+// per-company News strip. Returns [] on error.
+export async function fetchNewsForCik(cik: string, limit = 100): Promise<NewsItem[]> {
+  const { data, error } = await supabase
+    .from("company_news")
+    .select("cik, ticker, company_name, guid, title, link, source, summary, published_at, importance, category")
+    .eq("cik", cik)
+    .order("published_at", { ascending: false })
+    .limit(limit);
+  if (error || !data) return [];
+  return data as NewsItem[];
+}
+
+// Curated market-wide "Top Intelligence" feed (market_news) — already importance-
+// filtered by the backend. Most-important first, then newest. Returns [] on error.
+export async function fetchMarketNews(limit = 200): Promise<MarketNews[]> {
+  const { data, error } = await supabase
+    .from("market_news")
+    .select("guid, source, category, importance, title, link, summary, published_at")
+    .order("published_at", { ascending: false })
+    .limit(limit);
+  if (error || !data) return [];
+  return data as MarketNews[];
+}
+
+// Realtime: prepend new market-intelligence items as the pipeline inserts them.
+export function subscribeMarketNews(onInsert: (n: MarketNews) => void): () => void {
+  const channel = supabase
+    .channel("market-news-feed")
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "market_news" },
+      (payload) => onInsert(payload.new as MarketNews),
+    )
+    .subscribe();
+  return () => { supabase.removeChannel(channel); };
 }
 
 export async function fetchFilings(limit = 200): Promise<Filing[]> {
@@ -451,6 +502,22 @@ export function subscribeFilings(onInsert: (f: Filing) => void): () => void {
       "postgres_changes",
       { event: "INSERT", schema: "public", table: "filings" },
       (payload) => onInsert(payload.new as Filing),
+    )
+    .subscribe();
+  return () => { supabase.removeChannel(channel); };
+}
+
+// Realtime: prepend newly-inserted headlines to the live News feed. Fires only for
+// genuinely new rows (the backend upsert re-writes existing headlines as UPDATEs,
+// which don't emit an INSERT), so the view shows only the latest as it lands.
+// Requires company_news in the supabase_realtime publication (see schema.sql).
+export function subscribeNews(onInsert: (n: NewsItem) => void): () => void {
+  const channel = supabase
+    .channel("company-news-feed")
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "company_news" },
+      (payload) => onInsert(payload.new as NewsItem),
     )
     .subscribe();
   return () => { supabase.removeChannel(channel); };

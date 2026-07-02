@@ -1,0 +1,7 @@
+# Minimal dependencies for the lightweight news-only refresh (tools/refresh_news.py,
+# run by summa-news.yml every 5 min). This path only polls free RSS feeds and writes
+# to Supabase — it does NOT touch edgartools/pandas, so we install just these three
+# small packages instead of the full SEC stack. Keeps the high-frequency job fast.
+supabase>=2.25.1
+python-dotenv>=1.0.0
+requests>=2.31.0

@@ -5,7 +5,7 @@
 // sales) up front and saves the per-tab refetch bursts.
 import type {
   Filing, EarningsEvent, CorporateEvent, InsiderTransaction, InstitutionalHolding,
-  BeneficialOwnership, SecuritiesOffering, LateFiling, DailyPrice, ProposedSale,
+  BeneficialOwnership, SecuritiesOffering, LateFiling, DailyPrice, ProposedSale, NewsItem,
 } from "../../lib/types";
 
 export type CompanyAux = {
@@ -13,10 +13,11 @@ export type CompanyAux = {
   insider: InsiderTransaction[]; holdings: InstitutionalHolding[];
   beneficial: BeneficialOwnership[]; offers: SecuritiesOffering[];
   lateF: LateFiling[]; prices: DailyPrice[]; proposed: ProposedSale[];
+  news: NewsItem[];
   loading: boolean;
 };
 
 export const EMPTY_AUX: CompanyAux = {
   filings: [], earnings: [], events: [], insider: [], holdings: [],
-  beneficial: [], offers: [], lateF: [], prices: [], proposed: [], loading: true,
+  beneficial: [], offers: [], lateF: [], prices: [], proposed: [], news: [], loading: true,
 };

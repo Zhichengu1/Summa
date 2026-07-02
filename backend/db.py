@@ -106,6 +106,99 @@ def upsert_ipos(rows: list[dict[str, Any]]) -> int:
     return upsert_many("ipos", rows, on_conflict="accession_number")
 
 
+def upsert_news(rows: list[dict[str, Any]]) -> int:
+    """Upsert Google News headlines, keyed on (cik, guid)."""
+    return upsert_many("company_news", rows, on_conflict="cik,guid")
+
+
+def upsert_market_news(rows: list[dict[str, Any]]) -> int:
+    """Upsert curated market-wide news, keyed on guid."""
+    return upsert_many("market_news", rows, on_conflict="guid")
+
+
+def get_seen_market_guids(guids: list[str]) -> set[str]:
+    """Return the subset of `guids` already stored in market_news (chunked)."""
+    if not guids:
+        return set()
+    seen: set[str] = set()
+    client = get_client()
+    for i in range(0, len(guids), 150):
+        batch = guids[i : i + 150]
+        try:
+            result = client.table("market_news").select("guid").in_("guid", batch).execute()
+            seen.update(r["guid"] for r in (result.data or []))
+        except Exception:
+            logger.exception("get_seen_market_guids failed")
+    return seen
+
+
+def market_news_has_rows() -> bool:
+    """True if market_news already has any rows (suppresses the first-seed alert flood)."""
+    try:
+        result = get_client().table("market_news").select("id").limit(1).execute()
+        return bool(result.data)
+    except Exception:
+        logger.exception("market_news_has_rows failed")
+        return True
+
+
+def get_seen_news_guids(cik: str, guids: list[str]) -> set[str]:
+    """Return the subset of `guids` already stored for this company in company_news.
+
+    Lets news_ingest tell genuinely-new headlines from re-pulls of ones it already
+    has, so Discord only notifies on the delta. Scoped to one CIK; the guid list is
+    small (<= _MAX_ITEMS) so no chunking is needed.
+    """
+    if not guids:
+        return set()
+    try:
+        result = (
+            get_client().table("company_news").select("guid")
+            .eq("cik", cik).in_("guid", guids).execute()
+        )
+        return {r["guid"] for r in (result.data or [])}
+    except Exception:
+        logger.exception("get_seen_news_guids failed for %s", cik)
+        return set()
+
+
+def get_company_summary(cik: str) -> dict[str, Any] | None:
+    """Return the precomputed company_summary row for a cik (price snapshot), or None.
+
+    Used to enrich the Discord news alert with live market context (last close, day
+    change, YTD, distance off the 52-week high). Best-effort: returns None on miss.
+    """
+    try:
+        result = (
+            get_client().table("company_summary")
+            .select("last_close, chg_1d, ret_ytd, pct_off_high, rsi14, as_of, "
+                    "pct_from_50, pct_from_200, ma_cross, vol_spike, "
+                    "new_52w_high, new_52w_low, net_insider_90d, cluster_buy")
+            .eq("cik", cik).limit(1).execute()
+        )
+        rows = result.data or []
+        return rows[0] if rows else None
+    except Exception:
+        logger.exception("get_company_summary failed for %s", cik)
+        return None
+
+
+def company_has_news(cik: str) -> bool:
+    """True if the company already has any company_news rows.
+
+    Used to suppress the notification flood on a company's FIRST-ever news ingest
+    (where every headline is 'new'): the first pull seeds silently; later pulls
+    notify only the incremental headlines. Fails safe to True so a transient error
+    can't be misread as a first seed.
+    """
+    try:
+        result = get_client().table("company_news").select("id").eq("cik", cik).limit(1).execute()
+        return bool(result.data)
+    except Exception:
+        logger.exception("company_has_news failed for %s", cik)
+        return True
+
+
 # PostgREST returns at most ~1000 rows per request (the instance's default row
 # cap). Any whole-table read therefore has to page, or it silently truncates as
 # the watchlist grows — which would leave companies beyond the cap unscheduled.
@@ -298,6 +391,45 @@ def prune_old_ipos(days: int = 120) -> int:
         return len(result.data or [])
     except Exception:
         logger.exception("prune_old_ipos failed")
+        return 0
+
+
+def prune_old_news(days: int = 30) -> int:
+    """Delete `company_news` rows whose article is older than `days`.
+
+    company_news is a rolling recent-headlines surface (like the filings feed),
+    not an archive: news_ingest re-pulls the latest headlines each cadence and
+    upserts, so stale items past the window are dead weight. Keeping ~30 days
+    bounds the table's growth (which scales with N companies × time). Rows with a
+    NULL published_at are left alone (we can't age them). Monthly cadence
+    (cleanup.py).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        result = (
+            get_client()
+            .table("company_news")
+            .delete()
+            .lt("published_at", cutoff)
+            .execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_news failed")
+        return 0
+
+
+def prune_old_market_news(days: int = 30) -> int:
+    """Delete `market_news` rows older than `days` (rolling recent-intel window)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        result = (
+            get_client().table("market_news").delete()
+            .lt("published_at", cutoff).execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_market_news failed")
         return 0
 
 

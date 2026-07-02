@@ -12,10 +12,12 @@ import dynamic from "next/dynamic";
 // bundle small (the heavy views — Managers/charts, the company tabs — never ship
 // on first load). ssr:false matches the static-export + Realtime client model.
 import { Sidebar } from "../views/Sidebar";
+import { TopBar } from "../views/TopBar";
 import { OverviewPage } from "../views/OverviewPage";
 const viewLoading = () => <div style={{ padding: 24, color: "var(--fg-4)" }}>Loading…</div>;
 const SearchPage = dynamic(() => import("../views/SearchPage").then((m) => ({ default: m.SearchPage })), { ssr: false, loading: viewLoading });
 const FeedPage = dynamic(() => import("../views/FeedPage").then((m) => ({ default: m.FeedPage })), { ssr: false, loading: viewLoading });
+const NewsPage = dynamic(() => import("../views/NewsPage").then((m) => ({ default: m.NewsPage })), { ssr: false, loading: viewLoading });
 const CalendarView = dynamic(() => import("../views/CalendarView").then((m) => ({ default: m.CalendarView })), { ssr: false, loading: viewLoading });
 const ManagersPage = dynamic(() => import("../views/ManagersPage").then((m) => ({ default: m.ManagersPage })), { ssr: false, loading: viewLoading });
 const IposPage = dynamic(() => import("../views/IposPage").then((m) => ({ default: m.IposPage })), { ssr: false, loading: viewLoading });
@@ -23,6 +25,7 @@ const GuidePage = dynamic(() => import("../views/GuidePage").then((m) => ({ defa
 const CompanyPage = dynamic(() => import("../views/company/CompanyPage").then((m) => ({ default: m.CompanyPage })), { ssr: false, loading: viewLoading });
 import {
   fetchCompanies, fetchFilings, subscribeFilings,
+  fetchNews, subscribeNews,
   fetchCompanyProfiles, fetchCompanyThemes, fetchEntities, queueWatchlist,
   fetchCompanySummaries,
 } from "../lib/data/data";
@@ -31,7 +34,7 @@ import { loadEntities } from "../lib/domain/entities";
 import { useWatchlist, type WatchItem } from "../lib/hooks/useWatchlist";
 import { useLastSeen } from "../lib/hooks/useLastSeen";
 import { loadSecIndex, searchSec, type SecCompany } from "../lib/domain/secIndex";
-import type { Company, Filing, MainView, CompanyTab, CompanySummary } from "../lib/types";
+import type { Company, Filing, NewsItem, MainView, CompanyTab, CompanySummary } from "../lib/types";
 
 export default function Page() {
   const [view, setView]           = useState<MainView>("overview");
@@ -39,6 +42,7 @@ export default function Page() {
   const [activeTab, setActiveTab] = useState<CompanyTab>("overview");
   const [companies, setCompanies] = useState<Company[]>([]);
   const [filings, setFilings]     = useState<Filing[]>([]);
+  const [news, setNews]           = useState<NewsItem[]>([]);
   const [secIndex, setSecIndex]   = useState<SecCompany[]>([]);
   const [summaries, setSummaries] = useState<CompanySummary[]>([]);
   const [loading, setLoading]     = useState(true);
@@ -51,6 +55,7 @@ export default function Page() {
       const h = window.location.hash.replace(/^#/, "");
       if (h === "search") { setView("search"); setActiveCik(null); return; }
       if (h === "feed") { setView("feed"); setActiveCik(null); return; }
+      if (h === "news") { setView("news"); setActiveCik(null); return; }
       if (h === "calendar") { setView("calendar"); setActiveCik(null); return; }
       if (h === "managers") { setView("managers"); setActiveCik(null); return; }
       if (h === "ipos") { setView("ipos"); setActiveCik(null); return; }
@@ -86,10 +91,20 @@ export default function Page() {
     // last-close + day-change shown in the sidebar. Loaded separately so the
     // first paint isn't blocked on it.
     fetchCompanySummaries().then(setSummaries);
+    // News is loaded here (not just inside the News view) so the nav badge can
+    // count new headlines app-wide, and Realtime keeps it live in every view.
+    fetchNews(500).then(setNews);
   }, []);
 
-  // Realtime subscription
+  // Realtime subscriptions — new filings + headlines stream in live.
   useEffect(() => subscribeFilings((f) => setFilings((p) => [f, ...p].slice(0, 200))), []);
+  useEffect(() => subscribeNews((n) => setNews((p) => {
+    const k = (x: NewsItem) => `${x.cik}:${x.guid}`;
+    if (p.some((x) => k(x) === k(n))) return p;
+    return [n, ...p]
+      .sort((a, b) => (b.published_at ?? "").localeCompare(a.published_at ?? ""))
+      .slice(0, 500);
+  })), []);
 
   // Bundled SEC index (~707 KB) for universal company search. Deferred until the
   // Search view is first opened — most sessions never search, so this keeps it off
@@ -148,6 +163,12 @@ export default function Page() {
     [filings, seen],
   );
 
+  // New headlines since the user's previous visit (drives the News nav badge).
+  const newNews = useMemo(
+    () => news.filter((n) => seen.isNew(n.published_at)).length,
+    [news, seen],
+  );
+
   if (loading) {
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", color: "var(--fg-4)" }}>
@@ -166,42 +187,50 @@ export default function Page() {
         onOverview={() => navigate("overview")}
         onSearch={() => navigate("search")}
         onFeed={() => navigate("feed")}
+        onNews={() => navigate("news")}
         onCalendar={() => navigate("calendar")}
         onManagers={() => navigate("managers")}
         onIpos={() => navigate("ipos")}
         onGuide={() => navigate("guide")}
         onRemove={handleRemove}
         newFilings={newFilings}
+        newNews={newNews}
       />
       <main className="main-area">
-        <div key={view + activeCik + activeTab} className="page-content">
-          {view === "overview" && (
-            <OverviewPage companies={watchCompanies} filings={filings} onCompany={openCompany} isNew={seen.isNew} />
-          )}
-          {view === "search" && (
-            <SearchPage
-              secIndex={secIndex} watched={watchedCiks} ingestedCiks={ingestedCiks}
-              onAdd={handleAdd} onCompany={openCompany}
-            />
-          )}
-          {view === "feed" && (
-            <FeedPage filings={filings} onCompany={openCompany} />
-          )}
-          {view === "calendar" && (
-            <CalendarView companies={watchCompanies} onCompany={openCompany} />
-          )}
-          {view === "managers" && (
-            <ManagersPage companies={watchCompanies} onCompany={openCompany} />
-          )}
-          {view === "ipos" && <IposPage />}
-          {view === "guide" && <GuidePage />}
-          {view === "company" && activeCik && (
-            <CompanyPage
-              cik={activeCik} tab={activeTab} companies={lookupCompanies}
-              pending={!ingestedCiks.has(activeCik)}
-              onTab={(tab) => openCompany(activeCik, tab)}
-            />
-          )}
+        <TopBar watched={watchedCiks} onSelect={handleAdd} />
+        <div className="page-scroll">
+          <div key={view + activeCik + activeTab} className="page-content">
+            {view === "overview" && (
+              <OverviewPage companies={watchCompanies} filings={filings} onCompany={openCompany} isNew={seen.isNew} />
+            )}
+            {view === "search" && (
+              <SearchPage
+                secIndex={secIndex} watched={watchedCiks} ingestedCiks={ingestedCiks}
+                onAdd={handleAdd} onCompany={openCompany}
+              />
+            )}
+            {view === "feed" && (
+              <FeedPage filings={filings} onCompany={openCompany} />
+            )}
+            {view === "news" && (
+              <NewsPage news={news} onCompany={openCompany} />
+            )}
+            {view === "calendar" && (
+              <CalendarView companies={watchCompanies} onCompany={openCompany} />
+            )}
+            {view === "managers" && (
+              <ManagersPage companies={watchCompanies} onCompany={openCompany} />
+            )}
+            {view === "ipos" && <IposPage />}
+            {view === "guide" && <GuidePage />}
+            {view === "company" && activeCik && (
+              <CompanyPage
+                cik={activeCik} tab={activeTab} companies={lookupCompanies}
+                pending={!ingestedCiks.has(activeCik)}
+                onTab={(tab) => openCompany(activeCik, tab)}
+              />
+            )}
+          </div>
         </div>
       </main>
     </div>

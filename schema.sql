@@ -229,6 +229,83 @@ CREATE INDEX IF NOT EXISTS idx_ipos_cik      ON ipos (cik, filed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ipos_filed_at ON ipos (filed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ipos_status   ON ipos (status);
 
+-- ---------------------------------------------------------------------------
+-- company_news — per-company headlines from Google News RSS. The SECOND (and
+-- only other) non-SEC source alongside daily_prices: Google News' keyless,
+-- free RSS search feed (news_ingest.py). One row per article per company.
+-- Powers the News view + per-company headline strip. Pruned to a rolling
+-- 30-day window by cleanup.py (prune_old_news) — it's a recent-headlines
+-- surface, not an archive. Degrades gracefully: if empty, the News UI is hidden.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS company_news (
+    id            BIGSERIAL PRIMARY KEY,
+    cik           TEXT        NOT NULL,
+    ticker        TEXT,
+    company_name  TEXT,
+    guid          TEXT        NOT NULL,   -- stable per-article id from the RSS <guid> (falls back to link)
+    title         TEXT,
+    link          TEXT,
+    source        TEXT,                   -- publisher name (RSS <source>)
+    summary       TEXT,                   -- RSS <description>, stripped of markup (<= 2000 chars)
+    published_at  TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (cik, guid)
+);
+-- Trader-importance score + category, computed at ingest by news_score.py. Lets the
+-- UI surface the important headlines per company first and gate the Discord alerts.
+ALTER TABLE company_news ADD COLUMN IF NOT EXISTS importance INT DEFAULT 0;
+ALTER TABLE company_news ADD COLUMN IF NOT EXISTS category   TEXT;
+CREATE INDEX IF NOT EXISTS idx_news_cik       ON company_news (cik, published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_news_published ON company_news (published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_news_cik_imp   ON company_news (cik, importance DESC, published_at DESC);
+
+-- Realtime: stream new headlines to the browser the instant the pipeline inserts
+-- them (the News view subscribes via subscribeNews). Supabase Realtime is on the
+-- free tier. Adding a table to the publication twice errors, so guard it. INSERT
+-- payloads carry the full new row by default (no REPLICA IDENTITY change needed).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'company_news'
+    ) THEN
+        EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE company_news';
+    END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- market_news — the curated, market-wide "Top Intelligence" feed. GLOBAL (not
+-- watchlist-scoped): market-mover headlines pulled from free RSS sources (SEC
+-- press releases, the Federal Reserve, the FDA, PR Newswire) by
+-- market_news_ingest.py, scored for trader-importance and kept ONLY above a
+-- strict threshold — so this table stays small and high-signal by construction.
+-- Pruned to a rolling 30-day window by cleanup.py (prune_old_market_news).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS market_news (
+    id            BIGSERIAL PRIMARY KEY,
+    guid          TEXT        NOT NULL UNIQUE,   -- stable per-article id (RSS <guid>, falls back to link)
+    source        TEXT,                          -- 'SEC' | 'Federal Reserve' | 'FDA' | 'PR Newswire' ...
+    category      TEXT,                          -- classified: 'Fed' | 'FDA' | 'Legal' | 'Deal' | 'Earnings' ...
+    importance    INT         DEFAULT 0,         -- computed market-mover score (higher = more important)
+    title         TEXT,
+    link          TEXT,
+    summary       TEXT,                          -- stripped of markup (<= 2000 chars)
+    published_at  TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_mktnews_published  ON market_news (published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mktnews_importance ON market_news (importance DESC, published_at DESC);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime' AND schemaname = 'public' AND tablename = 'market_news'
+    ) THEN
+        EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE market_news';
+    END IF;
+END $$;
+
                                                                                                                                                                                                                                                                                                                                                                                                                                                                 -- ---------------------------------------------------------------------------
                                                                                                                                                                                                                                                                                                                                                                                                                                                                 -- filings — narrative filings feed. Text sections roll off at 30 days
                                                                                                                                                                                                                                                                                                                                                                                                                                                                 -- (cleanup.py); the metadata row is retained. Realtime feed reads this.
@@ -333,7 +410,7 @@ CREATE INDEX IF NOT EXISTS idx_ipos_status   ON ipos (status);
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         'companies','financial_facts','insider_transactions','institutional_holdings',
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 'beneficial_ownership','proposed_sales','earnings_events','corporate_events',
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         'late_filings','securities_offerings','filings','daily_prices',
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                'company_profiles','company_themes','entities','ipos'
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                'company_profiles','company_themes','entities','ipos','company_news','market_news'
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     ] LOOP
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     EXECUTE format('REVOKE ALL ON %I FROM anon, authenticated', t);

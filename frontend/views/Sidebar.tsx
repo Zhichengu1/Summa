@@ -9,16 +9,17 @@ import type { Company, Filing, MainView, CompanySummary } from "../lib/types";
 
 export function Sidebar({
   companies, filings, activeCik, view, ingestedCiks, prices,
-  onCompany, onOverview, onSearch, onFeed, onCalendar, onManagers, onIpos, onGuide, onRemove, newFilings = 0,
+  onCompany, onOverview, onSearch, onFeed, onNews, onCalendar, onManagers, onIpos, onGuide, onRemove, newFilings = 0, newNews = 0,
 }: {
   companies: Company[]; filings: Filing[];
   activeCik: string | null; view: MainView;
   ingestedCiks: Set<string>;
   prices: Map<string, CompanySummary>;
   onCompany: (cik: string) => void;
-  onOverview: () => void; onSearch: () => void; onFeed: () => void; onCalendar: () => void; onManagers: () => void; onIpos: () => void; onGuide: () => void;
+  onOverview: () => void; onSearch: () => void; onFeed: () => void; onNews: () => void; onCalendar: () => void; onManagers: () => void; onIpos: () => void; onGuide: () => void;
   onRemove: (cik: string) => void;
   newFilings?: number;
+  newNews?: number;
 }) {
   const recent30 = useMemo(() => {
     const cutoff = Date.now() - 30 * 86_400_000;
@@ -45,6 +46,10 @@ export function Sidebar({
         <div className={`nav-item${view === "feed" ? " active" : ""}`} onClick={onFeed}>
           ≡ Feed
           {newFilings > 0 && <span className="nav-badge" title={`${newFilings} new since your last visit`}>{newFilings > 99 ? "99+" : newFilings}</span>}
+        </div>
+        <div className={`nav-item${view === "news" ? " active" : ""}`} onClick={onNews}>
+          ▤ News
+          {newNews > 0 && <span className="nav-badge" title={`${newNews} new since your last visit`}>{newNews > 99 ? "99+" : newNews}</span>}
         </div>
         <div className={`nav-item${view === "calendar" ? " active" : ""}`} onClick={onCalendar}>
           ◷ Calendar

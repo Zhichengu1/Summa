@@ -178,6 +178,37 @@ export type Ipo = {
   filed_at: string | null;
 };
 
+// One row per Google News article per company (backend news_ingest.py →
+// company_news). The News view lists these watchlist-wide; the company page can
+// show a per-company headline strip.
+export type NewsItem = {
+  cik: string;
+  ticker: string | null;
+  company_name: string | null;
+  guid: string;
+  title: string | null;
+  link: string | null;
+  source: string | null;
+  summary: string | null;
+  published_at: string | null;
+  importance: number | null;   // trader-importance score (news_score.py); >= 2 ⇒ important
+  category: string | null;     // 'Earnings' | 'M&A' | 'FDA' | 'Analyst' | ...
+};
+
+// One row per curated market-wide "Top Intelligence" item (backend
+// market_news_ingest.py → market_news). Market-mover headlines from free macro/
+// regulatory RSS (SEC, Fed, FDA, PR Newswire), already importance-filtered.
+export type MarketNews = {
+  guid: string;
+  source: string | null;
+  category: string | null;
+  importance: number | null;
+  title: string | null;
+  link: string | null;
+  summary: string | null;
+  published_at: string | null;
+};
+
 export type DailyPrice = {
   cik: string;
   ticker: string | null;
@@ -221,8 +252,8 @@ export type PeriodType = "annual" | "quarterly";
 // ─── View routing ───────────────────────────────────────────────────────────────
 // The top-level dashboard view and the per-company tab. Shared by the root Page,
 // the Sidebar, and CompanyPage so the hash router and the components agree.
-export type MainView = "overview" | "search" | "feed" | "calendar" | "managers" | "ipos" | "guide" | "company";
-export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings";
+export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "guide" | "company";
+export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings" | "news";
 
 // ─── Reference data (backend-populated; read once per session) ──────────────────
 export type CompanyProfileRow = {

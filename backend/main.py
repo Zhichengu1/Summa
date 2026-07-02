@@ -21,6 +21,8 @@ Run:  python main.py             # staged cadence (what the cron uses)
       python main.py AAPL MSFT   # force a specific subset, every dataset
       python main.py --all       # force the entire active watchlist (manual)
       python main.py --queued    # only never-ingested / newly queued companies
+      python main.py --market-news  # fast: refresh ONLY the curated market feed (summa-news cron)
+      python main.py --news         # fast: refresh company + market news, skip SEC ingest
 
 Tuning (env): INGEST_MAX_PER_RUN (default 12); INTERVAL_<DATASET> hours overrides.
 """
@@ -71,6 +73,14 @@ try:
     from ingest import summary_ingest
 except Exception:  # pragma: no cover
     summary_ingest = None
+try:
+    from ingest import news_ingest
+except Exception:  # pragma: no cover
+    news_ingest = None
+try:
+    from ingest import market_news_ingest
+except Exception:  # pragma: no cover
+    market_news_ingest = None
 try:
     from extractors import ipo_extractor
 except Exception:  # pragma: no cover
@@ -144,6 +154,7 @@ DATASET_INTERVALS_H: dict[str, float] = {
     # roll-forward (institutional_extractor.ingest_institutional_global, wired in main()).
     # Per-company only runs once for first-time/forced coverage (see process()).
     "prices":        float(os.environ.get("INTERVAL_PRICES",        "24")),   # EOD bars: daily
+    "news":          float(os.environ.get("INTERVAL_NEWS",          "1")),    # Google News RSS: hourly poll (safely inside free tier); Realtime pushes new rows to the UI instantly. INTERVAL_NEWS tunes it.
     "reference":     float(os.environ.get("INTERVAL_REFERENCE",     "720")),  # SIC/seed ~static → monthly
     "summary":       float(os.environ.get("INTERVAL_SUMMARY",       "0")),    # cheap recompute; refresh every visit
 }
@@ -285,6 +296,7 @@ def process(company: WatchedCompany, datasets: dict[str, str], *, force: bool = 
     # coverage; ongoing refresh is the global pass's job.
     if (force or "institutional" not in datasets) and _run_optional(institutional_extractor, "ingest_institutional", cik, ticker): new_state["institutional"] = stamp
     if due("prices")        and _run_optional(price_ingest,            "ingest_prices",        cik, ticker): new_state["prices"] = stamp
+    if due("news")          and _run_optional(news_ingest,             "ingest_news",          cik, ticker, name): new_state["news"] = stamp
     if due("reference")     and _run_optional(reference_ingest,        "ingest_profile",       cik, ticker): new_state["reference"] = stamp
 
     # Summary runs LAST so it aggregates the data the slices above just wrote.
@@ -293,9 +305,28 @@ def process(company: WatchedCompany, datasets: dict[str, str], *, force: bool = 
     db.update_company_state(cik, new_state)   # one write: dataset_state + last_ingested_at
 
 
+def _run_news_only(include_company: bool) -> int:
+    """Fast news-only refresh for the high-frequency news workflow (summa-news.yml).
+
+    Runs just the curated market-wide feed (SEC/Fed/FDA/PRN) — and, with --news, the
+    per-company Google feed too — then exits. Skips the heavy per-company SEC ingest so
+    it finishes in seconds and can safely run every few minutes, keeping the Discord
+    alerts + Realtime feed as close to real-time as a free cron allows.
+    """
+    logger.info("News-only refresh (%s)", "company + market" if include_company else "market")
+    if include_company:
+        for c in get_active_watchlist():
+            _run_optional(news_ingest, "ingest_news", c["cik"], c["ticker"], c["name"])
+    _run_optional(market_news_ingest, "ingest_market_news_global")
+    return 0
+
+
 def main() -> int:
     if not _preflight():
         return 2
+    flags = {a.lower() for a in sys.argv[1:] if a.startswith("-")}
+    if "--market-news" in flags or "--news" in flags:
+        return _run_news_only(include_company="--news" in flags)
     active = get_active_watchlist()
     state = db.fetch_ingest_state()
     companies, force = _select(sys.argv[1:], active, state)
@@ -339,6 +370,10 @@ def main() -> int:
     # accessions skipped). Independent of the watchlist — these are companies not
     # yet tracked. Cheap per run (metadata index; parses only new pricings).
     _run_optional(ipo_extractor, "ingest_ipos_global")
+    # Curated market-wide "Top Intelligence" feed (global, once per run): polls the
+    # free macro/regulatory RSS feeds (SEC/Fed/FDA/PRN), keeps only market-movers.
+    # Incremental (only new items written) + fail-soft per feed.
+    _run_optional(market_news_ingest, "ingest_market_news_global")
     logger.info("Done | %d/%d companies processed", ok, len(companies))
     return 0 if ok else 1
 
