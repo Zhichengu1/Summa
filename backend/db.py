@@ -183,6 +183,53 @@ def get_company_summary(cik: str) -> dict[str, Any] | None:
         return None
 
 
+def fetch_company_summaries() -> list[dict[str, Any]]:
+    """Return every company_summary row (paged) for watchlist-wide surfaces.
+
+    One tiny row per company, so this stays cheap at any watchlist size. Used by
+    the daily Discord brief (tools/daily_brief.py). Fails soft to [].
+    """
+    try:
+        return _select_all(
+            "company_summary",
+            "cik, ticker, last_close, as_of, chg_1d, ret_ytd, pct_off_high, rsi14, "
+            "ma_cross, vol_spike, new_52w_high, new_52w_low, net_insider_90d, cluster_buy",
+        )
+    except Exception:
+        logger.exception("fetch_company_summaries failed")
+        return []
+
+
+def fetch_earnings_dates() -> list[dict[str, Any]]:
+    """Return (cik, ticker, reported_date) for every earnings event, paged.
+
+    Feeds the daily brief's earnings radar: per-company historical report dates
+    → estimated next report. The table is small (a few rows/company/year), so a
+    paged full read stays cheap at any watchlist size. Fails soft to [].
+    """
+    try:
+        return _select_all("earnings_events", "cik, ticker, reported_date")
+    except Exception:
+        logger.exception("fetch_earnings_dates failed")
+        return []
+
+
+def company_has_rows(table: str, cik: str) -> bool:
+    """True if `table` already has any rows for this cik.
+
+    Generic first-seed suppression (same contract as company_has_news): a
+    company's very first ingest of a dataset seeds silently instead of flooding
+    the webhook. Fails safe to True so a transient error can't be misread as a
+    first seed.
+    """
+    try:
+        result = get_client().table(table).select("cik").eq("cik", cik).limit(1).execute()
+        return bool(result.data)
+    except Exception:
+        logger.exception("company_has_rows(%s) failed for %s", table, cik)
+        return True
+
+
 def company_has_news(cik: str) -> bool:
     """True if the company already has any company_news rows.
 

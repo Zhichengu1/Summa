@@ -25,11 +25,13 @@ only refreshes if its own cadence has elapsed. Coverage scales by spreading work
 across runs, not by doing more per run.
 
 > Optional Phase-2 enrichment channels (`gemini_enricher.py`, `discord_notify.py`)
-> exist but are **not** part of the Phase-1 ingest path — with one exception:
-> `news_ingest.py` calls `discord_notify.notify_news()` to push a Discord alert for
-> genuinely-new headlines. It's opt-in (no-op unless `DISCORD_WEBHOOK_URL` is set),
-> fail-soft (a webhook error never breaks ingest), and suppressed on a company's
-> first-ever news seed so it only ever alerts on the incremental delta.
+> exist but are **not** part of the Phase-1 ingest path — with two exceptions:
+> `news_ingest.py` calls `discord_notify.notify_news()` for genuinely-new headlines,
+> and `filings_ingest.py` calls `discord_notify.notify_filings()` for just-filed
+> feed documents (8-K/10-K/10-Q/DEF 14A within `FILING_ALERT_RECENCY_DAYS`). Both
+> are opt-in (no-op unless `DISCORD_WEBHOOK_URL` is set), fail-soft (a webhook error
+> never breaks ingest), and suppressed on a company's first-ever seed so they only
+> ever alert on the incremental delta.
 
 ---
 
@@ -68,6 +70,7 @@ Summa/
 │   ├── tools/                    ← standalone maintenance scripts (python -m tools.<name>)
 │   │   ├── build_sec_index.py    ← rebuilds frontend/public/sec-companies.json (stdlib only)
 │   │   ├── refresh_news.py       ← lightweight news-only entry point (edgar-free; summa-news */5)
+│   │   ├── daily_brief.py        ← daily watchlist brief → Discord (edgar-free; company_summary + earnings radar)
 │   │   ├── cleanup.py            ← monthly retention maintenance
 │   │   └── backfill_manager_quarters.py ← seeds prior 13F quarters so the Institutional Investors latest-vs-prior comparison works immediately (idempotent)
 │   ├── seeds/                    ← entities.yaml, profiles.yaml (curated reference data)
@@ -77,7 +80,8 @@ Summa/
 │
 ├── .github/workflows/
 │   ├── summa-pipeline.yml         ← */10 min ingest (main.py)
-│   ├── summa-news.yml             ← */5 min fast news-only refresh (tools.refresh_news; requirements-news.txt, edgar-free)
+│   ├── summa-news.yml             ← */5 min fast news refresh: market feeds + per-company Google News via --company (tools.refresh_news; requirements-news.txt, edgar-free)
+│   ├── summa-brief.yml            ← weekday-morning Discord watchlist brief (python -m tools.daily_brief; requirements-news.txt)
 │   ├── summa-cleanup.yml          ← monthly retention (python -m tools.cleanup)
 │   ├── summa-secindex.yml         ← weekly SEC index rebuild (python -m tools.build_sec_index)
 │   ├── summa-13f-quarter.yml      ← post-deadline (16th of Feb/May/Aug/Nov) 13F quarter roll-forward (python -m tools.backfill_manager_quarters)
@@ -359,8 +363,10 @@ days** (`prune_old_market_news`). All other structured warehouse tables
 
 **Cadence defaults** (`DATASET_INTERVALS_H`, all env-overridable via `INTERVAL_*`):
 filings 0 (every visit) · events 12h · insider 24h · ownership 48h · fundamentals 168h ·
-prices 24h · news 1h (hourly poll — safely inside free tier; Realtime pushes new rows to the
-UI instantly; `INTERVAL_NEWS` tunes it) · reference 720h. (13F institutional is global/quarterly — see step 7
+prices 24h · news 1h (the main pipeline's per-company cadence; the summa-news */5 job also
+polls every company's Google News each tick via `--company`, so effective news latency is
+~5 min — dedupe by guid makes the overlap harmless; `INTERVAL_NEWS` tunes the pipeline side) ·
+reference 720h. (13F institutional is global/quarterly — see step 7
 — not a per-company `DATASET_INTERVALS_H` entry.)
 
 ---
@@ -375,9 +381,11 @@ Backend (`backend/.env`, mapped from `${{ secrets.* }}` in the workflows):
 a one-off IPO backfill on an empty table). News tuning: `INTERVAL_NEWS` (hours, default 1),
 `NEWS_MAX_ITEMS` (per-company Google feed cap, default 100), `NEWS_MAX_AGE_DAYS` (recency
 window, default 45), `NEWS_MIN_SCORE` (catalyst KEEP threshold, default 3; `news_score.py`),
-`NEWS_ALERT_SCORE` (catalyst WEBHOOK threshold — only Notable+ alerted, default 6),
+`NEWS_ALERT_SCORE` (catalyst WEBHOOK threshold; code default 6 = Notable+ only, but both
+workflows set it to `"3"` so Discord alerts at the UI's "important" floor),
 `MARKET_NEWS_MIN_SCORE` (strict market threshold, default 3), `MARKET_NEWS_FEEDS` (override the curated source list as
-`label|url|weight` comma-separated). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
+`label|url|weight` comma-separated), `FILING_ALERT_RECENCY_DAYS` (Discord filing-alert
+freshness window, default 2 — only just-filed feed documents alert, never backfills). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
 edgartools; SEC's ceiling is ~10/s) — read by edgartools **at import time**, so it must be
 set in the environment (workflow `env:` / `backend/.env`) before `main.py` imports `edgar`,
 not assigned in Python. Set to `"9"` in the EDGAR workflows (pipeline, 13F-quarter).

@@ -54,6 +54,9 @@ jobs:
           EDGAR_RATE_LIMIT_PER_SEC: "9"
           GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Match summa-news.yml: alert company headlines at the UI's "important"
+          # floor (3), not just Notable+ catalysts (code default 6).
+          NEWS_ALERT_SCORE: "3"
           # Per-run budget. Public repo ⇒ Actions minutes are free/unlimited, so the
           # cap is sized for coverage latency (how fast a full watchlist sweep finishes),
           # not billing. Real ceiling is EDGAR's 9 req/s + the wall-clock budget below.

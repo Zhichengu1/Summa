@@ -9,6 +9,7 @@ without notifications configured.
 
 import logging
 import os
+import re
 from typing import Any
 
 try:
@@ -277,6 +278,33 @@ def _md_escape(text: str) -> str:
     return text.replace("[", "(").replace("]", ")")
 
 
+# Markdown-significant / mention characters stripped from company labels. Tickers
+# and names reach the embeds from the anon-INSERTable `watchlist` table (no DB
+# constraint), so treat them as untrusted: without this, a queued "company" named
+# `[claim airdrop](https://evil.example)` would render as a live link in Discord.
+_LABEL_STRIP = re.compile(r"[\[\]()*_~`|\\<>@]")  # newlines handled by the \s+ collapse
+
+
+def _label(text: Any, cap: int = 60) -> str:
+    """Sanitize an untrusted company ticker/name for safe embed markdown."""
+    if text is None:
+        return "?"
+    clean = _LABEL_STRIP.sub("", str(text))
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean[:cap] or "?"
+
+
+def _safe_link(url: Any) -> str | None:
+    """Return an http(s) URL safe to place inside `[text](url)` markdown, or None.
+
+    Percent-encodes parens so a crafted URL can't close the link early and smuggle
+    trailing markdown into the embed.
+    """
+    if not url or not str(url).startswith(("http://", "https://")):
+        return None
+    return str(url).replace("(", "%28").replace(")", "%29")
+
+
 # Category → emoji (mirrors news_score.CATEGORY_EMOJI); used for the field headers.
 _CAT_EMOJI: dict[str, str] = {
     "Fed": "🏦", "Macro": "🏛️", "M&A": "💼", "Investment": "💡", "FDA": "💊",
@@ -327,12 +355,12 @@ def _headline_field(it: dict[str, Any]) -> tuple[str, str, int]:
         name += f"  ·  {tier_emoji} {tier}"
     name = name[:256]
 
-    linked = (f"[{_md_escape(title)}]({link})"
-              if link and str(link).startswith(("http://", "https://")) else _md_escape(title))
+    safe_url = _safe_link(link)
+    linked = f"[{_md_escape(title)}]({safe_url})" if safe_url else _md_escape(title)
     lines = [linked]
     if summary and summary.lower() != title.lower():
         snip = summary if len(summary) <= 240 else summary[:237] + "…"
-        lines.append(f"> {snip}")
+        lines.append(f"> {_md_escape(snip)}")
     why = _why(title, it.get("summary"))
     if why and why.lower() not in summary.lower():
         lines.append(f"🔎 **Behind it:** {_md_escape(why)}")
@@ -341,7 +369,7 @@ def _headline_field(it: dict[str, Any]) -> tuple[str, str, int]:
     if impact:
         meta += f"  ·  ⚡ {impact}/10"
     if src:
-        meta += f"  ·  {src}{' ✅' if cred >= 3 else ''}"
+        meta += f"  ·  {_label(src, 40)}{' ✅' if cred >= 3 else ''}"
     if epoch is not None:
         meta += f"  ·  <t:{epoch}:R>"
     lines.append(meta)
@@ -397,7 +425,8 @@ def notify_news(
     if extra > 0:
         fields.append({"name": "⋯", "value": f"_+{extra} more headline{'s' if extra != 1 else ''}_", "inline": False})
 
-    label = f"{company_name} ({ticker})" if company_name else (ticker or "News")
+    label = (f"{_label(company_name)} ({_label(ticker, 12)})" if company_name
+             else _label(ticker, 12) if ticker else "News")
     n = len(items)
     color = _POS_COLOR if net > 0 else _NEG_COLOR if net < 0 else _NEWS_COLOR
     embed: dict[str, Any] = {
@@ -470,6 +499,226 @@ def notify_market_news(items: list[dict[str, Any]], max_items: int = 6) -> None:
         logger.exception("Discord market-news webhook post failed")
 
 
+# Feed form → (emoji, trader-facing label, embed color). 8-K is the market-moving
+# one (material events) so it gets the amber "pay attention" color.
+_FILING_FORM_META: dict[str, tuple[str, str, int]] = {
+    "8-K":     ("⚡", "Material event report", 0xF5_A6_23),
+    "10-Q":    ("📊", "Quarterly report",      0x4F_8D_D4),
+    "10-K":    ("📚", "Annual report",         0x4F_8D_D4),
+    "DEF 14A": ("🗳️", "Proxy statement",       0x4F_D4_C2),
+}
+
+
+def notify_filings(ticker: str, name: str | None, filings: list[dict[str, Any]],
+                   max_items: int = 6) -> None:
+    """Post one embed for a company's genuinely-NEW SEC feed filings.
+
+    `filings` are `filings` row dicts (form_type/filed_at/filing_url/accession_number),
+    already filtered to the new+recent delta by the caller (filings_ingest). No-op
+    without a webhook or items; fail-soft (a webhook error never propagates).
+    """
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not webhook or not filings:
+        return
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not installed — skipping Discord filing notification")
+        return
+
+    shown = filings[:max_items]
+    fields: list[dict[str, Any]] = []
+    color = _NEWS_COLOR
+    for f in shown:
+        form = f.get("form_type") or "?"
+        emoji, label, form_color = _FILING_FORM_META.get(form, ("📄", "SEC filing", _NEWS_COLOR))
+        if form == "8-K":
+            color = form_color          # any 8-K in the batch wins the amber color
+        elif color == _NEWS_COLOR:
+            color = form_color
+        value_lines = []
+        url = _safe_link(f.get("filing_url"))
+        if url:
+            value_lines.append(f"[Open filing on EDGAR]({url})")
+        epoch = _epoch(f.get("filed_at"))
+        if epoch is not None:
+            value_lines.append(f"Filed <t:{epoch}:R>")
+        period = f.get("period_of_report")
+        if period:
+            value_lines.append(f"Period {period}")
+        fields.append({"name": f"{emoji} {form}  ·  {label}",
+                       "value": "\n".join(value_lines) or "​", "inline": False})
+    extra = len(filings) - len(shown)
+    if extra > 0:
+        fields.append({"name": "⋯", "value": f"_+{extra} more filing{'s' if extra != 1 else ''}_",
+                       "inline": False})
+
+    label = (f"{_label(name)} ({_label(ticker, 12)})" if name
+             else _label(ticker, 12) if ticker else "Filing")
+    embed: dict[str, Any] = {
+        "title": f"📄  {label} — new SEC filing{'s' if len(filings) != 1 else ''}",
+        "color": color,
+        "fields": fields,
+        "footer": {"text": f"Summa · {len(filings)} new · EDGAR"},
+    }
+    newest_iso = next((f.get("filed_at") for f in shown if f.get("filed_at")), None)
+    if newest_iso:
+        embed["timestamp"] = newest_iso
+
+    try:
+        resp = requests.post(webhook, json={"embeds": [embed]}, timeout=_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Discord filing webhook returned %s: %s", resp.status_code, resp.text[:200])
+    except requests.RequestException:
+        logger.exception("Discord filing webhook post failed for %s", ticker)
+
+
+def _tk(r: dict[str, Any]) -> str:
+    """Sanitized ticker (fallback cik) label for brief lines — untrusted upstream."""
+    return _label(r.get("ticker") or r.get("cik"), 12)
+
+
+def _brief_mover_line(r: dict[str, Any]) -> str:
+    """One mover line for the daily brief: '**AAPL**  ▲ +2.31%  ·  $212.44'."""
+    parts = [f"**{_tk(r)}**"]
+    day = _fmt_pct(r.get("chg_1d"))
+    if day:
+        parts.append(day)
+    try:
+        parts.append(f"${float(r['last_close']):,.2f}")
+    except (KeyError, TypeError, ValueError):
+        pass
+    return "  ·  ".join(parts)
+
+
+def _brief_fields(rows: list[dict[str, Any]], top_n: int = 3) -> list[dict[str, Any]]:
+    """Build the daily-brief embed fields from company_summary rows (skip empties)."""
+    def num(r: dict[str, Any], key: str) -> float | None:
+        try:
+            return float(r[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    fields: list[dict[str, Any]] = []
+    moved = sorted((r for r in rows if num(r, "chg_1d") is not None),
+                   key=lambda r: float(r["chg_1d"]), reverse=True)
+    gainers = [r for r in moved if float(r["chg_1d"]) > 0][:top_n]
+    losers = [r for r in reversed(moved) if float(r["chg_1d"]) < 0][:top_n]
+    if gainers:
+        fields.append({"name": "📈 Top gainers", "inline": True,
+                       "value": "\n".join(_brief_mover_line(r) for r in gainers)})
+    if losers:
+        fields.append({"name": "📉 Top decliners", "inline": True,
+                       "value": "\n".join(_brief_mover_line(r) for r in losers)})
+
+    highs = [r for r in rows if r.get("new_52w_high")]
+    lows = [r for r in rows if r.get("new_52w_low")]
+    if highs:
+        fields.append({"name": "🚀 New 52-week highs", "inline": False,
+                       "value": "  ·  ".join(f"**{_tk(r)}**" for r in highs)})
+    if lows:
+        fields.append({"name": "⚠️ New 52-week lows", "inline": False,
+                       "value": "  ·  ".join(f"**{_tk(r)}**" for r in lows)})
+
+    crosses = [f"⚡ **{_tk(r)}** golden cross" for r in rows if r.get("ma_cross") == "golden"]
+    crosses += [f"☠️ **{_tk(r)}** death cross" for r in rows if r.get("ma_cross") == "death"]
+    if crosses:
+        fields.append({"name": "Trend crosses", "value": "\n".join(crosses), "inline": False})
+
+    spikes = sorted((r for r in rows if (num(r, "vol_spike") or 0) >= 2.0),
+                    key=lambda r: float(r["vol_spike"]), reverse=True)[:top_n]
+    if spikes:
+        fields.append({"name": "📊 Volume spikes", "inline": False,
+                       "value": "\n".join(f"**{_tk(r)}**  ·  "
+                                          f"{float(r['vol_spike']):.1f}× avg volume" for r in spikes)})
+
+    flows = sorted((r for r in rows if num(r, "net_insider_90d")),
+                   key=lambda r: abs(float(r["net_insider_90d"])), reverse=True)[:top_n]
+    insider_lines = []
+    for r in flows:
+        amt = _fmt_usd_compact(r.get("net_insider_90d"))
+        if amt:
+            tag = "  👥 cluster buy" if r.get("cluster_buy") else ""
+            insider_lines.append(f"**{_tk(r)}**  ·  90d {amt}{tag}")
+    if insider_lines:
+        fields.append({"name": "🧑‍💼 Insider flow", "value": "\n".join(insider_lines), "inline": False})
+
+    hot = sorted((r for r in rows if (num(r, "rsi14") or 50) >= 70),
+                 key=lambda r: float(r["rsi14"]), reverse=True)[:top_n]
+    cold = sorted((r for r in rows if (num(r, "rsi14") or 50) <= 30),
+                  key=lambda r: float(r["rsi14"]))[:top_n]
+    rsi_lines = [f"🔥 **{_tk(r)}**  ·  RSI {float(r['rsi14']):.0f} overbought" for r in hot]
+    rsi_lines += [f"🧊 **{_tk(r)}**  ·  RSI {float(r['rsi14']):.0f} oversold" for r in cold]
+    if rsi_lines:
+        fields.append({"name": "🌡️ RSI extremes", "value": "\n".join(rsi_lines), "inline": False})
+    return fields[:25]  # Discord's embed field cap
+
+
+def notify_daily_brief(
+    rows: list[dict[str, Any]],
+    upcoming_earnings: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Post the daily watchlist market brief (one embed) from company_summary rows.
+
+    `upcoming_earnings` items are {ticker, est_date, days_away} estimates (from
+    tools/daily_brief.py); rendered as an "Earnings radar" field, always marked
+    as estimates. Returns True if an embed was posted. No-op (False) without a
+    webhook, rows, or anything brief-worthy; fail-soft like every other webhook path.
+    """
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not webhook or not rows:
+        return False
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not installed — skipping Discord daily brief")
+        return False
+
+    fields = _brief_fields(rows)
+    if upcoming_earnings:
+        lines = []
+        for e in sorted(upcoming_earnings, key=lambda x: x.get("days_away", 0))[:8]:
+            days = e.get("days_away")
+            when = "any day now" if days is not None and days <= 0 else \
+                   "tomorrow" if days == 1 else f"in ~{days}d"
+            lines.append(f"**{_label(e.get('ticker'), 12)}**  ·  ~{e.get('est_date')}  ·  {when}")
+        fields.append({"name": "📅 Earnings radar (estimated from filing cadence)",
+                       "value": "\n".join(lines), "inline": False})
+    if not fields:
+        return False
+
+    changes = []
+    for r in rows:
+        try:
+            changes.append(float(r["chg_1d"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+    up = sum(1 for c in changes if c > 0)
+    down = sum(1 for c in changes if c < 0)
+    median = sorted(changes)[len(changes) // 2] if changes else 0.0
+    breadth = (f"{len(rows)} tracked  ·  {up} up / {down} down"
+               + (f"  ·  median day {_fmt_pct(median)}" if changes else ""))
+    asof = max((r.get("as_of") or "" for r in rows), default="") or None
+
+    embed: dict[str, Any] = {
+        "title": "📋  Daily Watchlist Brief" + (f" — {asof}" if asof else ""),
+        "color": _POS_COLOR if median > 0 else _NEG_COLOR if median < 0 else _NEWS_COLOR,
+        "description": breadth,
+        "fields": fields,
+        "footer": {"text": "Summa · company_summary snapshot"},
+    }
+    try:
+        resp = requests.post(webhook, json={"embeds": [embed]}, timeout=_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Discord daily-brief webhook returned %s: %s",
+                           resp.status_code, resp.text[:200])
+            return False
+        return True
+    except requests.RequestException:
+        logger.exception("Discord daily-brief webhook post failed")
+        return False
+
+
 def _band(severity: float) -> tuple[int, str]:
     for floor, color, label in _SEVERITY_BANDS:
         if severity >= floor:
@@ -530,7 +779,7 @@ def send(
         fields.append({"name": "AI summary", "value": summary, "inline": False})
 
     embed: dict[str, Any] = {
-        "title": f"{company_name} ({ticker})",
+        "title": f"{_label(company_name)} ({_label(ticker, 12)})",
         "color": color,
         "fields": fields,
     }

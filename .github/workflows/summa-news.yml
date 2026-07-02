@@ -11,8 +11,11 @@ name: summa-news
 # The main summa-pipeline (*/10) also refreshes market news as a backstop — dedup
 # makes the overlap harmless.
 #
-# Per-company Google News stays on the main pipeline's hourly cadence (Google
-# politeness). To include it here too, add the `--company` flag (heavier).
+# `--company` also polls per-company Google News for the whole active watchlist
+# each tick, so Discord gets company headlines at the same near-real-time cadence
+# as the market feed (dedup via seen-guids means only genuinely-new items alert).
+# NEWS_ALERT_SCORE=3 aligns the webhook with the UI's "important" floor — without
+# it only Notable+ catalysts (score ≥ 6) would ever reach Discord.
 
 on:
   schedule:
@@ -48,10 +51,20 @@ jobs:
         working-directory: backend
         run: pip install -r requirements-news.txt
 
-      - name: Refresh market news
+      - name: Refresh market + company news
         working-directory: backend
         env:
           SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python -m tools.refresh_news
+          # Alert threshold for per-company headlines (code default 6 = Notable+
+          # only). 3 matches the UI's "important" filter so every poll that finds
+          # genuinely-new important company news posts to Discord.
+          NEWS_ALERT_SCORE: "3"
+          # Narrow Google window for the fast poll: fewer feed items per tick ⇒
+          # smaller seen-guid dedupe reads ⇒ Supabase egress stays well inside the
+          # 5 GB/mo free tier at 288 runs/day. The hourly pipeline pass keeps the
+          # 45-day default for backfill depth; this path only needs "new since
+          # the last few polls".
+          NEWS_MAX_AGE_DAYS: "7"
+        run: python -m tools.refresh_news --company
