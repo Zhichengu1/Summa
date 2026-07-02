@@ -380,10 +380,14 @@ Backend (`backend/.env`, mapped from `${{ secrets.* }}` in the workflows):
 (default 360), `INTERVAL_<DATASET>` overrides, `IPO_WINDOW_DAYS` (default 10; raise for
 a one-off IPO backfill on an empty table). News tuning: `INTERVAL_NEWS` (hours, default 1),
 `NEWS_MAX_ITEMS` (per-company Google feed cap, default 100), `NEWS_MAX_AGE_DAYS` (recency
-window, default 45), `NEWS_MIN_SCORE` (catalyst KEEP threshold, default 3; `news_score.py`),
-`NEWS_ALERT_SCORE` (catalyst WEBHOOK threshold; code default 6 = Notable+ only, but both
-workflows set it to `"3"` so Discord alerts at the UI's "important" floor),
-`MARKET_NEWS_MIN_SCORE` (strict market threshold, default 3), `MARKET_NEWS_FEEDS` (override the curated source list as
+window, default 3 — the news channel is "latest only": headlines older than this are never
+ingested; summa-news.yml pins the same value), `NEWS_MIN_SCORE` (catalyst KEEP threshold,
+default 3; `news_score.py`), `NEWS_ALERT_SCORE` (catalyst WEBHOOK threshold; code default 6 =
+Notable+ only, but both workflows set it to `"3"` so Discord alerts at the UI's "important"
+floor), `NEWS_ALERT_MAX_AGE_H` (Discord company-news freshness gate, default 24 — a
+just-discovered but older headline is stored, never alerted),
+`MARKET_NEWS_MIN_SCORE` (strict market threshold, default 3), `MARKET_NEWS_MAX_AGE_DAYS`
+(market-feed recency window, default 7), `MARKET_NEWS_FEEDS` (override the curated source list as
 `label|url|weight` comma-separated), `FILING_ALERT_RECENCY_DAYS` (Discord filing-alert
 freshness window, default 2 — only just-filed feed documents alert, never backfills). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
 edgartools; SEC's ceiling is ~10/s) — read by edgartools **at import time**, so it must be

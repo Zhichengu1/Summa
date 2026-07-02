@@ -24,6 +24,16 @@ const CAT_EMOJI: Record<string, string> = {
 // "Important" = a real catalyst (Minor tier and up); below this is generic/latest news.
 const IMPORTANT_MIN = 4;
 
+// Recency windows — the feed is about knowing BEFORE the move, so it defaults to
+// the freshest window; older stored headlines stay one chip away.
+const AGE_CHOICES: { label: string; days: number | null }[] = [
+  { label: "24h", days: 1 },
+  { label: "3d", days: 3 },
+  { label: "7d", days: 7 },
+  { label: "All", days: null },
+];
+const DEFAULT_MAX_AGE_DAYS = 3;
+
 function dayLabel(iso: string | null): string {
   if (!iso) return "Earlier";
   const d = new Date(iso);
@@ -43,6 +53,7 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
   const [q, setQ] = useState("");
   const [tickerFilter, setTickerFilter] = useState<string | null>(null);
   const [importantOnly, setImportantOnly] = useState(true);
+  const [maxAgeDays, setMaxAgeDays] = useState<number | null>(DEFAULT_MAX_AGE_DAYS);
 
   // Curated market feed: fetch once + keep live.
   useEffect(() => { fetchMarketNews(200).then(setMarket); }, []);
@@ -61,18 +72,29 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
     return Array.from(s).sort();
   }, [news]);
 
+  // Items missing a pubDate can't prove they're fresh, so a recency window hides them.
+  const withinAge = (iso: string | null, cutoff: string | null) =>
+    cutoff === null || (iso !== null && iso >= cutoff);
+
   const marketShown = useMemo(() => {
-    if (!q.trim()) return market;
-    const t = q.toLowerCase();
-    return market.filter((n) =>
-      (n.title ?? "").toLowerCase().includes(t) ||
-      (n.source ?? "").toLowerCase().includes(t) ||
-      (n.category ?? "").toLowerCase().includes(t),
-    );
-  }, [market, q]);
+    const cutoff = maxAgeDays === null
+      ? null : new Date(Date.now() - maxAgeDays * 86_400_000).toISOString();
+    let r = market.filter((n) => withinAge(n.published_at, cutoff));
+    if (q.trim()) {
+      const t = q.toLowerCase();
+      r = r.filter((n) =>
+        (n.title ?? "").toLowerCase().includes(t) ||
+        (n.source ?? "").toLowerCase().includes(t) ||
+        (n.category ?? "").toLowerCase().includes(t),
+      );
+    }
+    return r;
+  }, [market, q, maxAgeDays]);
 
   const companyShown = useMemo(() => {
-    let r = news;
+    const cutoff = maxAgeDays === null
+      ? null : new Date(Date.now() - maxAgeDays * 86_400_000).toISOString();
+    let r = news.filter((n) => withinAge(n.published_at, cutoff));
     if (importantOnly) r = r.filter((n) => (n.importance ?? 0) >= IMPORTANT_MIN);
     if (tickerFilter) r = r.filter((n) => n.ticker === tickerFilter);
     if (q.trim()) {
@@ -85,7 +107,7 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
       );
     }
     return r;
-  }, [news, q, tickerFilter]);
+  }, [news, q, tickerFilter, importantOnly, maxAgeDays]);
 
   const companySections = useMemo(() => {
     const out: { label: string; items: NewsItem[] }[] = [];
@@ -98,7 +120,7 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
     return out;
   }, [companyShown]);
 
-  const count = scope === "top" ? market.length : companyShown.length;
+  const count = scope === "top" ? marketShown.length : companyShown.length;
 
   return (
     <div>
@@ -128,6 +150,15 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
           placeholder="Search…" value={q}
           onChange={(e) => setQ(e.target.value)}
         />
+        <span className="chip-sep">|</span>
+        {AGE_CHOICES.map((c) => (
+          <button
+            key={c.label}
+            className={`chip${maxAgeDays === c.days ? " active" : ""}`}
+            title={c.days === null ? "Show every stored headline" : `Only headlines from the last ${c.label}`}
+            onClick={() => setMaxAgeDays(c.days)}
+          >{c.label}</button>
+        ))}
         {scope === "watchlist" && (
           <>
             <button
@@ -153,7 +184,7 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
           <div className="news-empty">
             {market.length === 0
               ? "No market intelligence yet — curated alerts appear after the next pipeline run."
-              : "No alerts match your search."}
+              : "No alerts in this window — widen the recency filter or clear the search."}
           </div>
         ) : (
           <div className="news-feed">

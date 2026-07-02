@@ -63,8 +63,8 @@ jobs:
           NEWS_ALERT_SCORE: "3"
           # Narrow Google window for the fast poll: fewer feed items per tick ⇒
           # smaller seen-guid dedupe reads ⇒ Supabase egress stays well inside the
-          # 5 GB/mo free tier at 288 runs/day. The hourly pipeline pass keeps the
-          # 45-day default for backfill depth; this path only needs "new since
-          # the last few polls".
-          NEWS_MAX_AGE_DAYS: "7"
+          # 5 GB/mo free tier at 288 runs/day. Matches the code default (3d) —
+          # the feed is "latest only"; this path only needs "new since the last
+          # few polls".
+          NEWS_MAX_AGE_DAYS: "3"
         run: python -m tools.refresh_news --company

@@ -85,7 +85,7 @@ def _feeds() -> list[tuple[str, str, int]]:
 # Strict market-mover threshold: only headlines scoring >= this are stored.
 # Importance scoring itself lives in news_score.py (shared with company news).
 _THRESHOLD = int(os.environ.get("MARKET_NEWS_MIN_SCORE", "3"))
-_MAX_AGE_DAYS = int(os.environ.get("MARKET_NEWS_MAX_AGE_DAYS", "21"))  # keep it "latest" (some feeds list historical releases)
+_MAX_AGE_DAYS = int(os.environ.get("MARKET_NEWS_MAX_AGE_DAYS", "7"))  # keep it "latest" (some feeds list historical releases)
 
 
 # ─── RSS fetch / parse ──────────────────────────────────────────────────────────

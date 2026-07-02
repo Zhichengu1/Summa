@@ -47,6 +47,10 @@ logger = logging.getLogger(__name__)
 #   • _MIN_SCORE — the "important" reference floor (matches the UI's importance filter).
 _MIN_SCORE = int(os.environ.get("NEWS_MIN_SCORE", "3"))
 _ALERT_SCORE = int(os.environ.get("NEWS_ALERT_SCORE", "6"))
+# Discord alerts must be actionable — a headline older than this many hours is no
+# longer "know before the move" material, even if we only just discovered it
+# (e.g. Google surfacing an older article for the first time). Unknown pubDates pass.
+_ALERT_MAX_AGE_H = int(os.environ.get("NEWS_ALERT_MAX_AGE_H", "24"))
 
 # Google News RSS search endpoint — keyless and free. `hl`/`gl`/`ceid` pin the
 # feed to US English. The query is company-scoped (see _query).
@@ -54,7 +58,7 @@ _RSS_URL = "https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
 _TIMEOUT = 15
 _MAX_ATTEMPTS = 3
 _MAX_ITEMS = int(os.environ.get("NEWS_MAX_ITEMS", "100"))  # keep up to N per company (Google's feed tops out ~100)
-_MAX_AGE_DAYS = int(os.environ.get("NEWS_MAX_AGE_DAYS", "45"))  # skip stale feed items — keep it "latest news"
+_MAX_AGE_DAYS = int(os.environ.get("NEWS_MAX_AGE_DAYS", "3"))  # LATEST only — stale headlines are not actionable
 _SUMMARY_CAP = 2000      # never store more than this many chars of description
 # A browser-like UA avoids Google returning an empty/blocked body.
 _HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; Summa/1.0)"}
@@ -93,6 +97,15 @@ def _fetch_rss(ticker: str, name: str | None) -> bytes | None:
                 return None
             time.sleep(2 ** (attempt - 1))  # 1s, 2s backoff
     return None
+
+
+def _alert_fresh(pub_iso: str | None) -> bool:
+    """True if a headline is fresh enough to alert on (unknown pubDates pass)."""
+    if not pub_iso:
+        return True
+    cutoff = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(hours=_ALERT_MAX_AGE_H)).isoformat()
+    return pub_iso >= cutoff
 
 
 def _pub_iso(pubdate: str | None) -> str | None:
@@ -190,7 +203,8 @@ def ingest_news(cik: str, ticker: str, name: str | None = None) -> int:
     # Only compute alerts if the pipeline can push them, and only pay the
     # `company_has_news` query when there's actually an alert-worthy item (skips a
     # Supabase round-trip on the common poll where nothing important is new).
-    alerts = ([r for r in new_rows if (r.get("importance") or 0) >= _ALERT_SCORE]
+    alerts = ([r for r in new_rows
+               if (r.get("importance") or 0) >= _ALERT_SCORE and _alert_fresh(r.get("published_at"))]
               if discord_notify is not None else [])
     had_prior = db.company_has_news(cik) if alerts else False  # gate the first-seed flood; checked BEFORE upsert
 
