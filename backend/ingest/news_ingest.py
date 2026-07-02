@@ -196,9 +196,11 @@ def ingest_news(cik: str, ticker: str, name: str | None = None) -> int:
         logger.info("  %s news: no headlines", ticker)
         return 0
 
-    # Which of these are genuinely new (vs re-pulls we already store)?
+    # Which of these are genuinely new (vs re-pulls we already store)? One lookup
+    # for the whole feed — inside the comprehension it would re-query per headline.
     guids = [r["guid"] for r in rows]
-    new_rows = [r for r in rows if r["guid"] not in db.get_seen_news_guids(cik, guids)]
+    seen = db.get_seen_news_guids(cik, guids)
+    new_rows = [r for r in rows if r["guid"] not in seen]
 
     # Only compute alerts if the pipeline can push them, and only pay the
     # `company_has_news` query when there's actually an alert-worthy item (skips a

@@ -146,20 +146,26 @@ def get_seen_news_guids(cik: str, guids: list[str]) -> set[str]:
     """Return the subset of `guids` already stored for this company in company_news.
 
     Lets news_ingest tell genuinely-new headlines from re-pulls of ones it already
-    has, so Discord only notifies on the delta. Scoped to one CIK; the guid list is
-    small (<= _MAX_ITEMS) so no chunking is needed.
+    has, so Discord only notifies on the delta. Google News guids run ~200–500 chars,
+    so the lookup is chunked small — a full feed (~100 guids) in one `in_()` builds a
+    URL past PostgREST's request limit and 400s, which would make EVERY headline look
+    new (and re-alert) each poll.
     """
     if not guids:
         return set()
-    try:
-        result = (
-            get_client().table("company_news").select("guid")
-            .eq("cik", cik).in_("guid", guids).execute()
-        )
-        return {r["guid"] for r in (result.data or [])}
-    except Exception:
-        logger.exception("get_seen_news_guids failed for %s", cik)
-        return set()
+    seen: set[str] = set()
+    client = get_client()
+    for i in range(0, len(guids), 25):
+        batch = guids[i : i + 25]
+        try:
+            result = (
+                client.table("company_news").select("guid")
+                .eq("cik", cik).in_("guid", batch).execute()
+            )
+            seen.update(r["guid"] for r in (result.data or []))
+        except Exception:
+            logger.exception("get_seen_news_guids failed for %s", cik)
+    return seen
 
 
 def get_company_summary(cik: str) -> dict[str, Any] | None:
