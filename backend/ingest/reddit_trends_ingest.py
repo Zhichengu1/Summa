@@ -259,7 +259,7 @@ def _watchlist_tickers() -> set[str]:
         return set()
 
 
-def ingest_reddit_trends_global() -> int:
+def ingest_reddit_trends_global(force_digest: bool = False) -> int:
     """Pull the latest Reddit trending-stock ranking, refresh today's snapshot, alert.
 
     Global; run several times a day (summa-reddit.yml). Every run re-pulls the
@@ -267,7 +267,9 @@ def ingest_reddit_trends_global() -> int:
     rows, so the table always holds the LATEST counts, not the morning's. Discord:
     the day's FIRST run posts the full digest; later runs stay quiet unless a
     ticker surged into the top few from (near) nowhere — that delta is the
-    intraday signal a trader actually wants pinged about. Best-effort per source:
+    intraday signal a trader actually wants pinged about. `force_digest=True`
+    (manual runs) posts the full digest regardless — so a hand-triggered run is
+    always visible instead of a silent refresh. Best-effort per source:
     ApeWisdom ranks + Tradestie sentiment when both respond; either alone still
     produces a snapshot. Returns the number of rows written (0 if every source
     was unavailable).
@@ -316,7 +318,9 @@ def ingest_reddit_trends_global() -> int:
         return written
 
     rising: list[dict[str, Any]] = []
-    if not prior_ranks:
+    if not prior_ranks or force_digest:
+        if force_digest and prior_ranks:
+            logger.info("  reddit_trends: full digest forced (snapshot already existed)")
         alert = rows[:_ALERT_N]
         # Daily digest only: under-the-radar risers from the whole board (the
         # intraday runs stay surge-only — the 24h deltas barely move intraday,
@@ -346,7 +350,7 @@ def ingest_reddit_trends_global() -> int:
     try:
         discord_notify.notify_reddit_trends(
             alert, watchlist_tickers=_watchlist_tickers(),
-            surge=bool(prior_ranks), rising=rising)
+            surge=bool(prior_ranks) and not force_digest, rising=rising)
     except Exception:
         logger.exception("  reddit_trends: Discord notify failed")
     return written

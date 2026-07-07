@@ -15,7 +15,12 @@ on:
   schedule:
     - cron: "15 13 * * *"      # daily full digest (pre-open)
     - cron: "15 16,20 * * 1-5" # weekday intraday refresh + surge-only alerts
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_digest:
+        description: "Post the full daily digest even if today's snapshot already exists"
+        type: boolean
+        default: false
 
 concurrency:
   group: summa-reddit
@@ -56,4 +61,7 @@ jobs:
           # webhook when the secret is unset.
           DISCORD_REDDIT_WEBHOOK_URL: ${{ secrets.DISCORD_REDDIT_WEBHOOK_URL }}
           DISCORD_WEBHOOK_URL:        ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Manual runs can force the full digest even if today's snapshot
+          # exists (empty/false on scheduled runs → normal first-run-wins gate).
+          REDDIT_TRENDS_FORCE_DIGEST: ${{ inputs.force_digest && '1' || '0' }}
         run: python -m tools.reddit_trends

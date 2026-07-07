@@ -7,6 +7,7 @@ import type {
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
   BeneficialOwnership, ProposedSale, DailyPrice,
   CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary, Ipo, NewsItem, MarketNews,
+  RedditTrend,
 } from "../types";
 
 // Whole-table read, paged in 1000-row chunks. Any "fetch every row" query must use
@@ -49,6 +50,23 @@ export async function fetchIpos(): Promise<Ipo[]> {
     "cik, accession_number, company_name, ticker, form, status, is_spac, price, shares, proceeds, offering_type, filing_url, filed_at",
     { col: "filed_at", asc: false },
   );
+}
+
+// Daily Reddit most-discussed snapshots (reddit_trends), global/market-wide.
+// A bounded recency window (~top-50/day × `days`, well under one PostgREST page)
+// ordered newest day first, best rank first — the Reddit Buzz view splits it into
+// today's leaderboard + per-ticker mention history client-side. Returns [] on error.
+export async function fetchRedditTrends(days = 10): Promise<RedditTrend[]> {
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+  const { data, error } = await supabase
+    .from("reddit_trends")
+    .select("trend_date, ticker, name, rank, mentions, upvotes, rank_change, mentions_change, sentiment, sentiment_score, source")
+    .gte("trend_date", cutoff)
+    .order("trend_date", { ascending: false })
+    .order("rank", { ascending: true })
+    .limit(1000);
+  if (error || !data) return [];
+  return data as unknown as RedditTrend[];
 }
 
 export async function fetchCompanies(): Promise<Company[]> {

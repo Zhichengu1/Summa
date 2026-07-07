@@ -21,6 +21,7 @@ const NewsPage = dynamic(() => import("../views/NewsPage").then((m) => ({ defaul
 const CalendarView = dynamic(() => import("../views/CalendarView").then((m) => ({ default: m.CalendarView })), { ssr: false, loading: viewLoading });
 const ManagersPage = dynamic(() => import("../views/ManagersPage").then((m) => ({ default: m.ManagersPage })), { ssr: false, loading: viewLoading });
 const IposPage = dynamic(() => import("../views/IposPage").then((m) => ({ default: m.IposPage })), { ssr: false, loading: viewLoading });
+const RedditPage = dynamic(() => import("../views/RedditPage").then((m) => ({ default: m.RedditPage })), { ssr: false, loading: viewLoading });
 const GuidePage = dynamic(() => import("../views/GuidePage").then((m) => ({ default: m.GuidePage })), { ssr: false, loading: viewLoading });
 const CompanyPage = dynamic(() => import("../views/company/CompanyPage").then((m) => ({ default: m.CompanyPage })), { ssr: false, loading: viewLoading });
 import {
@@ -59,6 +60,7 @@ export default function Page() {
       if (h === "calendar") { setView("calendar"); setActiveCik(null); return; }
       if (h === "managers") { setView("managers"); setActiveCik(null); return; }
       if (h === "ipos") { setView("ipos"); setActiveCik(null); return; }
+      if (h === "reddit") { setView("reddit"); setActiveCik(null); return; }
       if (h === "guide") { setView("guide"); setActiveCik(null); return; }
       const m = h.match(/^c=([^/]+)(?:\/(.*))?$/);
       if (m) {
@@ -191,6 +193,7 @@ export default function Page() {
         onCalendar={() => navigate("calendar")}
         onManagers={() => navigate("managers")}
         onIpos={() => navigate("ipos")}
+        onReddit={() => navigate("reddit")}
         onGuide={() => navigate("guide")}
         onRemove={handleRemove}
         newFilings={newFilings}
@@ -222,6 +225,9 @@ export default function Page() {
               <ManagersPage companies={watchCompanies} onCompany={openCompany} />
             )}
             {view === "ipos" && <IposPage />}
+            {view === "reddit" && (
+              <RedditPage companies={watchCompanies} onCompany={openCompany} />
+            )}
             {view === "guide" && <GuidePage />}
             {view === "company" && activeCik && (
               <CompanyPage

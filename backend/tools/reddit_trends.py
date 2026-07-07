@@ -5,15 +5,18 @@ Thin entry point around ingest.reddit_trends_ingest: pulls the latest most-
 discussed stock tickers from the free ApeWisdom + Tradestie aggregator APIs and
 refreshes today's ranked snapshot. The day's first run posts the full Discord
 digest (watchlist tickers starred, live prices attached); intraday re-runs stay
-quiet unless a ticker newly surges into the top ranks. Zero EDGAR load and
-edgar-free by design (db + stdlib HTTP only), so the workflow installs just
+quiet unless a ticker newly surges into the top ranks. Pass --force (or set
+REDDIT_TRENDS_FORCE_DIGEST=1) to post the full digest even when today's snapshot
+already exists — for manual runs that should always be visible. Zero EDGAR load
+and edgar-free by design (db + stdlib HTTP only), so the workflow installs just
 requirements-news.txt. A silent no-op on the Discord side when neither
 DISCORD_REDDIT_WEBHOOK_URL nor DISCORD_WEBHOOK_URL is set.
 
-Run:  python -m tools.reddit_trends
+Run:  python -m tools.reddit_trends [--force]
 """
 
 import logging
+import os
 import sys
 
 from dotenv import load_dotenv
@@ -38,8 +41,10 @@ logger = logging.getLogger("summa.reddit")
 
 def main() -> int:
     """Run the global Reddit-trends pass once."""
-    written = reddit_trends_ingest.ingest_reddit_trends_global()
-    logger.info("reddit trends: %d tickers stored", written)
+    force = "--force" in sys.argv[1:] or os.environ.get("REDDIT_TRENDS_FORCE_DIGEST") == "1"
+    written = reddit_trends_ingest.ingest_reddit_trends_global(force_digest=force)
+    logger.info("reddit trends: %d tickers stored%s", written,
+                " (digest forced)" if force else "")
     return 0
 
 

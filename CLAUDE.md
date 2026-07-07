@@ -107,7 +107,8 @@ Summa/
     ├── views/                     ← top-level page views (own their data/effects):
     │   │                            Sidebar, TopBar (command bar: SEC-index ticker search + market
     │   │                            session status/ET clock), OverviewPage, ScannerSection (+ MomentumScanner),
-    │   │                            SearchPage, FeedPage, NewsPage, CalendarView, ManagersPage, IposPage, GuidePage
+    │   │                            SearchPage, FeedPage, NewsPage, CalendarView, ManagersPage, IposPage,
+    │   │                            RedditPage (Reddit Buzz leaderboard over reddit_trends), GuidePage
     │   └── company/               ← the per-company page + its tabs:
     │                                CompanyPage, CompanyOverviewTab, StrategyTab, FundamentalsTab,
     │                                PeersTab, OwnershipTab, CatalystsTab, FilingsTab, NewsTab, companyAux.ts (shared CompanyAux)
@@ -285,7 +286,7 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `daily_prices` | cik+date | Yahoo EOD bars |
 | `company_news` | (cik, guid) | Trader-important Google News headlines per company (recency + importance gated at ingest; 30-day rolling window) |
 | `market_news` | `guid` | GLOBAL curated market-mover feed (SEC/Fed/FDA/PRN), importance-filtered (30-day window) |
-| `reddit_trends` | trend_date+ticker | GLOBAL daily top-N most-discussed tickers on the investing subreddits (ApeWisdom ranks + optional Tradestie WSB sentiment; 30-day window) |
+| `reddit_trends` | trend_date+ticker | GLOBAL daily top-N most-discussed tickers on the investing subreddits (ApeWisdom ranks + optional Tradestie WSB sentiment; 30-day window; surfaced by the Reddit Buzz view via `fetchRedditTrends`) |
 | `company_profiles` | `cik` | SIC industry/sector |
 | `company_themes` | cik+name | Recomputed theme tags (delete+insert per cik) |
 | `entities` | `match_key` | Global entity-context registry (seeded) |
@@ -405,7 +406,11 @@ ranks 4–10 / 11–20 as one-liner fields; the title carries the trend date),
 outside the top-20 — whose mentions ≥ MIN (default 25) and at least doubled in 24h,
 jumped ≥15 rank spots, or are new to the board; alert-only, never stored), `REDDIT_TRENDS_FILTER` (ApeWisdom subreddit universe,
 default `all-stocks`), `REDDIT_TRENDS_SURGE_N` (intraday runs alert only tickers newly in
-the top N that earlier ranked past 20 or not at all, default 5), `REDDIT_TRENDS_PRICES`
+the top N that earlier ranked past 20 or not at all, default 5),
+`REDDIT_TRENDS_FORCE_DIGEST` (`"1"` — or `--force` on `tools.reddit_trends` — posts the
+full daily digest even when today's snapshot already exists; the summa-reddit
+workflow_dispatch `force_digest` input sets it, so a manual run is always visible instead
+of a silent surge-only refresh), `REDDIT_TRENDS_PRICES`
 (attach live Yahoo last-price/day-% to alerted tickers, default on; `"0"` disables),
 `DISCORD_REDDIT_WEBHOOK_URL` (optional dedicated Discord channel
 for the Reddit digest; falls back to `DISCORD_WEBHOOK_URL`), `MARKET_NEWS_FEEDS` (override the curated source list as

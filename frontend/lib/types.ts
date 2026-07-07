@@ -209,6 +209,23 @@ export type MarketNews = {
   published_at: string | null;
 };
 
+// One row per (day, ticker) in the daily Reddit most-discussed snapshot (backend
+// ingest/reddit_trends_ingest.py → reddit_trends). GLOBAL market buzz, not
+// watchlist-scoped; ~30-day rolling window. Powers the Reddit Buzz view.
+export type RedditTrend = {
+  trend_date: string;           // ISO date (UTC snapshot day)
+  ticker: string;
+  name: string | null;
+  rank: number | null;          // 1 = most discussed that day
+  mentions: number | null;
+  upvotes: number | null;
+  rank_change: number | null;   // vs 24h ago; positive = climbing
+  mentions_change: number | null;
+  sentiment: string | null;     // 'Bullish' | 'Bearish' (Tradestie WSB)
+  sentiment_score: number | null;
+  source: string | null;
+};
+
 export type DailyPrice = {
   cik: string;
   ticker: string | null;
@@ -252,7 +269,7 @@ export type PeriodType = "annual" | "quarterly";
 // ─── View routing ───────────────────────────────────────────────────────────────
 // The top-level dashboard view and the per-company tab. Shared by the root Page,
 // the Sidebar, and CompanyPage so the hash router and the components agree.
-export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "guide" | "company";
+export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "guide" | "company";
 export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings" | "news";
 
 // ─── Reference data (backend-populated; read once per session) ──────────────────
