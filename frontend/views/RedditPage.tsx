@@ -5,7 +5,9 @@
 // not watchlist-scoped — watchlist tickers get a ⭐ and click through to their
 // company page. A day-chip row flips between stored snapshots, and each ticker
 // gets a mentions sparkline across the fetched window so a one-day spike reads
-// differently from sustained chatter.
+// differently from sustained chatter. Rows carry the ingest's persisted price
+// context, so 💎 "value picks" — trending names deep below their 52-week high —
+// are highlighted inline and filterable (mirrors the backend Discord screen).
 import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
@@ -13,6 +15,19 @@ import { Sparkline } from "../components/charts/Sparkline";
 import { fetchRedditTrends } from "../lib/data/data";
 import { fmtNum, fmtDate } from "../lib/utils/format";
 import type { Company, RedditTrend } from "../lib/types";
+
+// Mirrors the backend value screen (reddit_trends_ingest._find_value_picks):
+// trending non-ETF name, not read bearish, real mention count, whose latest
+// price sits at the bottom of its 52-week range — deep below the high or
+// within a few percent of the low.
+const VALUE_OFF_HIGH = -50;
+const VALUE_NEAR_LOW = 10;
+const VALUE_MIN_MENTIONS = 25;
+function isValuePick(r: RedditTrend): boolean {
+  if (r.is_etf || (r.mentions ?? 0) < VALUE_MIN_MENTIONS || /bear/i.test(r.sentiment ?? "")) return false;
+  return (r.off_high_pct != null && r.off_high_pct <= VALUE_OFF_HIGH)
+    || (r.off_low_pct != null && r.off_low_pct <= VALUE_NEAR_LOW);
+}
 
 function SentimentBadge({ sentiment }: { sentiment: string | null }) {
   if (!sentiment) return <span className="muted">—</span>;
@@ -48,6 +63,7 @@ export function RedditPage({ companies, onCompany }: {
   const [loading, setLoading] = useState(true);
   const [day, setDay] = useState<string | null>(null);   // null → latest
   const [watchOnly, setWatchOnly] = useState(false);
+  const [valueOnly, setValueOnly] = useState(false);
   const [q, setQ] = useState("");
 
   useEffect(() => {
@@ -89,13 +105,15 @@ export function RedditPage({ companies, onCompany }: {
   const displayed = useMemo(() => {
     let r = rows.filter((x) => x.trend_date === activeDay);
     if (watchOnly) r = r.filter((x) => watchByTicker.has(x.ticker));
+    if (valueOnly) r = r.filter(isValuePick);
     if (q.trim()) {
       const n = q.toLowerCase();
       r = r.filter((x) =>
-        x.ticker.toLowerCase().includes(n) || (x.name ?? "").toLowerCase().includes(n));
+        x.ticker.toLowerCase().includes(n) || (x.name ?? "").toLowerCase().includes(n)
+        || (x.industry ?? "").toLowerCase().includes(n) || (x.sector ?? "").toLowerCase().includes(n));
     }
     return r;
-  }, [rows, activeDay, watchOnly, watchByTicker, q]);
+  }, [rows, activeDay, watchOnly, valueOnly, watchByTicker, q]);
 
   const cols: Column<RedditTrend>[] = [
     { key: "rank", header: "#", width: "44px", align: "right", value: (r) => r.rank ?? 9_999,
@@ -105,16 +123,26 @@ export function RedditPage({ companies, onCompany }: {
           color: r.rank != null && r.rank <= 3 ? "var(--accent)" : "var(--fg-3)",
         }}>{r.rank ?? "—"}</span>
       ) },
-    { key: "ticker", header: "Ticker", width: "92px", value: (r) => r.ticker,
+    { key: "ticker", header: "Ticker", width: "104px", value: (r) => r.ticker,
       render: (r) => (
         <span style={{ color: "var(--accent)", fontWeight: 700, whiteSpace: "nowrap" }}>
           {r.ticker}{watchByTicker.has(r.ticker) && (
             <span title="On your watchlist" style={{ marginLeft: 4 }}>⭐</span>
+          )}{isValuePick(r) && (
+            <span title={`Value pick: trending at the bottom of its 52-week range (${fmtNum(Math.abs(r.off_high_pct ?? 0), 0)}% below the high${r.off_low_pct != null ? `, ${fmtNum(r.off_low_pct, 0)}% above the low` : ""})`}
+              style={{ marginLeft: 4 }}>💎</span>
           )}
         </span>
       ) },
     { key: "name", header: "Company", value: (r) => r.name ?? "",
       render: (r) => <span className={r.name ? undefined : "muted"}>{r.name ?? "—"}</span> },
+    { key: "industry", header: "Industry", width: "170px", value: (r) => r.industry ?? "",
+      render: (r) => r.industry ? (
+        <span className="muted" title={r.sector ? `Sector: ${r.sector}` : undefined}
+          style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block", maxWidth: 160 }}>
+          {r.is_etf ? "ETF / index" : r.industry}
+        </span>
+      ) : <span className="muted">{r.is_etf ? "ETF / index" : "—"}</span> },
     { key: "mentions", header: "Mentions", width: "96px", align: "right",
       value: (r) => r.mentions ?? -1,
       render: (r) => <span style={{ fontWeight: 700 }}>{r.mentions != null ? fmtNum(r.mentions, 0) : "—"}</span> },
@@ -127,6 +155,34 @@ export function RedditPage({ companies, onCompany }: {
     { key: "upvotes", header: "Upvotes", width: "90px", align: "right",
       value: (r) => r.upvotes ?? -1,
       render: (r) => <span className="muted">{r.upvotes != null ? fmtNum(r.upvotes, 0) : "—"}</span> },
+    { key: "price", header: "Price", width: "112px", align: "right",
+      value: (r) => r.last_price ?? -1,
+      render: (r) => r.last_price == null ? <span className="muted">—</span> : (
+        <span style={{ whiteSpace: "nowrap" }}>
+          <span style={{ fontWeight: 600 }}>${fmtNum(r.last_price, 2)}</span>
+          {r.day_pct != null && (
+            <span style={{ marginLeft: 6, fontSize: 11, color: r.day_pct >= 0 ? "var(--pos)" : "var(--neg)" }}>
+              {r.day_pct >= 0 ? "▲" : "▼"}{fmtNum(Math.abs(r.day_pct), 1)}%
+            </span>
+          )}
+        </span>
+      ) },
+    { key: "offhigh", header: "vs 52w high", width: "104px", align: "right",
+      value: (r) => r.off_high_pct ?? 1,
+      render: (r) => {
+        if (r.off_high_pct == null) return <span className="muted">—</span>;
+        const deep = r.off_high_pct <= VALUE_OFF_HIGH;
+        const title = r.off_low_pct != null
+          ? `${fmtNum(r.off_low_pct, 0)}% above its 52-week low` : undefined;
+        return (
+          <span title={title} style={{
+            fontWeight: deep ? 700 : 500,
+            color: deep ? "#f59e0b" : r.off_high_pct >= -5 ? "var(--pos)" : "var(--fg-3)",
+          }}>
+            {r.off_high_pct >= -5 ? "near high" : `−${fmtNum(Math.abs(r.off_high_pct), 0)}%`}
+          </span>
+        );
+      } },
     { key: "sentiment", header: "WSB mood", width: "104px", value: (r) => r.sentiment ?? "",
       render: (r) => <SentimentBadge sentiment={r.sentiment} /> },
     { key: "spark", header: `Mentions · ${days.length}d`, width: "104px", value: () => null,
@@ -171,6 +227,11 @@ export function RedditPage({ companies, onCompany }: {
         <button className={`chip${watchOnly ? " active" : ""}`} title="Only tickers on your watchlist"
           onClick={() => setWatchOnly((v) => !v)}>
           ⭐ Watchlist only
+        </button>
+        <button className={`chip${valueOnly ? " active" : ""}`}
+          title={`Trending non-ETF names ≥${Math.abs(VALUE_OFF_HIGH)}% below their 52-week high or within ${VALUE_NEAR_LOW}% of their 52-week low (not read bearish)`}
+          onClick={() => setValueOnly((v) => !v)}>
+          💎 Value picks
         </button>
       </div>
       <DataTable

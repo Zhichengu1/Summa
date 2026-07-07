@@ -536,6 +536,21 @@ CREATE TABLE IF NOT EXISTS reddit_trends (
 );
 CREATE INDEX IF NOT EXISTS idx_reddit_trends_day ON reddit_trends (trend_date DESC, rank ASC);
 
+-- Price context per stored ticker (Yahoo keyless chart endpoint, same source as
+-- price_ingest) — lets the Reddit Buzz view + the "high buzz, low price" Discord
+-- screen cross-reference chatter with where the stock trades in its 52-week
+-- range. Snapshot display data, not a price warehouse (daily_prices remains that).
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS last_price   NUMERIC;  -- live/latest close
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS day_pct      NUMERIC;  -- % vs prior session
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS off_high_pct NUMERIC;  -- % below 52w high (negative)
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS off_low_pct  NUMERIC;  -- % above 52w low (small = near low)
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS is_etf       BOOLEAN;  -- index/ETF chatter, excluded from the value screen
+-- Industry labels resolved at ingest (prior stored labels → curated
+-- company_profiles → SEC submissions SIC) so market-wide tickers read as
+-- companies, not just symbols.
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS sector       TEXT;
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS industry     TEXT;
+
 ALTER TABLE reddit_trends ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON reddit_trends FROM anon, authenticated;
 GRANT SELECT ON reddit_trends TO anon;

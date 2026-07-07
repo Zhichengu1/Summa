@@ -224,6 +224,16 @@ export type RedditTrend = {
   sentiment: string | null;     // 'Bullish' | 'Bearish' (Tradestie WSB)
   sentiment_score: number | null;
   source: string | null;
+  // Price context persisted by the ingest (Yahoo; null until schema.sql is
+  // re-applied or when the ticker's quote was unavailable that run).
+  last_price: number | null;
+  day_pct: number | null;       // % vs prior session
+  off_high_pct: number | null;  // % below 52-week high (negative)
+  off_low_pct: number | null;   // % above 52-week low (small = at the low)
+  is_etf: boolean | null;
+  // Industry labels resolved at ingest (curated profiles → SEC SIC).
+  sector: string | null;
+  industry: string | null;
 };
 
 export type DailyPrice = {

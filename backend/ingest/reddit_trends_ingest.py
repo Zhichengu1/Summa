@@ -41,9 +41,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import db
+from ingest.sic_map import sic_label
 
 try:
     from enrichment import discord_notify
@@ -77,8 +80,39 @@ _RISING_MIN_MENTIONS = int(os.environ.get("REDDIT_TRENDS_RISING_MIN", "25"))
 _RISING_GROWTH = 2.0    # qualify: mentions at least doubled in 24h…
 _RISING_RANK_JUMP = 15  # …or climbed ≥ this many leaderboard spots
 # Attach a live last-price + day-% to digest tickers (Yahoo chart endpoint,
-# keyless — the same free source price_ingest uses). "0" disables.
+# keyless — the same free source price_ingest uses). "0" disables. When on, the
+# stored top-N snapshot rows also persist their price context (last_price /
+# day_pct / off_high_pct / off_low_pct / is_etf) so the Reddit Buzz view and the
+# value screen can cross-reference chatter with the 52-week range.
 _WITH_PRICES = os.environ.get("REDDIT_TRENDS_PRICES", "1") != "0"
+_STORE_PRICE_BUDGET_S = 45  # wall-clock cap for pricing the whole stored top-N
+# "💎 High buzz, low price" screen (daily digest only): trending non-ETF names,
+# not read bearish, with a real mention count, whose LATEST price sits at the
+# bottom of the 52-week range — at least VALUE_OFF_HIGH % below the 52-week high
+# or within VALUE_NEAR_LOW % of the 52-week low. Nearest-the-low ranks first.
+_VALUE_OFF_HIGH = float(os.environ.get("REDDIT_TRENDS_VALUE_OFF_HIGH", "50"))
+_VALUE_NEAR_LOW = float(os.environ.get("REDDIT_TRENDS_VALUE_NEAR_LOW", "10"))
+_VALUE_N = int(os.environ.get("REDDIT_TRENDS_VALUE_N", "5"))
+
+# Industry labelling: resolve each stored ticker's (sector, industry) once —
+# prior stored labels → curated company_profiles → SEC submissions API (SIC).
+# The SEC step is keyless (data.sec.gov, fair-access UA) and budget-capped; a
+# ticker labelled once is cached in its own rows and never re-fetched.
+_SEC_SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik}.json"
+# Bundled ticker→CIK index (built weekly by tools/build_sec_index.py). This file
+# lives in backend/ingest/, so the repo root is two parents up.
+_SEC_INDEX_PATH = (Path(__file__).resolve().parents[2]
+                   / "frontend" / "public" / "sec-companies.json")
+_INDUSTRY_BUDGET_S = 20
+
+# Columns that exist on the reddit_trends table — rows carry extra display-only
+# keys (vol_spike, ret_5d, mentions_growth, …) that must never reach the upsert.
+_DB_COLS = ("trend_date", "ticker", "name", "rank", "mentions", "upvotes",
+            "rank_change", "mentions_change", "sentiment", "sentiment_score", "source",
+            "last_price", "day_pct", "off_high_pct", "off_low_pct", "is_etf",
+            "sector", "industry")
+# Pre-price/industry-columns schema, the fallback until schema.sql is re-applied.
+_LEGACY_COLS = _DB_COLS[:11]
 _YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{t}?range=3mo&interval=1d"
 # ApeWisdom filter: which subreddit universe to rank ("all-stocks" spans
 # wallstreetbets + stocks + investing + …; can be a single subreddit name).
@@ -88,11 +122,12 @@ _APE_FILTER = os.environ.get("REDDIT_TRENDS_FILTER", "all-stocks")
 _TICKER_RE = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
 
 
-def _get_json(url: str, attempts: int = _MAX_ATTEMPTS, timeout: int = _TIMEOUT) -> Any | None:
+def _get_json(url: str, attempts: int = _MAX_ATTEMPTS, timeout: int = _TIMEOUT,
+              headers: dict[str, str] | None = None) -> Any | None:
     """Fetch and decode a JSON endpoint, or None on failure (best-effort, short backoff)."""
     for attempt in range(1, attempts + 1):
         try:
-            req = urllib.request.Request(url, headers=_HEADERS)
+            req = urllib.request.Request(url, headers=headers or _HEADERS)
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, ValueError):
@@ -163,19 +198,20 @@ def _fetch_tradestie() -> dict[str, dict[str, Any]]:
     return out
 
 
-def _price_context(tickers: list[str]) -> dict[str, dict[str, Any]]:
+def _price_context(tickers: list[str], budget_s: float = 25) -> dict[str, dict[str, Any]]:
     """Live trader stats for `tickers` via Yahoo's keyless chart endpoint (3mo daily).
 
     One small GET per ticker yields everything a trader glances at before touching
     a Reddit-trending name: last price + day %, 5-session momentum, today's volume
     vs its 30-day average (is the buzz backed by real trading?), distance off the
-    52-week high, and an ETF flag (so index chatter reads as such). Single attempt,
-    fail-soft per ticker — a miss just drops the stats from that line, never the
-    line itself. Display-only: never stored (daily_prices remains the priced
-    warehouse).
+    52-week high AND above the 52-week low (the value screen's inputs), and an ETF
+    flag (so index chatter reads as such). Single attempt, fail-soft per ticker —
+    a miss just drops the stats from that line, never the line itself. The
+    last_price/day_pct/off_high_pct/off_low_pct/is_etf subset is persisted onto
+    the day's snapshot rows; the rest is display-only.
     """
     out: dict[str, dict[str, Any]] = {}
-    deadline = time.monotonic() + 25  # wall-clock budget for the whole pass
+    deadline = time.monotonic() + budget_s  # wall-clock budget for the whole pass
     for t in tickers:
         if time.monotonic() > deadline:
             logger.warning("  reddit_trends: price-context budget hit at %s — "
@@ -186,7 +222,7 @@ def _price_context(tickers: list[str]) -> dict[str, dict[str, Any]]:
             result = data["chart"]["result"][0]
             meta = result["meta"]
             last = float(meta["regularMarketPrice"])
-            ctx: dict[str, Any] = {"last_price": last}
+            ctx: dict[str, Any] = {"last_price": round(last, 4)}
             quote = result["indicators"]["quote"][0]
             closes = [c for c in (quote.get("close") or []) if c]
             vols = [v for v in (quote.get("volume") or []) if v]
@@ -195,12 +231,15 @@ def _price_context(tickers: list[str]) -> dict[str, dict[str, Any]]:
             # it here once produced a "+160%" day move.) closes[-1] is today's
             # live/final bar, closes[-2] the previous session.
             if len(closes) >= 2 and closes[-2] > 0:
-                ctx["day_pct"] = (last / closes[-2] - 1.0) * 100.0
+                ctx["day_pct"] = round((last / closes[-2] - 1.0) * 100.0, 2)
             if str(meta.get("instrumentType") or "").upper() == "ETF":
                 ctx["is_etf"] = True
             hi52 = meta.get("fiftyTwoWeekHigh")
             if hi52 and float(hi52) > 0:
-                ctx["off_high_pct"] = (last / float(hi52) - 1.0) * 100.0
+                ctx["off_high_pct"] = round((last / float(hi52) - 1.0) * 100.0, 2)
+            lo52 = meta.get("fiftyTwoWeekLow")
+            if lo52 and float(lo52) > 0:
+                ctx["off_low_pct"] = round((last / float(lo52) - 1.0) * 100.0, 2)
             if len(closes) >= 6 and closes[-6] > 0:
                 ctx["ret_5d"] = (last / closes[-6] - 1.0) * 100.0
             if len(vols) >= 11:  # today vs the average of the prior sessions
@@ -247,6 +286,93 @@ def _find_rising(ranking: list[dict[str, Any]], exclude: set[str]) -> list[dict[
     out.sort(key=lambda r: (r.get("mentions_growth") or 1.0,
                             r.get("rank_change") or 0), reverse=True)
     return out[:_RISING_N]
+
+
+@lru_cache(maxsize=1)
+def _sec_cik_map() -> dict[str, str]:
+    """Ticker → zero-padded CIK from the bundled SEC index. {} if unavailable."""
+    try:
+        with _SEC_INDEX_PATH.open(encoding="utf-8") as fh:
+            return {str(r["ticker"]).upper(): str(r["cik"])
+                    for r in json.load(fh) if r.get("ticker") and r.get("cik")}
+    except Exception:
+        logger.warning("  reddit_trends: SEC index unavailable at %s — "
+                       "industry labels limited to stored/profile sources", _SEC_INDEX_PATH)
+        return {}
+
+
+def _industry_labels(tickers: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """(sector, industry) per ticker, cheapest source first.
+
+    1. Labels already stored on any prior reddit_trends row (free — the cache).
+    2. Curated company_profiles for watchlist names (seeded industries beat SIC).
+    3. SEC submissions API: ticker → CIK via the bundled index, then the filer's
+       SIC code/description mapped through sic_map — works for any US filer,
+       keyless. Budget-capped and politely spaced; unresolved tickers just stay
+       unlabelled until a later run. Fail-soft throughout.
+    """
+    out = db.fetch_reddit_industry_map(tickers)
+    missing = [t for t in tickers if t not in out]
+    if missing:
+        out.update(db.fetch_profiles_by_ticker(missing))
+        missing = [t for t in missing if t not in out]
+    if not missing:
+        return out
+    cik_map = _sec_cik_map()
+    ua = os.environ.get("EDGAR_IDENTITY") or _HEADERS["User-Agent"]
+    deadline = time.monotonic() + _INDUSTRY_BUDGET_S
+    fetched = 0
+    for t in missing:
+        cik = cik_map.get(t)
+        if not cik:
+            continue  # not an EDGAR filer (foreign listing, crypto ticker, …)
+        if time.monotonic() > deadline:
+            logger.info("  reddit_trends: industry budget hit — %s et al. label next run", t)
+            break
+        data = _get_json(_SEC_SUBMISSIONS.format(cik=cik), attempts=1, timeout=8,
+                         headers={"User-Agent": ua})
+        if not isinstance(data, dict):
+            continue
+        sic: int | None = None
+        try:
+            sic = int(str(data.get("sic") or "").strip())
+        except (TypeError, ValueError):
+            pass
+        desc = (str(data.get("sicDescription") or "").strip() or None)
+        sector, industry = sic_label(sic, desc)
+        if industry or sector:
+            out[t] = (sector, industry)
+            fetched += 1
+        time.sleep(0.12)  # stay well under SEC's ~10 req/s fair-access ceiling
+    if fetched:
+        logger.info("  reddit_trends: labelled %d new tickers via SEC SIC", fetched)
+    return out
+
+
+def _find_value_picks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """High-potential-at-low-price screen over today's priced snapshot rows.
+
+    Keeps trending names (they're on the board, so the crowd already cares)
+    whose latest price sits at the bottom of the 52-week range — ≥ _VALUE_OFF_HIGH %
+    below the high, or within _VALUE_NEAR_LOW % of the low — excluding ETFs
+    (index chatter, not a company), Tradestie-bearish reads, and thin-mention
+    noise. Nearest the 52-week low first (the "latest lowest price" ordering),
+    capped at _VALUE_N. Chatter + a beaten-down price is a starting point for
+    research, not a buy signal — the embed says so too.
+    """
+    def _qualifies(r: dict[str, Any]) -> bool:
+        if r.get("is_etf") or (r.get("sentiment") or "").strip().lower() == "bearish":
+            return False
+        if (r.get("mentions") or 0) < _RISING_MIN_MENTIONS:
+            return False
+        oh, ol = r.get("off_high_pct"), r.get("off_low_pct")
+        return ((oh is not None and oh <= -_VALUE_OFF_HIGH)
+                or (ol is not None and ol <= _VALUE_NEAR_LOW))
+
+    picks = [r for r in rows if _qualifies(r)]
+    picks.sort(key=lambda r: (r["off_low_pct"] if r.get("off_low_pct") is not None else 9e9,
+                              r.get("off_high_pct") or 0))
+    return picks[:_VALUE_N]
 
 
 def _watchlist_tickers() -> set[str]:
@@ -304,21 +430,55 @@ def ingest_reddit_trends_global(force_digest: bool = False) -> int:
     for r in rows:
         r["trend_date"] = trend_date
 
+    # Price the whole stored top-N up front (one small Yahoo GET per ticker) so
+    # the snapshot rows persist their 52-week-range context — the frontend value
+    # highlight and the "high buzz, low price" screen both read it.
+    if _WITH_PRICES:
+        prices = _price_context([r["ticker"] for r in rows], budget_s=_STORE_PRICE_BUDGET_S)
+        for r in rows:
+            r.update(prices.get(r["ticker"], {}))
+
+    # Label every stored ticker with its (sector, industry) — cached from prior
+    # rows, curated profiles, or SEC SIC. Fail-soft: an unlabelled ticker is
+    # stored anyway and picked up on a later run.
+    try:
+        labels = _industry_labels([r["ticker"] for r in rows])
+        for r in rows:
+            sector, industry = labels.get(r["ticker"], (None, None))
+            if sector:
+                r["sector"] = sector
+            if industry:
+                r["industry"] = industry
+    except Exception:
+        logger.exception("  reddit_trends: industry labelling failed — storing unlabelled")
+
     # What today's snapshot looked like BEFORE this refresh — decides whether we
     # post the full digest (first run of the day) or only surge deltas.
     prior_ranks: dict[str, int | None] = {
         r["ticker"]: r.get("rank") for r in db.fetch_reddit_trends_day(trend_date)
     }
 
-    written = db.upsert_reddit_trends(rows)
+    # Rows carry display-only keys (vol_spike, ret_5d, …) — upsert only real
+    # columns. If the price columns aren't in the live schema yet (schema.sql
+    # not re-applied), fall back to the legacy column set so the snapshot is
+    # never lost to a migration gap.
+    try:
+        written = db.upsert_reddit_trends(
+            [{k: r[k] for k in _DB_COLS if k in r} for r in rows])
+    except Exception:
+        logger.warning("  reddit_trends: upsert with price columns failed — "
+                       "re-run schema.sql to add them; storing legacy columns only")
+        written = db.upsert_reddit_trends(
+            [{k: r[k] for k in _LEGACY_COLS if k in r} for r in rows])
     logger.info("  reddit_trends: stored %d tickers for %s (%s)", written, trend_date,
                 "first snapshot" if not prior_ranks else "refresh")
 
     if discord_notify is None:
         return written
 
+    daily = not prior_ranks or force_digest  # full-digest run vs intraday refresh
     rising: list[dict[str, Any]] = []
-    if not prior_ranks or force_digest:
+    if daily:
         if force_digest and prior_ranks:
             logger.info("  reddit_trends: full digest forced (snapshot already existed)")
         alert = rows[:_ALERT_N]
@@ -342,15 +502,32 @@ def ingest_reddit_trends_global(force_digest: bool = False) -> int:
     if not alert:
         return written
 
-    if _WITH_PRICES:  # live trader context on just the alerted + rising tickers
+    if _WITH_PRICES:
+        # Stored rows were priced above; the rising picks live past the stored
+        # top-N, so price just the ones the digest will actually show.
         shown = alert + rising
-        prices = _price_context([r["ticker"] for r in shown])
-        for r in shown:
-            r.update(prices.get(r["ticker"], {}))
+        need = [r["ticker"] for r in shown if "last_price" not in r]
+        if need:
+            prices = _price_context(need)
+            for r in shown:
+                r.update(prices.get(r["ticker"], {}))
+    watched = _watchlist_tickers()
     try:
         discord_notify.notify_reddit_trends(
-            alert, watchlist_tickers=_watchlist_tickers(),
-            surge=bool(prior_ranks) and not force_digest, rising=rising)
+            alert, watchlist_tickers=watched,
+            surge=not daily, rising=rising)
     except Exception:
         logger.exception("  reddit_trends: Discord notify failed")
+
+    # Daily-only companion screen: trending names sitting deep below their
+    # 52-week high — high crowd interest at a low price. Needs the price pass.
+    if daily and _WITH_PRICES:
+        picks = _find_value_picks(rows)
+        if picks:
+            logger.info("  reddit_trends: value picks (≥%.0f%% off 52w high): %s",
+                        _VALUE_OFF_HIGH, ", ".join(r["ticker"] for r in picks))
+            try:
+                discord_notify.notify_reddit_value_picks(picks, watchlist_tickers=watched)
+            except Exception:
+                logger.exception("  reddit_trends: value-picks notify failed")
     return written

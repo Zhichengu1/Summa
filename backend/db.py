@@ -138,6 +138,59 @@ def fetch_reddit_trends_day(trend_date: str) -> list[dict[str, Any]]:
         return []
 
 
+def fetch_reddit_industry_map(tickers: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """Most-recent stored (sector, industry) per ticker from reddit_trends.
+
+    The Reddit-trends industry labeller's cache layer: a ticker labelled on any
+    prior snapshot day never re-hits SEC. Fails soft to {}.
+    """
+    if not tickers:
+        return {}
+    try:
+        result = (
+            get_client().table("reddit_trends")
+            .select("ticker, sector, industry, trend_date")
+            .in_("ticker", tickers).not_.is_("industry", "null")
+            .order("trend_date", desc=True).limit(1000).execute()
+        )
+        out: dict[str, tuple[str | None, str | None]] = {}
+        for r in result.data or []:
+            t = r["ticker"]
+            if t not in out:
+                out[t] = (r.get("sector"), r.get("industry"))
+        return out
+    except Exception:
+        logger.exception("fetch_reddit_industry_map failed")
+        return {}
+
+
+def fetch_profiles_by_ticker(tickers: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """(sector, industry) per ticker from the curated company_profiles (watchlist names).
+
+    Joins companies (ticker → cik) to company_profiles client-side — two small
+    queries. The richest label source (seeded industries beat raw SIC). Fails
+    soft to {}.
+    """
+    if not tickers:
+        return {}
+    try:
+        client = get_client()
+        cos = (client.table("companies").select("cik, ticker")
+               .in_("ticker", tickers).execute().data or [])
+        cik_to_ticker = {c["cik"]: c["ticker"] for c in cos if c.get("ticker")}
+        if not cik_to_ticker:
+            return {}
+        profs = (client.table("company_profiles").select("cik, sector, industry")
+                 .in_("cik", list(cik_to_ticker)).execute().data or [])
+        return {
+            cik_to_ticker[p["cik"]].upper(): (p.get("sector"), p.get("industry"))
+            for p in profs if p.get("cik") in cik_to_ticker and p.get("industry")
+        }
+    except Exception:
+        logger.exception("fetch_profiles_by_ticker failed")
+        return {}
+
+
 def get_seen_market_guids(guids: list[str]) -> set[str]:
     """Return the subset of `guids` already stored in market_news (chunked)."""
     if not guids:

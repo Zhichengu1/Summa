@@ -286,7 +286,7 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `daily_prices` | cik+date | Yahoo EOD bars |
 | `company_news` | (cik, guid) | Trader-important Google News headlines per company (recency + importance gated at ingest; 30-day rolling window) |
 | `market_news` | `guid` | GLOBAL curated market-mover feed (SEC/Fed/FDA/PRN), importance-filtered (30-day window) |
-| `reddit_trends` | trend_date+ticker | GLOBAL daily top-N most-discussed tickers on the investing subreddits (ApeWisdom ranks + optional Tradestie WSB sentiment; 30-day window; surfaced by the Reddit Buzz view via `fetchRedditTrends`) |
+| `reddit_trends` | trend_date+ticker | GLOBAL daily top-N most-discussed tickers on the investing subreddits (ApeWisdom ranks + optional Tradestie WSB sentiment + persisted Yahoo price context `last_price`/`day_pct`/`off_high_pct`/`off_low_pct`/`is_etf`; 30-day window; surfaced by the Reddit Buzz view via `fetchRedditTrends`) |
 | `company_profiles` | `cik` | SIC industry/sector |
 | `company_themes` | cik+name | Recomputed theme tags (delete+insert per cik) |
 | `entities` | `match_key` | Global entity-context registry (seeded) |
@@ -404,7 +404,16 @@ ranks 4–10 / 11–20 as one-liner fields; the title carries the trend date),
 `REDDIT_TRENDS_RISING_N` / `REDDIT_TRENDS_RISING_MIN` (the daily digest's
 "🌱 Under the radar" field: up to N low-chatter tickers from the FULL fetched board —
 outside the top-20 — whose mentions ≥ MIN (default 25) and at least doubled in 24h,
-jumped ≥15 rank spots, or are new to the board; alert-only, never stored), `REDDIT_TRENDS_FILTER` (ApeWisdom subreddit universe,
+jumped ≥15 rank spots, or are new to the board; alert-only, never stored),
+`REDDIT_TRENDS_VALUE_OFF_HIGH` / `REDDIT_TRENDS_VALUE_NEAR_LOW` / `REDDIT_TRENDS_VALUE_N`
+(the daily "💎 High buzz, low price" companion embed: up to N trending non-ETF, non-bearish
+tickers with ≥25 mentions whose latest price sits at the bottom of the 52-week range —
+at least OFF_HIGH % (default 50) below the high or within NEAR_LOW % (default 10) of the
+low — nearest-the-low first; the same screen the Reddit Buzz view's 💎 highlight/filter
+mirrors client-side from the stored `last_price`/`off_high_pct`/`off_low_pct`/`is_etf`
+columns. Each stored ticker is also labelled with `sector`/`industry` at ingest — prior
+stored labels → curated `company_profiles` → SEC submissions SIC via the bundled
+`sec-companies.json` ticker→CIK index — shown in the view and the embed), `REDDIT_TRENDS_FILTER` (ApeWisdom subreddit universe,
 default `all-stocks`), `REDDIT_TRENDS_SURGE_N` (intraday runs alert only tickers newly in
 the top N that earlier ranked past 20 or not at all, default 5),
 `REDDIT_TRENDS_FORCE_DIGEST` (`"1"` — or `--force` on `tools.reddit_trends` — posts the

@@ -55,16 +55,22 @@ export async function fetchIpos(): Promise<Ipo[]> {
 // Daily Reddit most-discussed snapshots (reddit_trends), global/market-wide.
 // A bounded recency window (~top-50/day × `days`, well under one PostgREST page)
 // ordered newest day first, best rank first — the Reddit Buzz view splits it into
-// today's leaderboard + per-ticker mention history client-side. Returns [] on error.
+// today's leaderboard + per-ticker mention history client-side. The price columns
+// (last_price…is_etf) only exist after the 2026-07 schema.sql re-run, so on a
+// column error we retry with the legacy set instead of blanking the view.
+// Returns [] on (unrecoverable) error.
 export async function fetchRedditTrends(days = 10): Promise<RedditTrend[]> {
   const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-  const { data, error } = await supabase
+  const base = "trend_date, ticker, name, rank, mentions, upvotes, rank_change, mentions_change, sentiment, sentiment_score, source";
+  const query = (cols: string) => supabase
     .from("reddit_trends")
-    .select("trend_date, ticker, name, rank, mentions, upvotes, rank_change, mentions_change, sentiment, sentiment_score, source")
+    .select(cols)
     .gte("trend_date", cutoff)
     .order("trend_date", { ascending: false })
     .order("rank", { ascending: true })
     .limit(1000);
+  let { data, error } = await query(`${base}, last_price, day_pct, off_high_pct, off_low_pct, is_etf, sector, industry`);
+  if (error) ({ data, error } = await query(base));
   if (error || !data) return [];
   return data as unknown as RedditTrend[];
 }

@@ -837,6 +837,94 @@ def notify_reddit_trends(rows: list[dict[str, Any]],
         logger.exception("Discord reddit-trends webhook post failed")
 
 
+def _reddit_line_value(r: dict[str, Any], watched: set[str]) -> str:
+    """One line for a high-buzz-low-price pick: price, 52w-range position, chatter.
+
+    '**INTC**  ·  $18.42 ▼1.2%  ·  📉 58% off 52w high  ·  +6% above 52w low  ·  💬 1.1K  ·  #9  ·  🟢'
+    """
+    parts = [_reddit_ticker_md(r, watched)]
+    name = (str(r.get("name") or "").strip())
+    if name:
+        parts[0] += f" {_label(name, 28)}"
+    industry = (str(r.get("industry") or "").strip())
+    if industry:
+        parts.append(f"🏷️ {_label(industry, 32)}")
+    try:
+        px = f"${float(r['last_price']):,.2f}"
+        day = _pct_tight(r.get("day_pct"))
+        parts.append(f"{px} {day}" if day else px)
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        parts.append(f"📉 {abs(float(r['off_high_pct'])):.0f}% off 52w high")
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        parts.append(f"+{float(r['off_low_pct']):.0f}% above 52w low")
+    except (KeyError, TypeError, ValueError):
+        pass
+    mentions = _fmt_count(r.get("mentions"))
+    if mentions:
+        parts.append(f"💬 {mentions}")
+    try:
+        parts.append(f"#{int(r['rank'])} on the board")
+    except (KeyError, TypeError, ValueError):
+        pass
+    sent = (r.get("sentiment") or "").strip().lower()
+    if sent in _SENTIMENT_EMOJI:
+        parts.append(_SENTIMENT_EMOJI[sent])
+    return "  ·  ".join(parts)
+
+
+def notify_reddit_value_picks(rows: list[dict[str, Any]],
+                              watchlist_tickers: set[str] | None = None) -> None:
+    """Post ONE embed for the "high buzz, low price" screen (daily digest companion).
+
+    `rows` are today's priced reddit_trends row dicts already screened by
+    reddit_trends_ingest._find_value_picks (trending, non-ETF, not bearish,
+    ≥ the off-52w-high discount floor), deepest discount first. Posts to the
+    dedicated DISCORD_REDDIT_WEBHOOK_URL when set, else the shared
+    DISCORD_WEBHOOK_URL; no-op without either or without rows; fail-soft.
+    """
+    webhook = (os.environ.get("DISCORD_REDDIT_WEBHOOK_URL")
+               or os.environ.get("DISCORD_WEBHOOK_URL"))
+    if not webhook or not rows:
+        return
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not installed — skipping Discord value-picks notification")
+        return
+
+    watched = {t.upper() for t in (watchlist_tickers or set())}
+    desc = ("Trending names the crowd is circling while they trade deep below "
+            "their 52-week high — a research starting point, not a buy list.\n\n"
+            + "\n\n".join(_reddit_line_value(r, watched) for r in rows))
+
+    title = "💎  High buzz, low price — trending near their lows"
+    date_str = _fmt_trend_date(rows[0].get("trend_date"))
+    if date_str:
+        title += f" · {date_str}"
+    embed: dict[str, Any] = {
+        "title": title[:256],
+        "color": 0x0D_94_88,  # teal — the screen/scanner voice, not an act-now alert
+        "description": desc[:4000],
+        "footer": {"text": "Summa · Reddit chatter × 52-week discount screen · "
+                           "chatter ≠ fundamentals · not investment advice"},
+    }
+    trend_date = rows[0].get("trend_date")
+    if trend_date:
+        embed["timestamp"] = f"{trend_date}T00:00:00Z"
+
+    try:
+        resp = requests.post(webhook, json={"embeds": [embed]}, timeout=_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Discord value-picks webhook returned %s: %s",
+                           resp.status_code, resp.text[:200])
+    except requests.RequestException:
+        logger.exception("Discord value-picks webhook post failed")
+
+
 # Feed form → (emoji, trader-facing label, embed color). 8-K is the market-moving
 # one (material events) so it gets the amber "pay attention" color.
 _FILING_FORM_META: dict[str, tuple[str, str, int]] = {
