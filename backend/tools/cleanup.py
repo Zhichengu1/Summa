@@ -35,6 +35,7 @@ MANAGER_KEEP_QUARTERS = 4   # manager_portfolios kept to the latest 4 13F filing
 IPO_RETENTION_DAYS = 120    # ipos pipeline rows pruned past ~4 months of inactivity
 NEWS_RETENTION_DAYS = 30    # company_news headlines pruned past a rolling 30-day window
 MARKET_NEWS_RETENTION_DAYS = 30  # market_news (Top Intelligence) pruned past a rolling 30-day window
+REDDIT_RETENTION_DAYS = 30  # reddit_trends daily snapshots pruned past a rolling 30-day window
 
 # Note: the current ingest stores only filing metadata in `filings` (no narrative
 # section text), and feed rows are deleted wholesale at FEED_RETENTION_DAYS, so
@@ -71,6 +72,9 @@ def run_cleanup() -> None:
 
     mkt_pruned = db.prune_old_market_news(MARKET_NEWS_RETENTION_DAYS)
     logger.info("Pruned %d market_news rows older than %d days", mkt_pruned, MARKET_NEWS_RETENTION_DAYS)
+
+    reddit_pruned = db.prune_old_reddit_trends(REDDIT_RETENTION_DAYS)
+    logger.info("Pruned %d reddit_trends rows older than %d days", reddit_pruned, REDDIT_RETENTION_DAYS)
 
 
 if __name__ == "__main__":

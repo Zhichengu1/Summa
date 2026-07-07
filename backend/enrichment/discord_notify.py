@@ -499,6 +499,169 @@ def notify_market_news(items: list[dict[str, Any]], max_items: int = 6) -> None:
         logger.exception("Discord market-news webhook post failed")
 
 
+_REDDIT_COLOR = 0xFF_45_00  # Reddit orange
+_MEDALS = ("🥇", "🥈", "🥉")
+
+_SENTIMENT_EMOJI = {"bullish": "🟢", "bearish": "🔴"}
+
+
+def _fmt_count(x: Any) -> str | None:
+    """Format a mention/upvote count compactly (12,431 → '12.4K'), or None."""
+    try:
+        v = int(x)
+    except (TypeError, ValueError):
+        return None
+    return f"{v / 1000:.1f}K" if v >= 10_000 else f"{v:,}"
+
+
+_TICKER_LINK_RE = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
+
+
+def _reddit_line(i: int, r: dict[str, Any], watched: set[str]) -> str:
+    """One two-line digest entry: name/link header + a trader stats line.
+
+    Header:  '🥇 **[MU](apewisdom…)** ⭐ — Micron Technology'
+    Stats:   '$984.75 ▲ +0.9% · 5d ▲ +12.3% · vol 2.1× · 💬 540 (▲ +391) · rank ▲3 · ⬆ 2.3K · 🟢 Bullish'
+    """
+    medal = _MEDALS[i] if i < len(_MEDALS) else f"`{i + 1:>2}.`"
+    tk = _label(r.get("ticker"), 12)
+    # Click-through to the ticker's ApeWisdom page (the actual Reddit chatter).
+    # Only linkify strictly-shaped tickers; anything odd renders as plain text.
+    shown = (f"[**{tk}**](https://apewisdom.io/stocks/{tk}/)"
+             if _TICKER_LINK_RE.match(tk) else f"**{tk}**")
+    header = f"{medal} {shown}" + (" ⭐" if tk in watched else "")
+    if r.get("is_etf"):
+        header += "  —  🏦 ETF"
+        name = _label(r.get("name"), 40) if r.get("name") else ""
+        if name and name != "?":
+            header += f" · {name}"
+    else:
+        name = _label(r.get("name"), 40) if r.get("name") else ""
+        if name and name != "?":
+            header += f"  —  {name}"
+
+    parts: list[str] = []
+    # Live trader context (attached by reddit_trends_ingest, display-only).
+    try:
+        px = f"${float(r['last_price']):,.2f}"
+        day = _fmt_pct(r.get("day_pct"))
+        parts.append(f"{px} {day}" if day else px)
+    except (KeyError, TypeError, ValueError):
+        pass
+    ret5 = _fmt_pct(r.get("ret_5d"))
+    if ret5:
+        parts.append(f"5d {ret5}")
+    try:
+        vs = float(r["vol_spike"])
+        if vs >= 1.5:  # only flag genuinely-elevated trading volume
+            parts.append(f"vol {vs:.1f}×")
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        off = float(r["off_high_pct"])
+        if off >= -2.0:
+            parts.append("🚀 near 52w high")
+        elif off <= -15.0:
+            parts.append(f"{abs(off):.0f}% off 52w high")
+    except (KeyError, TypeError, ValueError):
+        pass
+    mentions = _fmt_count(r.get("mentions"))
+    if mentions:
+        m = f"💬 {mentions}"
+        try:
+            delta = int(r["mentions_change"])
+            m += f" ({'▲' if delta >= 0 else '▼'} {delta:+,})"
+        except (KeyError, TypeError, ValueError):
+            pass
+        parts.append(m)
+    try:
+        rc = int(r["rank_change"])
+        if rc:
+            parts.append(f"rank {'▲' if rc > 0 else '▼'}{abs(rc)}")
+        else:
+            parts.append("rank ●")
+    except (KeyError, TypeError, ValueError):
+        pass
+    upvotes = _fmt_count(r.get("upvotes"))
+    if upvotes:
+        parts.append(f"⬆ {upvotes}")
+    sent = (r.get("sentiment") or "").strip()
+    if sent:
+        emoji = _SENTIMENT_EMOJI.get(sent.lower(), "⚪")
+        parts.append(f"{emoji} {_label(sent, 12)}")
+    return header + ("\n" + "  ·  ".join(parts) if parts else "")
+
+
+def notify_reddit_trends(rows: list[dict[str, Any]],
+                         watchlist_tickers: set[str] | None = None,
+                         surge: bool = False) -> None:
+    """Post ONE embed digest of today's most-discussed stocks on Reddit.
+
+    `surge=True` renders the compact intraday variant — an amber "surging right
+    now" alert for tickers that just broke into the top ranks — instead of the
+    full morning leaderboard.
+
+    `rows` are reddit_trends row dicts (ticker/name/rank/mentions/upvotes/
+    rank_change/mentions_change/sentiment/source), already ranked and capped by
+    the caller (reddit_trends_ingest). Watchlist tickers get a ⭐. Posts to the
+    dedicated DISCORD_REDDIT_WEBHOOK_URL when set (its own channel), otherwise
+    falls back to the shared DISCORD_WEBHOOK_URL. No-op without either webhook
+    or rows; fail-soft (a webhook error never propagates).
+    """
+    webhook = (os.environ.get("DISCORD_REDDIT_WEBHOOK_URL")
+               or os.environ.get("DISCORD_WEBHOOK_URL"))
+    if not webhook or not rows:
+        return
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not installed — skipping Discord reddit-trends notification")
+        return
+
+    watched = {t.upper() for t in (watchlist_tickers or set())}
+    # Header: aggregate vote/mention volume across the digest, at a glance.
+    total_mentions = sum(int(r["mentions"]) for r in rows
+                         if str(r.get("mentions") or "").lstrip("-").isdigit())
+    total_upvotes = sum(int(r["upvotes"]) for r in rows
+                        if str(r.get("upvotes") or "").lstrip("-").isdigit())
+    header_bits = [f"{len(rows)} newly surging" if surge else f"top {len(rows)}"]
+    if total_mentions:
+        header_bits.append(f"💬 {_fmt_count(total_mentions)} mentions")
+    if total_upvotes:
+        header_bits.append(f"🗳️ {_fmt_count(total_upvotes)} upvotes")
+    lines = ["  ·  ".join(header_bits), ""]
+    lines += [_reddit_line(i, r, watched) for i, r in enumerate(rows)]
+    hits = [_label(r.get("ticker"), 12) for r in rows
+            if _label(r.get("ticker"), 12) in watched]
+    if hits:
+        lines.append("")
+        lines.append(f"⭐ on your watchlist: {'  ·  '.join(f'**{t}**' for t in hits)}")
+
+    source = str(rows[0].get("source") or "")
+    scope = ("r/wallstreetbets" if source.startswith("tradestie")
+             else "Reddit stock subreddits")
+    title = ("⚡  Reddit surge — climbing the board right now" if surge
+             else "🚀  Reddit Trending Stocks — today's most discussed")
+    embed: dict[str, Any] = {
+        "title": title,
+        "color": 0xF5_A6_23 if surge else _REDDIT_COLOR,  # amber = act-now signal
+        "description": "\n".join(lines)[:4000],
+        "footer": {"text": f"Summa · {'intraday surge' if surge else f'top {len(rows)} by mentions'}"
+                           f" · {scope} (ApeWisdom/Tradestie) · not investment advice"},
+    }
+    trend_date = rows[0].get("trend_date")
+    if trend_date:
+        embed["timestamp"] = f"{trend_date}T00:00:00Z"
+
+    try:
+        resp = requests.post(webhook, json={"embeds": [embed]}, timeout=_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Discord reddit-trends webhook returned %s: %s",
+                           resp.status_code, resp.text[:200])
+    except requests.RequestException:
+        logger.exception("Discord reddit-trends webhook post failed")
+
+
 # Feed form → (emoji, trader-facing label, embed color). 8-K is the market-moving
 # one (material events) so it gets the amber "pay attention" color.
 _FILING_FORM_META: dict[str, tuple[str, str, int]] = {

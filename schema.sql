@@ -509,4 +509,37 @@ GRANT SELECT ON manager_portfolios TO anon;
 DROP POLICY IF EXISTS "anon read manager_portfolios" ON manager_portfolios;
 CREATE POLICY "anon read manager_portfolios" ON manager_portfolios FOR SELECT TO anon USING (true);
 
+-- ===========================================================================
+-- reddit_trends — daily snapshot of the most-discussed stock tickers on the
+-- big investing subreddits (r/wallstreetbets, r/stocks, r/investing, …).
+-- GLOBAL (market-wide, not watchlist-scoped): one ranked top-N snapshot per
+-- day, written by ingest/reddit_trends_ingest.py (summa-reddit.yml, daily)
+-- from the free keyless ApeWisdom + Tradestie aggregator APIs. Powers the
+-- Discord "Reddit Trending Stocks" digest; ~30-day rolling window
+-- (cleanup.py prune_old_reddit_trends). Idempotent.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS reddit_trends (
+    id               BIGSERIAL PRIMARY KEY,
+    trend_date       DATE        NOT NULL,     -- snapshot day (UTC)
+    ticker           TEXT        NOT NULL,
+    name             TEXT,                     -- company name per the aggregator
+    rank             INT,                      -- 1 = most discussed that day
+    mentions         INT,                      -- mention/comment count (per source)
+    upvotes          INT,                      -- aggregate upvotes (ApeWisdom only)
+    rank_change      INT,                      -- vs 24h ago; positive = climbing
+    mentions_change  INT,                      -- mentions delta vs 24h ago
+    sentiment        TEXT,                     -- 'Bullish' | 'Bearish' (Tradestie WSB)
+    sentiment_score  NUMERIC,                  -- signed score behind the label
+    source           TEXT,                     -- 'apewisdom:all-stocks' | 'tradestie:wallstreetbets'
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (trend_date, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_reddit_trends_day ON reddit_trends (trend_date DESC, rank ASC);
+
+ALTER TABLE reddit_trends ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON reddit_trends FROM anon, authenticated;
+GRANT SELECT ON reddit_trends TO anon;
+DROP POLICY IF EXISTS "anon read reddit_trends" ON reddit_trends;
+CREATE POLICY "anon read reddit_trends" ON reddit_trends FOR SELECT TO anon USING (true);
+
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        

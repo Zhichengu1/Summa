@@ -55,6 +55,7 @@ Summa/
 │   │   ├── price_ingest.py       ← Yahoo EOD bars → daily_prices (non-SEC source)
 │   │   ├── news_ingest.py        ← Google News RSS → company_news (per-company, non-SEC source)
 │   │   ├── market_news_ingest.py ← GLOBAL curated market-mover RSS (SEC/Fed/FDA/PRN) → market_news
+│   │   ├── reddit_trends_ingest.py ← GLOBAL daily Reddit most-discussed tickers (ApeWisdom/Tradestie) → reddit_trends + Discord digest
 │   │   ├── summary_ingest.py     ← precomputes company_summary (price+technicals+activity)
 │   │   ├── reference_ingest.py   ← SIC industry/theme → company_profiles / company_themes
 │   │   └── entity_ingest.py      ← seeds/entities.yaml → entities registry (global, runs once)
@@ -71,6 +72,7 @@ Summa/
 │   │   ├── build_sec_index.py    ← rebuilds frontend/public/sec-companies.json (stdlib only)
 │   │   ├── refresh_news.py       ← lightweight news-only entry point (edgar-free; summa-news */5)
 │   │   ├── daily_brief.py        ← daily watchlist brief → Discord (edgar-free; company_summary + earnings radar)
+│   │   ├── reddit_trends.py      ← daily Reddit trending-stocks digest → Discord (edgar-free; thin wrapper over ingest/reddit_trends_ingest)
 │   │   ├── cleanup.py            ← monthly retention maintenance
 │   │   └── backfill_manager_quarters.py ← seeds prior 13F quarters so the Institutional Investors latest-vs-prior comparison works immediately (idempotent)
 │   ├── seeds/                    ← entities.yaml, profiles.yaml (curated reference data)
@@ -82,6 +84,7 @@ Summa/
 │   ├── summa-pipeline.yml         ← */10 min ingest (main.py)
 │   ├── summa-news.yml             ← */5 min fast news refresh: market feeds + per-company Google News via --company (tools.refresh_news; requirements-news.txt, edgar-free)
 │   ├── summa-brief.yml            ← weekday-morning Discord watchlist brief (python -m tools.daily_brief; requirements-news.txt)
+│   ├── summa-reddit.yml           ← Reddit trending-stocks: 13:15 UTC daily full digest + weekday 16:15/20:15 UTC intraday refresh with surge-only alerts (python -m tools.reddit_trends; requirements-news.txt)
 │   ├── summa-cleanup.yml          ← monthly retention (python -m tools.cleanup)
 │   ├── summa-secindex.yml         ← weekly SEC index rebuild (python -m tools.build_sec_index)
 │   ├── summa-13f-quarter.yml      ← post-deadline (16th of Feb/May/Aug/Nov) 13F quarter roll-forward (python -m tools.backfill_manager_quarters)
@@ -167,8 +170,11 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
     (`news_ingest.py`), and the curated market-mover RSS feeds in
     `market_news_ingest.py` (Federal Reserve press/speeches/testimony · BEA macro data ·
     SEC · FDA · FTC · CFTC · White House executive actions · PR Newswire → the global
-    `market_news` "Top Intelligence" feed). SEC EDGAR remains the source for
-    all structured filings data. Any new source must keep the same contract: keyless,
+    `market_news` "Top Intelligence" feed), and the Reddit trending-stocks aggregators
+    in `reddit_trends_ingest.py` (ApeWisdom mention ranks + Tradestie WSB sentiment →
+    `reddit_trends` + a daily Discord digest; reddit.com itself is never scraped —
+    datacenter IPs get 403'd and the official API needs OAuth). SEC EDGAR remains the
+    source for all structured filings data. Any new source must keep the same contract: keyless,
     zero-cost, and fail-soft (a dead feed logs and is skipped, never aborting a run).
     (Reuters/Bloomberg are intentionally NOT added — no free RSS; their coverage
     already reaches `company_news` via Google News.)
@@ -279,6 +285,7 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `daily_prices` | cik+date | Yahoo EOD bars |
 | `company_news` | (cik, guid) | Trader-important Google News headlines per company (recency + importance gated at ingest; 30-day rolling window) |
 | `market_news` | `guid` | GLOBAL curated market-mover feed (SEC/Fed/FDA/PRN), importance-filtered (30-day window) |
+| `reddit_trends` | trend_date+ticker | GLOBAL daily top-N most-discussed tickers on the investing subreddits (ApeWisdom ranks + optional Tradestie WSB sentiment; 30-day window) |
 | `company_profiles` | `cik` | SIC industry/sector |
 | `company_themes` | cik+name | Recomputed theme tags (delete+insert per cik) |
 | `entities` | `match_key` | Global entity-context registry (seeded) |
@@ -299,7 +306,9 @@ frontend fetch and the backend `_prior_lookup` scan; `ipos` rows are pruned past
 (`prune_old_ipos`) since the IPO pipeline is a rolling recent-activity surface;
 `company_news` headlines are pruned past **30 days** (`prune_old_news`) — a rolling
 recent-headlines surface, not an archive; `market_news` is likewise pruned past **30
-days** (`prune_old_market_news`). All other structured warehouse tables
+days** (`prune_old_market_news`); `reddit_trends` daily snapshots are pruned past **30
+days** (`prune_old_reddit_trends`) — one tiny top-N snapshot per day, kept just long
+enough for week-over-week comparisons. All other structured warehouse tables
 (fundamentals, holdings, events) are small/bounded per company and retained.
 
 > The price reads (`fetchPrices`, `summary_ingest`) fetch the most-recent N sessions via
@@ -387,7 +396,14 @@ Notable+ only, but both workflows set it to `"3"` so Discord alerts at the UI's 
 floor), `NEWS_ALERT_MAX_AGE_H` (Discord company-news freshness gate, default 24 — a
 just-discovered but older headline is stored, never alerted),
 `MARKET_NEWS_MIN_SCORE` (strict market threshold, default 3), `MARKET_NEWS_MAX_AGE_DAYS`
-(market-feed recency window, default 7), `MARKET_NEWS_FEEDS` (override the curated source list as
+(market-feed recency window, default 7), Reddit-trends tuning: `REDDIT_TRENDS_MAX`
+(tickers stored per daily snapshot, default 50), `REDDIT_TRENDS_ALERT_N` (tickers in the
+Discord digest, default 10), `REDDIT_TRENDS_FILTER` (ApeWisdom subreddit universe,
+default `all-stocks`), `REDDIT_TRENDS_SURGE_N` (intraday runs alert only tickers newly in
+the top N that earlier ranked past 20 or not at all, default 5), `REDDIT_TRENDS_PRICES`
+(attach live Yahoo last-price/day-% to alerted tickers, default on; `"0"` disables),
+`DISCORD_REDDIT_WEBHOOK_URL` (optional dedicated Discord channel
+for the Reddit digest; falls back to `DISCORD_WEBHOOK_URL`), `MARKET_NEWS_FEEDS` (override the curated source list as
 `label|url|weight` comma-separated), `FILING_ALERT_RECENCY_DAYS` (Discord filing-alert
 freshness window, default 2 — only just-filed feed documents alert, never backfills). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
 edgartools; SEC's ceiling is ~10/s) — read by edgartools **at import time**, so it must be

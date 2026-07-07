@@ -1,0 +1,59 @@
+name: summa-reddit
+
+# Reddit trending-stocks → Discord + `reddit_trends`. The 13:15 UTC run
+# (≈ 9:15am EDT pre-open, every day incl. weekends) posts the full daily digest;
+# the weekday 16:15 / 20:15 UTC runs (midday ET + just after the close) re-pull
+# the aggregators, refresh today's snapshot rows with the LATEST counts, and
+# ping only if a ticker newly surged into the top ranks — quiet otherwise, so
+# traders get fresh data without spam. Pulls the free keyless ApeWisdom +
+# Tradestie APIs (never reddit.com directly — datacenter IPs get 403'd) plus
+# Yahoo's chart endpoint for live price context on alerted tickers. Cost: a
+# handful of tiny HTTP GETs + one Supabase upsert per run — ~3 free Actions
+# minutes/day. Edgar-free — installs only requirements-news.txt.
+
+on:
+  schedule:
+    - cron: "15 13 * * *"      # daily full digest (pre-open)
+    - cron: "15 16,20 * * 1-5" # weekday intraday refresh + surge-only alerts
+  workflow_dispatch: {}
+
+concurrency:
+  group: summa-reddit
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Read-only job: don't leave the GITHUB_TOKEN in .git config.
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements-news.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements-news.txt
+
+      - name: Post Reddit trending-stocks digest
+        working-directory: backend
+        env:
+          SUPABASE_URL:               ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:               ${{ secrets.SUPABASE_KEY }}
+          # Dedicated channel for the Reddit digest; falls back to the shared
+          # webhook when the secret is unset.
+          DISCORD_REDDIT_WEBHOOK_URL: ${{ secrets.DISCORD_REDDIT_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL:        ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python -m tools.reddit_trends

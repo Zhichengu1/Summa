@@ -116,6 +116,28 @@ def upsert_market_news(rows: list[dict[str, Any]]) -> int:
     return upsert_many("market_news", rows, on_conflict="guid")
 
 
+def upsert_reddit_trends(rows: list[dict[str, Any]]) -> int:
+    """Upsert daily Reddit trending-ticker snapshot rows, keyed on (trend_date, ticker)."""
+    return upsert_many("reddit_trends", rows, on_conflict="trend_date,ticker")
+
+
+def fetch_reddit_trends_day(trend_date: str) -> list[dict[str, Any]]:
+    """Return the (ticker, rank) rows already stored for one snapshot day.
+
+    Lets the intraday Reddit-trends runs tell the first run of the day (post the
+    full digest) from refreshes (only alert genuinely-new surges). Fails soft to [].
+    """
+    try:
+        result = (
+            get_client().table("reddit_trends").select("ticker, rank")
+            .eq("trend_date", trend_date).execute()
+        )
+        return result.data or []
+    except Exception:
+        logger.exception("fetch_reddit_trends_day failed")
+        return []
+
+
 def get_seen_market_guids(guids: list[str]) -> set[str]:
     """Return the subset of `guids` already stored in market_news (chunked)."""
     if not guids:
@@ -483,6 +505,24 @@ def prune_old_market_news(days: int = 30) -> int:
         return len(result.data or [])
     except Exception:
         logger.exception("prune_old_market_news failed")
+        return 0
+
+
+def prune_old_reddit_trends(days: int = 30) -> int:
+    """Delete `reddit_trends` snapshots older than `days` (rolling recent-buzz window).
+
+    One top-N snapshot per day, so the table is tiny; ~30 days is enough history
+    for day-over-day and week-over-week comparisons. Monthly cadence (cleanup.py).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        result = (
+            get_client().table("reddit_trends").delete()
+            .lt("trend_date", cutoff).execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_reddit_trends failed")
         return 0
 
 
