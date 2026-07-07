@@ -2,8 +2,10 @@
 
 A GLOBAL pass (market-wide, not watchlist-scoped) run several times a day by
 summa-reddit.yml via `python -m tools.reddit_trends`: the pre-open run posts the
-full daily digest, and the weekday intraday runs refresh today's snapshot with
-the latest counts and alert ONLY on tickers newly surging into the top ranks.
+full daily digest — including an "under the radar" section of low-chatter tickers
+whose 24h mention growth is exploding (see _find_rising) — and the weekday
+intraday runs refresh today's snapshot with the latest counts and alert ONLY on
+tickers newly surging into the top ranks.
 It pulls the most-mentioned stock tickers across the big investing subreddits
 (r/wallstreetbets, r/stocks, r/investing, …) from two FREE, keyless aggregator
 APIs, keyed one ranked snapshot per (day, ticker) — intraday re-runs upsert the
@@ -61,11 +63,19 @@ _TRADESTIE_URL = "https://api.tradestie.com/v1/apps/reddit"
 
 # How many ranked tickers to store per day / to show in the Discord digest.
 _STORE_N = int(os.environ.get("REDDIT_TRENDS_MAX", "50"))
-_ALERT_N = int(os.environ.get("REDDIT_TRENDS_ALERT_N", "10"))
+_ALERT_N = int(os.environ.get("REDDIT_TRENDS_ALERT_N", "20"))
 # Intraday surge alert: a ticker now in the top-N that the day's earlier snapshot
 # had ranked past this floor (or not at all) is "surging" and worth a ping.
 _SURGE_N = int(os.environ.get("REDDIT_TRENDS_SURGE_N", "5"))
 _SURGE_PRIOR_FLOOR = 20
+# "Under the radar" risers (daily digest only): names OUTSIDE the main top-N whose
+# chatter is small in absolute terms but exploding relative to 24h ago — the
+# high-potential picks you want to see BEFORE they hit the front page. Alert-only
+# context (like prices): never stored, so no schema impact.
+_RISING_N = int(os.environ.get("REDDIT_TRENDS_RISING_N", "5"))
+_RISING_MIN_MENTIONS = int(os.environ.get("REDDIT_TRENDS_RISING_MIN", "25"))
+_RISING_GROWTH = 2.0    # qualify: mentions at least doubled in 24h…
+_RISING_RANK_JUMP = 15  # …or climbed ≥ this many leaderboard spots
 # Attach a live last-price + day-% to digest tickers (Yahoo chart endpoint,
 # keyless — the same free source price_ingest uses). "0" disables.
 _WITH_PRICES = os.environ.get("REDDIT_TRENDS_PRICES", "1") != "0"
@@ -204,6 +214,41 @@ def _price_context(tickers: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _find_rising(ranking: list[dict[str, Any]], exclude: set[str]) -> list[dict[str, Any]]:
+    """Under-the-radar risers: low-chatter tickers whose 24h mentions are exploding.
+
+    Scans the FULL fetched ranking (not just the stored/alerted top) for names
+    outside `exclude` that qualify by velocity — mentions at least doubled in 24h
+    (a ticker new to the board counts as an infinite-base surge), or a jump of
+    ≥ _RISING_RANK_JUMP leaderboard spots — with a small mention floor so
+    single-digit noise never qualifies. Attaches `mentions_growth` (display-only)
+    and returns the top _RISING_N sorted by growth, biggest movers first.
+    """
+    out: list[dict[str, Any]] = []
+    for r in ranking:
+        if r["ticker"] in exclude:
+            continue
+        m, dm, rc = r.get("mentions"), r.get("mentions_change"), r.get("rank_change")
+        if m is None or m < _RISING_MIN_MENTIONS:
+            continue
+        prior = (m - dm) if dm is not None else None
+        if prior is not None and prior <= 0:
+            # New to the board — the strongest signal; flag it for display and
+            # rank it as m× growth (a base of 0 has no honest multiple).
+            growth: float | None = float(m)
+            r["board_new"] = True
+        elif prior is not None:
+            growth = m / prior
+        else:
+            growth = None
+        if (growth is not None and growth >= _RISING_GROWTH) or (rc is not None and rc >= _RISING_RANK_JUMP):
+            r["mentions_growth"] = growth
+            out.append(r)
+    out.sort(key=lambda r: (r.get("mentions_growth") or 1.0,
+                            r.get("rank_change") or 0), reverse=True)
+    return out[:_RISING_N]
+
+
 def _watchlist_tickers() -> set[str]:
     """Tickers on the active Summa watchlist (starred in the digest). Fail-soft."""
     try:
@@ -252,6 +297,7 @@ def ingest_reddit_trends_global() -> int:
         return 0
 
     trend_date = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    full_ranking = rows  # whole fetched board — the rising scan looks past the stored top
     rows = rows[:_STORE_N]
     for r in rows:
         r["trend_date"] = trend_date
@@ -269,8 +315,16 @@ def ingest_reddit_trends_global() -> int:
     if discord_notify is None:
         return written
 
+    rising: list[dict[str, Any]] = []
     if not prior_ranks:
         alert = rows[:_ALERT_N]
+        # Daily digest only: under-the-radar risers from the whole board (the
+        # intraday runs stay surge-only — the 24h deltas barely move intraday,
+        # so re-alerting the same risers would be spam).
+        rising = _find_rising(full_ranking, {r["ticker"] for r in alert})
+        if rising:
+            logger.info("  reddit_trends: under-the-radar risers: %s",
+                        ", ".join(r["ticker"] for r in rising))
     else:
         # Surge = now top-_SURGE_N but earlier today unranked or buried past the
         # floor. Ordinary churn inside the leaderboard stays silent (no spam).
@@ -284,14 +338,15 @@ def ingest_reddit_trends_global() -> int:
     if not alert:
         return written
 
-    if _WITH_PRICES:  # live trader context on just the alerted tickers
-        prices = _price_context([r["ticker"] for r in alert])
-        for r in alert:
+    if _WITH_PRICES:  # live trader context on just the alerted + rising tickers
+        shown = alert + rising
+        prices = _price_context([r["ticker"] for r in shown])
+        for r in shown:
             r.update(prices.get(r["ticker"], {}))
     try:
         discord_notify.notify_reddit_trends(
             alert, watchlist_tickers=_watchlist_tickers(),
-            surge=bool(prior_ranks))
+            surge=bool(prior_ranks), rising=rising)
     except Exception:
         logger.exception("  reddit_trends: Discord notify failed")
     return written

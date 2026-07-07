@@ -7,6 +7,7 @@ A silent no-op when DISCORD_WEBHOOK_URL is unset, so the pipeline still runs
 without notifications configured.
 """
 
+import datetime as _dt
 import logging
 import os
 import re
@@ -501,8 +502,45 @@ def notify_market_news(items: list[dict[str, Any]], max_items: int = 6) -> None:
 
 _REDDIT_COLOR = 0xFF_45_00  # Reddit orange
 _MEDALS = ("🥇", "🥈", "🥉")
+# Digest bands: medals (0–2) get the full two-line treatment in the description;
+# 3–9 render as medium one-liners and 10+ as compact one-liners, each in their
+# own embed field, so a top-20 digest reads as tidy sections instead of a wall.
+_REDDIT_MEDAL_N = 3
+_REDDIT_MEDIUM_N = 10
 
 _SENTIMENT_EMOJI = {"bullish": "🟢", "bearish": "🔴"}
+
+
+def _fmt_trend_date(iso: Any) -> str | None:
+    """'2026-07-06' → 'Sun Jul 6, 2026' for embed titles, or None if unparsable."""
+    try:
+        d = _dt.date.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    return f"{d.strftime('%a %b')} {d.day}, {d.year}"
+
+
+def _pct_tight(x: Any) -> str | None:
+    """Compact signed percent ('▲2.5%') for dense digest lines, or None."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return f"{'▲' if v >= 0 else '▼'}{abs(v):.1f}%"
+
+
+def _join_fit(lines: list[str], cap: int) -> str:
+    """Join lines with newlines, keeping only whole lines under `cap` chars.
+
+    Discord caps an embed field value at 1024 chars — dropping whole trailing
+    lines beats a mid-line slice (rows are ranked, so the tail matters least).
+    """
+    out = ""
+    for ln in lines:
+        if len(out) + len(ln) + 1 > cap:
+            break
+        out += ("\n" if out else "") + ln
+    return out
 
 
 def _fmt_count(x: Any) -> str | None:
@@ -521,7 +559,7 @@ def _reddit_line(i: int, r: dict[str, Any], watched: set[str]) -> str:
     """One two-line digest entry: name/link header + a trader stats line.
 
     Header:  '🥇 **[MU](apewisdom…)** ⭐ — Micron Technology'
-    Stats:   '$984.75 ▲ +0.9% · 5d ▲ +12.3% · vol 2.1× · 💬 540 (▲ +391) · rank ▲3 · ⬆ 2.3K · 🟢 Bullish'
+    Stats:   '$984.75 ▲0.9%  ·  5d ▲12.3%  ·  vol 2.1×  ·  💬 540 (+391)  ·  rank ▲3  ·  🟢 Bullish'
     """
     medal = _MEDALS[i] if i < len(_MEDALS) else f"`{i + 1:>2}.`"
     tk = _label(r.get("ticker"), 12)
@@ -544,11 +582,11 @@ def _reddit_line(i: int, r: dict[str, Any], watched: set[str]) -> str:
     # Live trader context (attached by reddit_trends_ingest, display-only).
     try:
         px = f"${float(r['last_price']):,.2f}"
-        day = _fmt_pct(r.get("day_pct"))
+        day = _pct_tight(r.get("day_pct"))
         parts.append(f"{px} {day}" if day else px)
     except (KeyError, TypeError, ValueError):
         pass
-    ret5 = _fmt_pct(r.get("ret_5d"))
+    ret5 = _pct_tight(r.get("ret_5d"))
     if ret5:
         parts.append(f"5d {ret5}")
     try:
@@ -569,8 +607,7 @@ def _reddit_line(i: int, r: dict[str, Any], watched: set[str]) -> str:
     if mentions:
         m = f"💬 {mentions}"
         try:
-            delta = int(r["mentions_change"])
-            m += f" ({'▲' if delta >= 0 else '▼'} {delta:+,})"
+            m += f" ({int(r['mentions_change']):+,})"
         except (KeyError, TypeError, ValueError):
             pass
         parts.append(m)
@@ -578,13 +615,8 @@ def _reddit_line(i: int, r: dict[str, Any], watched: set[str]) -> str:
         rc = int(r["rank_change"])
         if rc:
             parts.append(f"rank {'▲' if rc > 0 else '▼'}{abs(rc)}")
-        else:
-            parts.append("rank ●")
     except (KeyError, TypeError, ValueError):
         pass
-    upvotes = _fmt_count(r.get("upvotes"))
-    if upvotes:
-        parts.append(f"⬆ {upvotes}")
     sent = (r.get("sentiment") or "").strip()
     if sent:
         emoji = _SENTIMENT_EMOJI.get(sent.lower(), "⚪")
@@ -592,10 +624,118 @@ def _reddit_line(i: int, r: dict[str, Any], watched: set[str]) -> str:
     return header + ("\n" + "  ·  ".join(parts) if parts else "")
 
 
+def _reddit_ticker_md(r: dict[str, Any], watched: set[str]) -> str:
+    """Bold (and linkified, when strictly-shaped) ticker markdown + watchlist star."""
+    tk = _label(r.get("ticker"), 12)
+    shown = (f"[**{tk}**](https://apewisdom.io/stocks/{tk}/)"
+             if _TICKER_LINK_RE.match(tk) else f"**{tk}**")
+    return shown + (" ⭐" if tk in watched else "")
+
+
+def _reddit_line_medium(i: int, r: dict[str, Any], watched: set[str]) -> str:
+    """One single-line entry for the mid ranks (4–10).
+
+    '` 4.` **AMD**  ·  $126.45 ▲1.6%  ·  💬 4.4K (+310)  ·  vol 2.4×  ·  🟢'
+    """
+    parts = [f"`{i + 1:>2}.` {_reddit_ticker_md(r, watched)}"]
+    try:
+        px = f"${float(r['last_price']):,.2f}"
+        day = _pct_tight(r.get("day_pct"))
+        parts.append(f"{px} {day}" if day else px)
+    except (KeyError, TypeError, ValueError):
+        pass
+    mentions = _fmt_count(r.get("mentions"))
+    if mentions:
+        m = f"💬 {mentions}"
+        try:
+            m += f" ({int(r['mentions_change']):+,})"
+        except (KeyError, TypeError, ValueError):
+            pass
+        parts.append(m)
+    try:
+        vs = float(r["vol_spike"])
+        if vs >= 1.5:
+            parts.append(f"vol {vs:.1f}×")
+    except (KeyError, TypeError, ValueError):
+        pass
+    sent = (r.get("sentiment") or "").strip().lower()
+    if sent in _SENTIMENT_EMOJI:
+        parts.append(_SENTIMENT_EMOJI[sent])
+    return "  ·  ".join(parts)
+
+
+def _reddit_line_compact(i: int, r: dict[str, Any], watched: set[str]) -> str:
+    """One single-line entry for the tail ranks (11+).
+
+    '`11.` **PLTR**  ·  $147.32 ▲2.1%  ·  💬 1,204  ·  🟢'
+    """
+    parts = [f"`{i + 1:>2}.` {_reddit_ticker_md(r, watched)}"]
+    try:
+        px = f"${float(r['last_price']):,.2f}"
+        day = _pct_tight(r.get("day_pct"))
+        parts.append(f"{px} {day}" if day else px)
+    except (KeyError, TypeError, ValueError):
+        pass
+    mentions = _fmt_count(r.get("mentions"))
+    if mentions:
+        parts.append(f"💬 {mentions}")
+    sent = (r.get("sentiment") or "").strip().lower()
+    if sent in _SENTIMENT_EMOJI:
+        parts.append(_SENTIMENT_EMOJI[sent])
+    return "  ·  ".join(parts)
+
+
+def _reddit_line_rising(r: dict[str, Any], watched: set[str]) -> str:
+    """One line for an under-the-radar riser: growth multiple, chatter, board rank, price.
+
+    '**RXRX**  ·  chatter ×3.2 /24h  ·  💬 45  ·  #34 ▲38  ·  $4.12 ▲8.1%  ·  🟢'
+    """
+    parts = [_reddit_ticker_md(r, watched)]
+    if r.get("board_new"):
+        parts.append("🆕 new on the board")
+    else:
+        try:
+            g = float(r["mentions_growth"])
+            parts.append(f"chatter ×{g:.1f} /24h")
+        except (KeyError, TypeError, ValueError):
+            pass
+    mentions = _fmt_count(r.get("mentions"))
+    if mentions:
+        parts.append(f"💬 {mentions}")
+    try:
+        pos = f"#{int(r['rank'])}"
+        try:
+            rc = int(r["rank_change"])
+            if rc > 0:
+                pos += f" ▲{rc}"
+        except (KeyError, TypeError, ValueError):
+            pass
+        parts.append(pos)
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        px = f"${float(r['last_price']):,.2f}"
+        day = _pct_tight(r.get("day_pct"))
+        parts.append(f"{px} {day}" if day else px)
+    except (KeyError, TypeError, ValueError):
+        pass
+    sent = (r.get("sentiment") or "").strip().lower()
+    if sent in _SENTIMENT_EMOJI:
+        parts.append(_SENTIMENT_EMOJI[sent])
+    return "  ·  ".join(parts)
+
+
 def notify_reddit_trends(rows: list[dict[str, Any]],
                          watchlist_tickers: set[str] | None = None,
-                         surge: bool = False) -> None:
+                         surge: bool = False,
+                         rising: list[dict[str, Any]] | None = None) -> None:
     """Post ONE embed digest of today's most-discussed stocks on Reddit.
+
+    Daily layout: the description carries the summary line + the medal top-3 in
+    full detail; ranks 4–10 / 11+ render as one-liner sections in their own
+    embed fields, so the digest reads as tidy bands instead of a wall of text.
+    `rising` (optional) adds a "🌱 Under the radar" field — low-chatter names
+    whose 24h mention growth is exploding (detected by reddit_trends_ingest).
 
     `surge=True` renders the compact intraday variant — an amber "surging right
     now" alert for tickers that just broke into the top ranks — instead of the
@@ -629,27 +769,62 @@ def notify_reddit_trends(rows: list[dict[str, Any]],
         header_bits.append(f"💬 {_fmt_count(total_mentions)} mentions")
     if total_upvotes:
         header_bits.append(f"🗳️ {_fmt_count(total_upvotes)} upvotes")
-    lines = ["  ·  ".join(header_bits), ""]
-    lines += [_reddit_line(i, r, watched) for i, r in enumerate(rows)]
-    hits = [_label(r.get("ticker"), 12) for r in rows
+    header = "  ·  ".join(header_bits)
+
+    fields: list[dict[str, Any]] = []
+    if surge:
+        # Compact intraday variant: a handful of tickers, all in the description.
+        entries = [_reddit_line(i, r, watched) for i, r in enumerate(rows)]
+        desc = header + "\n\n" + "\n\n".join(entries)
+    else:
+        # Medal top-3 in the description (blank line between entries for air)…
+        medals = [_reddit_line(i, r, watched) for i, r in enumerate(rows[:_REDDIT_MEDAL_N])]
+        desc = header + "\n\n" + "\n\n".join(medals)
+        # …then one field per band. Field values are hard-capped at 1024 chars.
+        mid = [_reddit_line_medium(i, rows[i], watched)
+               for i in range(_REDDIT_MEDAL_N, min(_REDDIT_MEDIUM_N, len(rows)))]
+        if mid:
+            fields.append({"name": f"📊  Ranks {_REDDIT_MEDAL_N + 1}–{_REDDIT_MEDAL_N + len(mid)}",
+                           "value": _join_fit(mid, 1000), "inline": False})
+        low = [_reddit_line_compact(i, rows[i], watched)
+               for i in range(_REDDIT_MEDIUM_N, len(rows))]
+        if low:
+            fields.append({"name": f"📉  Ranks {_REDDIT_MEDIUM_N + 1}–{_REDDIT_MEDIUM_N + len(low)}",
+                           "value": _join_fit(low, 1000), "inline": False})
+        if rising:
+            fields.append({"name": "🌱  Under the radar — small but surging",
+                           "value": _join_fit([_reddit_line_rising(r, watched) for r in rising], 1000),
+                           "inline": False})
+
+    hits = [_label(r.get("ticker"), 12) for r in list(rows) + list(rising or [])
             if _label(r.get("ticker"), 12) in watched]
     if hits:
-        lines.append("")
-        lines.append(f"⭐ on your watchlist: {'  ·  '.join(f'**{t}**' for t in hits)}")
+        seen: list[str] = []
+        for t in hits:
+            if t not in seen:
+                seen.append(t)
+        fields.append({"name": "⭐  On your watchlist",
+                       "value": _join_fit(["  ·  ".join(f"**{t}**" for t in seen)], 1000),
+                       "inline": False})
 
     source = str(rows[0].get("source") or "")
     scope = ("r/wallstreetbets" if source.startswith("tradestie")
              else "Reddit stock subreddits")
     title = ("⚡  Reddit surge — climbing the board right now" if surge
              else "🚀  Reddit Trending Stocks — today's most discussed")
+    trend_date = rows[0].get("trend_date")
+    date_str = _fmt_trend_date(trend_date)
+    if date_str:
+        title += f" · {date_str}"
     embed: dict[str, Any] = {
-        "title": title,
+        "title": title[:256],
         "color": 0xF5_A6_23 if surge else _REDDIT_COLOR,  # amber = act-now signal
-        "description": "\n".join(lines)[:4000],
+        "description": desc[:4000],
         "footer": {"text": f"Summa · {'intraday surge' if surge else f'top {len(rows)} by mentions'}"
                            f" · {scope} (ApeWisdom/Tradestie) · not investment advice"},
     }
-    trend_date = rows[0].get("trend_date")
+    if fields:
+        embed["fields"] = fields[:25]
     if trend_date:
         embed["timestamp"] = f"{trend_date}T00:00:00Z"
 

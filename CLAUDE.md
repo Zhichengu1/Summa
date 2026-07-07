@@ -398,7 +398,12 @@ just-discovered but older headline is stored, never alerted),
 `MARKET_NEWS_MIN_SCORE` (strict market threshold, default 3), `MARKET_NEWS_MAX_AGE_DAYS`
 (market-feed recency window, default 7), Reddit-trends tuning: `REDDIT_TRENDS_MAX`
 (tickers stored per daily snapshot, default 50), `REDDIT_TRENDS_ALERT_N` (tickers in the
-Discord digest, default 10), `REDDIT_TRENDS_FILTER` (ApeWisdom subreddit universe,
+Discord digest, default 20 — sectioned embed: medal top-3 detailed in the description,
+ranks 4–10 / 11–20 as one-liner fields; the title carries the trend date),
+`REDDIT_TRENDS_RISING_N` / `REDDIT_TRENDS_RISING_MIN` (the daily digest's
+"🌱 Under the radar" field: up to N low-chatter tickers from the FULL fetched board —
+outside the top-20 — whose mentions ≥ MIN (default 25) and at least doubled in 24h,
+jumped ≥15 rank spots, or are new to the board; alert-only, never stored), `REDDIT_TRENDS_FILTER` (ApeWisdom subreddit universe,
 default `all-stocks`), `REDDIT_TRENDS_SURGE_N` (intraday runs alert only tickers newly in
 the top N that earlier ranked past 20 or not at all, default 5), `REDDIT_TRENDS_PRICES`
 (attach live Yahoo last-price/day-% to alerted tickers, default on; `"0"` disables),
