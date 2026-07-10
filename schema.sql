@@ -557,4 +557,53 @@ GRANT SELECT ON reddit_trends TO anon;
 DROP POLICY IF EXISTS "anon read reddit_trends" ON reddit_trends;
 CREATE POLICY "anon read reddit_trends" ON reddit_trends FOR SELECT TO anon USING (true);
 
+-- ===========================================================================
+-- congress_trades — congressional (+ executive-branch) STOCK-Act stock-trade
+-- disclosures. GLOBAL (market-wide, not watchlist-scoped): written by
+-- ingest/congress_trades_ingest.py (summa-congress.yml, ~2×/day) from the free
+-- keyless JSON behind Kadoa's open-source Congress Trading Monitor (normalized
+-- House Clerk PTR + Senate eFD feeds). One row per disclosed transaction,
+-- keyed on the source's stable id; only rows with a resolvable ticker are
+-- stored. Powers the Congress view's consensus buys/sells (stocks 2+ members
+-- bought/sold in a window); ~400-day rolling window
+-- (cleanup.py prune_old_congress_trades). Idempotent.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS congress_trades (
+    id               TEXT PRIMARY KEY,          -- source transaction id (stable)
+    source_id        TEXT,                      -- 'senate_efd' | 'house_ptr' | …
+    branch           TEXT,                      -- 'congress' | 'executive'
+    chamber          TEXT,                      -- 'senate' | 'house' | NULL
+    party            TEXT,                      -- 'D' | 'R' | 'I' | NULL
+    state            TEXT,
+    office           TEXT,                      -- e.g. 'U.S. Senator · RI'
+    filer_id         TEXT,                      -- stable per-politician key
+    filer_name       TEXT,
+    ticker           TEXT NOT NULL,
+    asset_name       TEXT,
+    asset_type       TEXT,
+    side             TEXT NOT NULL,             -- 'buy' | 'sell' | 'exchange'
+    transaction_type TEXT,                      -- raw label, e.g. 'Sale (Partial)'
+    transaction_date DATE NOT NULL,
+    filing_date      DATE,
+    days_to_file     INT,
+    is_late          BOOLEAN,
+    owner            TEXT,                      -- 'Self' | 'Spouse' | 'Joint' | …
+    amount_low       NUMERIC,                   -- disclosed range, e.g. 15001
+    amount_high      NUMERIC,                   -- e.g. 50000
+    amount_label     TEXT,                      -- '$15,001 - $50,000'
+    doc_url          TEXT,                      -- official disclosure document
+    filing_type      TEXT,                      -- 'PTR' | …
+    ret_since        NUMERIC,                   -- stock return since the trade (source-computed)
+    excess_since     NUMERIC,                   -- return vs the market since the trade
+    created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_congress_trades_txn    ON congress_trades (transaction_date DESC);
+CREATE INDEX IF NOT EXISTS idx_congress_trades_ticker ON congress_trades (ticker, transaction_date DESC);
+
+ALTER TABLE congress_trades ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON congress_trades FROM anon, authenticated;
+GRANT SELECT ON congress_trades TO anon;
+DROP POLICY IF EXISTS "anon read congress_trades" ON congress_trades;
+CREATE POLICY "anon read congress_trades" ON congress_trades FOR SELECT TO anon USING (true);
+
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        

@@ -121,6 +121,11 @@ def upsert_reddit_trends(rows: list[dict[str, Any]]) -> int:
     return upsert_many("reddit_trends", rows, on_conflict="trend_date,ticker")
 
 
+def upsert_congress_trades(rows: list[dict[str, Any]]) -> int:
+    """Upsert congressional stock-trade disclosure rows, keyed on the source id."""
+    return upsert_many("congress_trades", rows, on_conflict="id")
+
+
 def fetch_reddit_trends_day(trend_date: str) -> list[dict[str, Any]]:
     """Return the (ticker, rank) rows already stored for one snapshot day.
 
@@ -205,6 +210,32 @@ def get_seen_market_guids(guids: list[str]) -> set[str]:
         except Exception:
             logger.exception("get_seen_market_guids failed")
     return seen
+
+
+def get_seen_congress_ids(ids: list[str]) -> set[str]:
+    """Return the subset of `ids` already stored in congress_trades (chunked)."""
+    if not ids:
+        return set()
+    seen: set[str] = set()
+    client = get_client()
+    for i in range(0, len(ids), 150):
+        batch = ids[i : i + 150]
+        try:
+            result = client.table("congress_trades").select("id").in_("id", batch).execute()
+            seen.update(r["id"] for r in (result.data or []))
+        except Exception:
+            logger.exception("get_seen_congress_ids failed")
+    return seen
+
+
+def congress_trades_has_rows() -> bool:
+    """True if congress_trades already has any rows (suppresses the first-seed alert flood)."""
+    try:
+        result = get_client().table("congress_trades").select("id").limit(1).execute()
+        return bool(result.data)
+    except Exception:
+        logger.exception("congress_trades_has_rows failed")
+        return True
 
 
 def market_news_has_rows() -> bool:
@@ -576,6 +607,26 @@ def prune_old_reddit_trends(days: int = 30) -> int:
         return len(result.data or [])
     except Exception:
         logger.exception("prune_old_reddit_trends failed")
+        return 0
+
+
+def prune_old_congress_trades(days: int = 400) -> int:
+    """Delete `congress_trades` rows whose transaction is older than `days`.
+
+    The source feed is a rolling window of the most recent disclosures, so the
+    table only grows with time; ~400 days keeps a year of consensus history (the
+    Congress view aggregates 30–90-day windows) while staying tiny. Monthly
+    cadence (cleanup.py).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        result = (
+            get_client().table("congress_trades").delete()
+            .lt("transaction_date", cutoff).execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_congress_trades failed")
         return 0
 
 

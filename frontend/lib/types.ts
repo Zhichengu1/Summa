@@ -236,6 +236,35 @@ export type RedditTrend = {
   industry: string | null;
 };
 
+// One disclosed congressional (or executive-branch) stock transaction (backend
+// ingest/congress_trades_ingest.py → congress_trades, from the normalized
+// House PTR + Senate eFD feeds). GLOBAL, not watchlist-scoped; only tickered
+// trades are stored. Powers the Congress view's consensus buys/sells.
+export type CongressTrade = {
+  id: string;
+  branch: string | null;            // 'congress' | 'executive'
+  chamber: string | null;           // 'senate' | 'house'
+  party: string | null;             // 'D' | 'R' | 'I'
+  state: string | null;
+  office: string | null;            // e.g. 'U.S. Senator · RI'
+  filer_id: string | null;          // stable per-politician key
+  filer_name: string | null;
+  ticker: string;
+  asset_name: string | null;
+  side: "buy" | "sell" | "exchange";
+  transaction_type: string | null;  // raw label, e.g. 'Sale (Partial)'
+  transaction_date: string;         // ISO date
+  filing_date: string | null;
+  is_late: boolean | null;
+  owner: string | null;             // 'Self' | 'Spouse' | 'Joint' | …
+  amount_low: number | null;        // disclosed range bounds
+  amount_high: number | null;
+  amount_label: string | null;      // '$15,001 - $50,000'
+  doc_url: string | null;           // official disclosure document
+  ret_since: number | null;         // stock return since the trade (percent)
+  excess_since: number | null;      // vs the market since the trade (percent)
+};
+
 export type DailyPrice = {
   cik: string;
   ticker: string | null;
@@ -279,7 +308,7 @@ export type PeriodType = "annual" | "quarterly";
 // ─── View routing ───────────────────────────────────────────────────────────────
 // The top-level dashboard view and the per-company tab. Shared by the root Page,
 // the Sidebar, and CompanyPage so the hash router and the components agree.
-export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "guide" | "company";
+export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "congress" | "guide" | "company";
 export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings" | "news";
 
 // ─── Reference data (backend-populated; read once per session) ──────────────────

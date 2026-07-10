@@ -7,7 +7,7 @@ import type {
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
   BeneficialOwnership, ProposedSale, DailyPrice,
   CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary, Ipo, NewsItem, MarketNews,
-  RedditTrend,
+  RedditTrend, CongressTrade,
 } from "../types";
 
 // Whole-table read, paged in 1000-row chunks. Any "fetch every row" query must use
@@ -49,6 +49,20 @@ export async function fetchIpos(): Promise<Ipo[]> {
     "ipos",
     "cik, accession_number, company_name, ticker, form, status, is_spac, price, shares, proceeds, offering_type, filing_url, filed_at",
     { col: "filed_at", asc: false },
+  );
+}
+
+// Congressional stock-trade disclosures (congress_trades), global/market-wide.
+// A bounded recency window on the transaction date, paged so it scales; the
+// Congress view aggregates consensus buys/sells (2+ distinct filers on one
+// ticker) client-side from these rows.
+export async function fetchCongressTrades(days = 120): Promise<CongressTrade[]> {
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+  return selectAllPaged<CongressTrade>(
+    "congress_trades",
+    "id, branch, chamber, party, state, office, filer_id, filer_name, ticker, asset_name, side, transaction_type, transaction_date, filing_date, is_late, owner, amount_low, amount_high, amount_label, doc_url, ret_since, excess_since",
+    { col: "transaction_date", asc: false },
+    { col: "transaction_date", value: cutoff },
   );
 }
 

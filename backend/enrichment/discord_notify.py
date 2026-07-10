@@ -925,6 +925,153 @@ def notify_reddit_value_picks(rows: list[dict[str, Any]],
         logger.exception("Discord value-picks webhook post failed")
 
 
+_CONGRESS_COLOR = 0x8B_5C_F6  # violet — matches the frontend chart-series violet
+_CONGRESS_SIDE = {"buy": "🟢", "sell": "🔴", "exchange": "🔄"}
+
+
+def _usd_unsigned(x: Any) -> str | None:
+    """Compact unsigned USD ('$15K'), reusing _fmt_usd_compact, or None."""
+    s = _fmt_usd_compact(x)
+    return s.lstrip("+") if s else None
+
+
+def _congress_amount(low: Any, high: Any) -> str:
+    """Disclosed amount range as '$15K–$50K' (ranges, never exact amounts)."""
+    lo, hi = _usd_unsigned(low), _usd_unsigned(high)
+    if lo and hi and lo != hi:
+        return f"{lo}–{hi}"
+    return lo or hi or "n/a"
+
+
+def _congress_short_date(iso: Any) -> str | None:
+    """'2026-06-30' → 'Jun 30' for dense digest lines, or None."""
+    try:
+        d = _dt.date.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+    return f"{d.strftime('%b')} {d.day}"
+
+
+def _congress_ticker_md(t: dict[str, Any], watched: set[str]) -> str:
+    """Bold ticker + watchlist star, ready for a digest line."""
+    tk = _label(t.get("ticker"), 12) or "?"
+    star = " ⭐" if tk in watched else ""
+    return f"**{tk}**{star}"
+
+
+def _congress_trade_line(t: dict[str, Any], watched: set[str]) -> str:
+    """One new-disclosure line: side, ticker, amount range, member, dates."""
+    emoji = _CONGRESS_SIDE.get(str(t.get("side")), "▫️")
+    verb = "bought" if t.get("side") == "buy" else "sold" if t.get("side") == "sell" else "exchanged"
+    who = _label(t.get("filer_name"), 32) or "Unknown"
+    tag = "·".join(x for x in (t.get("party"), t.get("state")) if x)
+    if tag:
+        who += f" ({tag})"
+    bits = [f"{emoji} {who} {verb} {_congress_ticker_md(t, watched)}",
+            _congress_amount(t.get("amount_low"), t.get("amount_high"))]
+    traded = _congress_short_date(t.get("transaction_date"))
+    filed = _congress_short_date(t.get("filing_date"))
+    if traded:
+        bits.append(f"traded {traded}" + (f", filed {filed}" if filed else ""))
+    return "  ·  ".join(bits)
+
+
+def _congress_consensus_line(c: dict[str, Any], watched: set[str]) -> str:
+    """One consensus line: ticker ×N members, est. total, who, latest trade."""
+    members = list(c.get("members") or [])
+    shown = ", ".join(_label(m, 24) for m in members[:3])
+    if len(members) > 3:
+        shown += f" +{len(members) - 3}"
+    bits = [f"{_congress_ticker_md(c, watched)} ×{c.get('count')}"]
+    est = _usd_unsigned(c.get("est_total"))
+    if est:
+        bits.append(f"~{est}")
+    if shown:
+        bits.append(shown)
+    last = _congress_short_date(c.get("last_date"))
+    if last:
+        bits.append(f"last {last}")
+    return "  ·  ".join(bits)
+
+
+def notify_congress_trades(new_trades: list[dict[str, Any]],
+                           consensus_buys: list[dict[str, Any]],
+                           consensus_sells: list[dict[str, Any]],
+                           watchlist_tickers: set[str] | None = None,
+                           total_new: int = 0,
+                           window_days: int = 30,
+                           min_filers: int = 2,
+                           latest_only: bool = False) -> None:
+    """Post ONE embed digest of congressional trade disclosures.
+
+    Description: the newly-disclosed trades (largest amount range first, already
+    capped by the caller). Fields: the current consensus buys/sells — tickers
+    with `min_filers`+ distinct members on the same side inside `window_days` —
+    plus a watchlist-hits strip. `latest_only=True` relabels the description as
+    the most recent disclosures (forced digest with no new delta). Posts to the
+    dedicated DISCORD_CONGRESS_WEBHOOK_URL when set, else the shared
+    DISCORD_WEBHOOK_URL. No-op without a webhook or content; fail-soft.
+    """
+    webhook = (os.environ.get("DISCORD_CONGRESS_WEBHOOK_URL")
+               or os.environ.get("DISCORD_WEBHOOK_URL"))
+    if not webhook or not (new_trades or consensus_buys or consensus_sells):
+        return
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not installed — skipping Discord congress-trades notification")
+        return
+
+    watched = {t.upper() for t in (watchlist_tickers or set())}
+
+    if latest_only:
+        header = f"Latest {len(new_trades)} disclosures on file"
+    else:
+        header = f"{total_new} new disclosure{'s' if total_new != 1 else ''} since the last check"
+    lines = [_congress_trade_line(t, watched) for t in new_trades]
+    desc = header + ("\n\n" + "\n".join(lines) if lines else "")
+
+    fields: list[dict[str, Any]] = []
+    if consensus_buys:
+        fields.append({
+            "name": f"🟢  Consensus buys — {min_filers}+ members, last {window_days}d",
+            "value": _join_fit([_congress_consensus_line(c, watched) for c in consensus_buys], 1000),
+            "inline": False})
+    if consensus_sells:
+        fields.append({
+            "name": f"🔴  Consensus sells — {min_filers}+ members, last {window_days}d",
+            "value": _join_fit([_congress_consensus_line(c, watched) for c in consensus_sells], 1000),
+            "inline": False})
+    hits: list[str] = []
+    for t in list(new_trades) + list(consensus_buys) + list(consensus_sells):
+        tk = _label(t.get("ticker"), 12)
+        if tk in watched and tk not in hits:
+            hits.append(tk)
+    if hits:
+        fields.append({"name": "⭐  On your watchlist",
+                       "value": _join_fit(["  ·  ".join(f"**{t}**" for t in hits)], 1000),
+                       "inline": False})
+
+    embed: dict[str, Any] = {
+        "title": "🏛️  Congress Trades — STOCK-Act disclosures"[:256],
+        "color": _CONGRESS_COLOR,
+        "description": desc[:4000],
+        "footer": {"text": "Summa · House PTR + Senate eFD · disclosures lag trades up to 45d"
+                           " · amounts are ranges · not investment advice"},
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    if fields:
+        embed["fields"] = fields[:25]
+
+    try:
+        resp = requests.post(webhook, json={"embeds": [embed]}, timeout=_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Discord congress-trades webhook returned %s: %s",
+                           resp.status_code, resp.text[:200])
+    except requests.RequestException:
+        logger.exception("Discord congress-trades webhook post failed")
+
+
 # Feed form → (emoji, trader-facing label, embed color). 8-K is the market-moving
 # one (material events) so it gets the amber "pay attention" color.
 _FILING_FORM_META: dict[str, tuple[str, str, int]] = {

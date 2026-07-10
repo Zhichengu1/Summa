@@ -36,6 +36,7 @@ IPO_RETENTION_DAYS = 120    # ipos pipeline rows pruned past ~4 months of inacti
 NEWS_RETENTION_DAYS = 30    # company_news headlines pruned past a rolling 30-day window
 MARKET_NEWS_RETENTION_DAYS = 30  # market_news (Top Intelligence) pruned past a rolling 30-day window
 REDDIT_RETENTION_DAYS = 30  # reddit_trends daily snapshots pruned past a rolling 30-day window
+CONGRESS_RETENTION_DAYS = 400  # congress_trades kept ~13 months of consensus history
 
 # Note: the current ingest stores only filing metadata in `filings` (no narrative
 # section text), and feed rows are deleted wholesale at FEED_RETENTION_DAYS, so
@@ -75,6 +76,9 @@ def run_cleanup() -> None:
 
     reddit_pruned = db.prune_old_reddit_trends(REDDIT_RETENTION_DAYS)
     logger.info("Pruned %d reddit_trends rows older than %d days", reddit_pruned, REDDIT_RETENTION_DAYS)
+
+    congress_pruned = db.prune_old_congress_trades(CONGRESS_RETENTION_DAYS)
+    logger.info("Pruned %d congress_trades rows older than %d days", congress_pruned, CONGRESS_RETENTION_DAYS)
 
 
 if __name__ == "__main__":
