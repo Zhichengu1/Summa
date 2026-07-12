@@ -7,7 +7,7 @@ import type {
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
   BeneficialOwnership, ProposedSale, DailyPrice,
   CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary, Ipo, NewsItem, MarketNews,
-  RedditTrend, CongressTrade,
+  RedditTrend, CongressTrade, CotReport,
 } from "../types";
 
 // Whole-table read, paged in 1000-row chunks. Any "fetch every row" query must use
@@ -63,6 +63,21 @@ export async function fetchCongressTrades(days = 120): Promise<CongressTrade[]> 
     "id, branch, chamber, party, state, office, filer_id, filer_name, ticker, asset_name, side, transaction_type, transaction_date, filing_date, is_late, owner, amount_low, amount_high, amount_label, doc_url, ret_since, excess_since",
     { col: "transaction_date", asc: false },
     { col: "transaction_date", value: cutoff },
+  );
+}
+
+// Weekly CFTC COT positioning (cot_reports), global/market-wide. Fetches the
+// trailing `weeks` of history for all ~28 curated markets in one paged read
+// (~4.4k skinny rows at the default 3y — the window the positioning index is a
+// percentile over), ascending by report date so lib/domain/cot.ts can build
+// per-market series directly.
+export async function fetchCotReports(weeks = 156): Promise<CotReport[]> {
+  const cutoff = new Date(Date.now() - weeks * 7 * 86_400_000).toISOString().slice(0, 10);
+  return selectAllPaged<CotReport>(
+    "cot_reports",
+    "market_code, report_date, market_name, market_group, open_interest, oi_change, noncomm_long, noncomm_short, comm_long, comm_short, nonrept_long, nonrept_short, noncomm_net, comm_net, nonrept_net, noncomm_net_pct_oi, traders_total",
+    { col: "report_date", asc: true },
+    { col: "report_date", value: cutoff },
   );
 }
 

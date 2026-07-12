@@ -23,6 +23,7 @@ const ManagersPage = dynamic(() => import("../views/ManagersPage").then((m) => (
 const IposPage = dynamic(() => import("../views/IposPage").then((m) => ({ default: m.IposPage })), { ssr: false, loading: viewLoading });
 const RedditPage = dynamic(() => import("../views/RedditPage").then((m) => ({ default: m.RedditPage })), { ssr: false, loading: viewLoading });
 const CongressPage = dynamic(() => import("../views/CongressPage").then((m) => ({ default: m.CongressPage })), { ssr: false, loading: viewLoading });
+const CotPage = dynamic(() => import("../views/CotPage").then((m) => ({ default: m.CotPage })), { ssr: false, loading: viewLoading });
 const GuidePage = dynamic(() => import("../views/GuidePage").then((m) => ({ default: m.GuidePage })), { ssr: false, loading: viewLoading });
 const CompanyPage = dynamic(() => import("../views/company/CompanyPage").then((m) => ({ default: m.CompanyPage })), { ssr: false, loading: viewLoading });
 import {
@@ -63,6 +64,7 @@ export default function Page() {
       if (h === "ipos") { setView("ipos"); setActiveCik(null); return; }
       if (h === "reddit") { setView("reddit"); setActiveCik(null); return; }
       if (h === "congress") { setView("congress"); setActiveCik(null); return; }
+      if (h === "cot") { setView("cot"); setActiveCik(null); return; }
       if (h === "guide") { setView("guide"); setActiveCik(null); return; }
       const m = h.match(/^c=([^/]+)(?:\/(.*))?$/);
       if (m) {
@@ -197,6 +199,7 @@ export default function Page() {
         onIpos={() => navigate("ipos")}
         onReddit={() => navigate("reddit")}
         onCongress={() => navigate("congress")}
+        onCot={() => navigate("cot")}
         onGuide={() => navigate("guide")}
         onRemove={handleRemove}
         newFilings={newFilings}
@@ -234,6 +237,7 @@ export default function Page() {
             {view === "congress" && (
               <CongressPage companies={watchCompanies} onCompany={openCompany} />
             )}
+            {view === "cot" && <CotPage />}
             {view === "guide" && <GuidePage />}
             {view === "company" && activeCik && (
               <CompanyPage

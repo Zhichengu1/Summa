@@ -564,7 +564,7 @@ CREATE POLICY "anon read reddit_trends" ON reddit_trends FOR SELECT TO anon USIN
 -- keyless JSON behind Kadoa's open-source Congress Trading Monitor (normalized
 -- House Clerk PTR + Senate eFD feeds). One row per disclosed transaction,
 -- keyed on the source's stable id; only rows with a resolvable ticker are
--- stored. Powers the Congress view's consensus buys/sells (stocks 2+ members
+-- stored. Powers the Congress view's consensus buys/sells (stocks 3+ members
 -- bought/sold in a window); ~400-day rolling window
 -- (cleanup.py prune_old_congress_trades). Idempotent.
 -- ===========================================================================
@@ -605,5 +605,48 @@ REVOKE ALL ON congress_trades FROM anon, authenticated;
 GRANT SELECT ON congress_trades TO anon;
 DROP POLICY IF EXISTS "anon read congress_trades" ON congress_trades;
 CREATE POLICY "anon read congress_trades" ON congress_trades FOR SELECT TO anon USING (true);
+
+-- ===========================================================================
+-- cot_reports — weekly CFTC Commitments of Traders positioning. GLOBAL
+-- (market-wide, not watchlist-scoped): written by ingest/cot_ingest.py
+-- (summa-cot.yml, weekly after the Friday ~3:30pm ET release) from the free
+-- keyless CFTC Public Reporting API (legacy futures-only report) for a curated
+-- set of ~28 major futures markets (equity indices, rates, FX, crypto, energy,
+-- metals, ags). One row per market per weekly report (data as of Tuesday):
+-- raw non-commercial (large speculator) / commercial (hedger) / non-reportable
+-- longs+shorts plus precomputed nets. Powers the COT view's positioning index
+-- (spec net percentile over a trailing 1y/3y range → crowded long/short,
+-- flips, weekly shifts) and the weekly Discord digest. ~1200-day rolling
+-- window (cleanup.py prune_old_cot_reports). Idempotent.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS cot_reports (
+    market_code        TEXT NOT NULL,            -- CFTC contract market code, e.g. '088691'
+    report_date        DATE NOT NULL,            -- Tuesday as-of date of the report
+    market_name        TEXT,                     -- display name, e.g. 'Gold'
+    market_group       TEXT,                     -- indices|rates|fx|crypto|energy|metals|ags
+    open_interest      BIGINT,
+    oi_change          BIGINT,                   -- WoW change in open interest
+    noncomm_long       BIGINT,                   -- large speculators (funds)
+    noncomm_short      BIGINT,
+    noncomm_spread     BIGINT,
+    comm_long          BIGINT,                   -- commercials (hedgers)
+    comm_short         BIGINT,
+    nonrept_long       BIGINT,                   -- small traders
+    nonrept_short      BIGINT,
+    noncomm_net        BIGINT,                   -- long - short (the headline series)
+    comm_net           BIGINT,
+    nonrept_net        BIGINT,
+    noncomm_net_pct_oi NUMERIC,                  -- spec net as % of open interest
+    traders_total      INT,
+    created_at         TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (market_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_cot_reports_date ON cot_reports (report_date DESC);
+
+ALTER TABLE cot_reports ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON cot_reports FROM anon, authenticated;
+GRANT SELECT ON cot_reports TO anon;
+DROP POLICY IF EXISTS "anon read cot_reports" ON cot_reports;
+CREATE POLICY "anon read cot_reports" ON cot_reports FOR SELECT TO anon USING (true);
 
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        

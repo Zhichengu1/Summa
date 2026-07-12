@@ -1,12 +1,15 @@
 "use client";
 // Congress Trades — STOCK-Act disclosure tracker over `congress_trades`
 // (normalized House PTR + Senate eFD filings, refreshed ~daily by
-// summa-congress.yml). The headline read is CONSENSUS: stocks that two or more
-// distinct members bought — or sold — inside the selected window, ranked by how
-// many filers piled in. Disclosures lag the trade by up to 45 days and amounts
+// summa-congress.yml). The headline read is CONSENSUS: stocks that three or
+// more distinct members bought — or sold — inside the selected window (default
+// the latest 30 days), ranked by how many filers piled in, freshest first
+// within a count. A totals strip above the panels sums the window's whole
+// buy-vs-sell activity. Disclosures lag the trade by up to 45 days and amounts
 // are ranges, so this is sentiment, not a real-time signal. A full trade tape
-// sits below the consensus panels; watchlist tickers click through to their
-// company page.
+// sits below the consensus panels — clicking a consensus stock drills the tape
+// down to that ticker's individual trades; watchlist tickers on tape rows click
+// through to their company page.
 import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
@@ -47,12 +50,14 @@ function SideBadge({ side }: { side: CongressTrade["side"] }) {
 type Member = { name: string; party: string | null };
 
 // One consensus row: a ticker with `count` distinct filers on the same side
-// inside the window. `otherSide` = distinct filers on the opposite side.
+// inside the window. `trades` = individual transactions on that side;
+// `otherSide` = distinct filers on the opposite side.
 type Consensus = {
   ticker: string;
   name: string | null;
   count: number;
   members: Member[];
+  trades: number;
   estTotal: number;
   lastDate: string;
   otherSide: number;
@@ -80,8 +85,10 @@ export function CongressPage({ companies, onCompany }: {
 }) {
   const [rows, setRows] = useState<CongressTrade[]>([]);
   const [loading, setLoading] = useState(true);
-  const [windowDays, setWindowDays] = useState<number>(60);
-  const [minFilers, setMinFilers] = useState<number>(2);
+  const [windowDays, setWindowDays] = useState<number>(30);
+  const [minFilers, setMinFilers] = useState<number>(3);
+  // Drill-down: a consensus row click narrows the tape to that ticker.
+  const [detailTicker, setDetailTicker] = useState<string | null>(null);
 
   useEffect(() => {
     fetchCongressTrades().then((r) => { setRows(r); setLoading(false); });
@@ -99,27 +106,28 @@ export function CongressPage({ companies, onCompany }: {
     return rows.filter((r) => r.transaction_date >= cutoff);
   }, [rows, windowDays]);
 
-  // Per-ticker consensus: distinct filers per side, est. dollar totals, recency.
+  // Per-ticker consensus: distinct filers per side, trade counts, est. dollar
+  // totals, recency — ranked most members first, then freshest last trade.
   const { buys, sells } = useMemo(() => {
     type Agg = {
       ticker: string; name: string | null; lastDate: string;
       buyers: Map<string, Member>; sellers: Map<string, Member>;
-      buyEst: number; sellEst: number;
+      buyEst: number; sellEst: number; buyN: number; sellN: number;
     };
     const byTicker = new Map<string, Agg>();
     for (const t of inWindow) {
       if (t.side === "exchange") continue;
       let a = byTicker.get(t.ticker);
       if (!a) {
-        a = { ticker: t.ticker, name: null, lastDate: t.transaction_date, buyers: new Map(), sellers: new Map(), buyEst: 0, sellEst: 0 };
+        a = { ticker: t.ticker, name: null, lastDate: t.transaction_date, buyers: new Map(), sellers: new Map(), buyEst: 0, sellEst: 0, buyN: 0, sellN: 0 };
         byTicker.set(t.ticker, a);
       }
       if (t.asset_name && !a.name) a.name = t.asset_name.replace(/ - Common Stock$/i, "");
       if (t.transaction_date > a.lastDate) a.lastDate = t.transaction_date;
       const key = t.filer_id ?? t.filer_name ?? "?";
       const member: Member = { name: t.filer_name ?? "Unknown", party: t.party };
-      if (t.side === "buy") { a.buyers.set(key, member); a.buyEst += estAmount(t); }
-      else { a.sellers.set(key, member); a.sellEst += estAmount(t); }
+      if (t.side === "buy") { a.buyers.set(key, member); a.buyEst += estAmount(t); a.buyN += 1; }
+      else { a.sellers.set(key, member); a.sellEst += estAmount(t); a.sellN += 1; }
     }
     const build = (side: "buy" | "sell"): Consensus[] =>
       Array.from(byTicker.values())
@@ -128,14 +136,34 @@ export function CongressPage({ companies, onCompany }: {
           name: a.name,
           count: side === "buy" ? a.buyers.size : a.sellers.size,
           members: Array.from((side === "buy" ? a.buyers : a.sellers).values()),
+          trades: side === "buy" ? a.buyN : a.sellN,
           estTotal: side === "buy" ? a.buyEst : a.sellEst,
           lastDate: a.lastDate,
           otherSide: side === "buy" ? a.sellers.size : a.buyers.size,
         }))
         .filter((c) => c.count >= minFilers)
-        .sort((x, y) => y.count - x.count || y.estTotal - x.estTotal);
+        .sort((x, y) => y.count - x.count || y.lastDate.localeCompare(x.lastDate) || y.estTotal - x.estTotal);
     return { buys: build("buy"), sells: build("sell") };
   }, [inWindow, minFilers]);
+
+  // Window-wide totals per side — the "total recent buys vs sells" headline.
+  const totals = useMemo(() => {
+    const make = () => ({ trades: 0, members: new Set<string>(), est: 0 });
+    const t = { buy: make(), sell: make() };
+    for (const r of inWindow) {
+      if (r.side !== "buy" && r.side !== "sell") continue;
+      const s = t[r.side];
+      s.trades += 1;
+      s.members.add(r.filer_id ?? r.filer_name ?? "?");
+      s.est += estAmount(r);
+    }
+    return t;
+  }, [inWindow]);
+
+  const tapeRows = useMemo(
+    () => (detailTicker ? inWindow.filter((r) => r.ticker === detailTicker) : inWindow),
+    [inWindow, detailTicker],
+  );
 
   const consensusCols = (side: "buy" | "sell"): Column<Consensus>[] => [
     { key: "ticker", header: "Ticker", width: "110px", value: (r) => r.ticker,
@@ -160,6 +188,12 @@ export function CongressPage({ companies, onCompany }: {
       value: (r) => r.count,
       render: (r) => (
         <span style={{ fontWeight: 700, color: side === "buy" ? "var(--pos)" : "var(--neg)" }}>{r.count}</span>
+      ) },
+    { key: "trades", header: "Trades", width: "70px", align: "right", value: (r) => r.trades,
+      render: (r) => (
+        <span className="muted" title={`${r.trades} individual ${side} transaction${r.trades !== 1 ? "s" : ""} in the window`}>
+          {r.trades}
+        </span>
       ) },
     { key: "members", header: "Members", value: () => null,
       render: (r) => <MembersCell members={r.members} /> },
@@ -238,7 +272,8 @@ export function CongressPage({ companies, onCompany }: {
         <h1 className="page-title">Congress Trades</h1>
         <div className="page-sub">
           STOCK-Act disclosures (House PTR + Senate eFD) · consensus = {minFilers}+ distinct members on the
-          same side of one stock within {windowDays} days · disclosures can lag trades by up to 45 days
+          same side of one stock within the latest {windowDays} days · click a consensus stock to see its
+          individual trades below · disclosures can lag trades by up to 45 days
         </div>
       </div>
 
@@ -249,13 +284,34 @@ export function CongressPage({ companies, onCompany }: {
           </button>
         ))}
         <span style={{ width: 1, alignSelf: "stretch", background: "var(--border)", margin: "0 4px" }} />
-        {[2, 3].map((n) => (
+        {[2, 3, 4].map((n) => (
           <button key={n} className={`chip${minFilers === n ? " active" : ""}`}
             title={`Require at least ${n} distinct members on the same side`}
             onClick={() => setMinFilers(n)}>
             {n}+ members
           </button>
         ))}
+      </div>
+
+      <div className="kpi-strip dense" style={{ marginBottom: 16 }}>
+        {(["buy", "sell"] as const).map((side) => {
+          const t = totals[side];
+          const buySide = side === "buy";
+          return (
+            <div key={side} className="kpi">
+              <div className="k-label" style={{ color: buySide ? "var(--pos)" : "var(--neg)" }}>
+                {buySide ? "▲ Total buys" : "▼ Total sells"} · last {windowDays}d
+              </div>
+              <div className="k-value" style={{ color: buySide ? "var(--pos)" : "var(--neg)" }}>
+                {t.trades.toLocaleString()} <span style={{ fontSize: 13, fontWeight: 500, color: "var(--fg-3)" }}>trades</span>
+              </div>
+              <div className="k-delta">
+                <span>{t.members.size} member{t.members.size !== 1 ? "s" : ""}</span>
+                <span title="Sum of disclosed-range midpoints — disclosures give ranges, not exact amounts">~{fmtUSD(t.est)} est.</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(430px, 1fr))", gap: 16, marginBottom: 24 }}>
@@ -267,7 +323,7 @@ export function CongressPage({ companies, onCompany }: {
             columns={consensusCols("buy")} rows={buys} rowKey={(r) => r.ticker}
             initialSort={{ key: "count", dir: "desc" }}
             empty={emptyNote} maxHeight="340px"
-            onRowClick={(r) => { const cik = watchByTicker.get(r.ticker); if (cik) onCompany(cik); }}
+            onRowClick={(r) => setDetailTicker(r.ticker)}
           />
         </div>
         <div>
@@ -278,16 +334,24 @@ export function CongressPage({ companies, onCompany }: {
             columns={consensusCols("sell")} rows={sells} rowKey={(r) => r.ticker}
             initialSort={{ key: "count", dir: "desc" }}
             empty={emptyNote} maxHeight="340px"
-            onRowClick={(r) => { const cik = watchByTicker.get(r.ticker); if (cik) onCompany(cik); }}
+            onRowClick={(r) => setDetailTicker(r.ticker)}
           />
         </div>
       </div>
 
-      <div style={{ fontWeight: 700, margin: "4px 0 8px" }}>
-        All disclosed trades · last {windowDays} days · {inWindow.length}
+      <div style={{ fontWeight: 700, margin: "4px 0 8px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        {detailTicker
+          ? `${detailTicker} — every disclosed trade · last ${windowDays} days · ${tapeRows.length}`
+          : `All disclosed trades · last ${windowDays} days · ${inWindow.length}`}
+        {detailTicker && (
+          <button className="chip active" onClick={() => setDetailTicker(null)}
+            title="Clear the ticker drill-down and show every trade in the window">
+            ✕ show all
+          </button>
+        )}
       </div>
       <DataTable
-        columns={tapeCols} rows={inWindow} rowKey={(r) => r.id}
+        columns={tapeCols} rows={tapeRows} rowKey={(r) => r.id}
         filterable filterPlaceholder="Filter by member, ticker, state…"
         initialSort={{ key: "date", dir: "desc" }}
         empty={rows.length === 0 ? emptyNote : "No trades in this window."}

@@ -9,7 +9,7 @@ PTRs + Senate eFD, plus executive-branch OGE filings) into one rolling window of
 the ~5,000 most recent transactions, refreshed daily.
 
 Only rows with a resolvable ticker are stored — they're the tradeable signal the
-Congress view aggregates ("which stocks did 2+ members buy / sell in the last N
+Congress view aggregates ("which stocks did 3+ members buy / sell in the last N
 days"); bonds, munis and unresolved assets are skipped. Rows are keyed on the
 source's stable per-transaction `id` and upserted whole each run, so re-runs are
 idempotent and the slowly-updating return columns (`ret_since`, `excess_since`)
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 _ALERT_N = int(os.environ.get("CONGRESS_ALERT_N", "10"))
 # Consensus screen: window + how many distinct members must share a side.
 _CONSENSUS_DAYS = int(os.environ.get("CONGRESS_CONSENSUS_DAYS", "30"))
-_CONSENSUS_MIN = int(os.environ.get("CONGRESS_CONSENSUS_MIN", "2"))
+_CONSENSUS_MIN = int(os.environ.get("CONGRESS_CONSENSUS_MIN", "3"))
 # Max consensus tickers per side in the digest fields.
 _CONSENSUS_ALERT_N = 8
 
@@ -135,9 +135,11 @@ def _consensus(rows: list[dict[str, Any]], days: int, min_filers: int,
     """(consensus buys, consensus sells) over the last `days` of trade dates.
 
     A consensus entry is a ticker where `min_filers`+ DISTINCT members traded the
-    same side inside the window: {ticker, count, members, est_total, last_date},
-    strongest first. Computed from the freshly-fetched feed rows (the feed spans
-    ~8 weeks, comfortably covering the window) — no extra DB read.
+    same side inside the window: {ticker, count, members, trades, est_total,
+    last_date, opposed} — ranked most members first, then most-recent last trade,
+    then est. dollars, so the freshest crowded names lead. Computed from the
+    freshly-fetched feed rows (the feed spans ~8 weeks, comfortably covering the
+    window) — no extra DB read.
     """
     cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
     agg: dict[str, dict[str, Any]] = {}
@@ -147,22 +149,50 @@ def _consensus(rows: list[dict[str, Any]], days: int, min_filers: int,
         a = agg.setdefault(t["ticker"], {
             "ticker": t["ticker"], "last_date": t["transaction_date"],
             "buy": {}, "sell": {}, "buy_est": 0.0, "sell_est": 0.0,
+            "buy_n": 0, "sell_n": 0,
         })
         a["last_date"] = max(a["last_date"], t["transaction_date"])
         a[t["side"]][t.get("filer_id") or t.get("filer_name")] = t.get("filer_name") or "Unknown"
         a[f"{t['side']}_est"] += _est_amount(t)
+        a[f"{t['side']}_n"] += 1
 
     def build(side: str) -> list[dict[str, Any]]:
+        other = "sell" if side == "buy" else "buy"
         out = [
             {"ticker": a["ticker"], "count": len(a[side]),
-             "members": sorted(a[side].values()), "est_total": a[f"{side}_est"],
-             "last_date": a["last_date"]}
+             "members": sorted(a[side].values()), "trades": a[f"{side}_n"],
+             "est_total": a[f"{side}_est"], "last_date": a["last_date"],
+             "opposed": len(a[other])}
             for a in agg.values() if len(a[side]) >= min_filers
         ]
-        out.sort(key=lambda c: (-c["count"], -c["est_total"]))
+        # Stable multi-pass sort: est $ → latest trade date → member count, so
+        # the final order is count desc, freshest first within a count, then $.
+        out.sort(key=lambda c: -c["est_total"])
+        out.sort(key=lambda c: c["last_date"], reverse=True)
+        out.sort(key=lambda c: -c["count"])
         return out[:_CONSENSUS_ALERT_N]
 
     return build("buy"), build("sell")
+
+
+def _totals(rows: list[dict[str, Any]], days: int) -> dict[str, dict[str, Any]]:
+    """Window-wide activity totals per side: trade count, distinct members, est $.
+
+    The digest's "total recent buys vs sells" headline — every tickered trade in
+    the window counts, not just the consensus names.
+    """
+    cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+    tot: dict[str, dict[str, Any]] = {
+        s: {"trades": 0, "members": set(), "est": 0.0} for s in ("buy", "sell")}
+    for t in rows:
+        if t["transaction_date"] < cutoff or t["side"] not in ("buy", "sell"):
+            continue
+        s = tot[t["side"]]
+        s["trades"] += 1
+        s["members"].add(t.get("filer_id") or t.get("filer_name"))
+        s["est"] += _est_amount(t)
+    return {side: {"trades": s["trades"], "members": len(s["members"]), "est": s["est"]}
+            for side, s in tot.items()}
 
 
 def _watchlist_tickers() -> set[str]:
@@ -184,15 +214,17 @@ def _notify(rows: list[dict[str, Any]], new_rows: list[dict[str, Any]]) -> None:
     else:
         shown = sorted(new_rows, key=_est_amount, reverse=True)
     buys, sells = _consensus(rows, _CONSENSUS_DAYS, _CONSENSUS_MIN)
-    logger.info("  congress_trades: consensus buys %s | sells %s",
-                [c["ticker"] for c in buys] or "—", [c["ticker"] for c in sells] or "—")
+    totals = _totals(rows, _CONSENSUS_DAYS)
+    logger.info("  congress_trades: consensus buys %s | sells %s | totals %dd 🟢%d/🔴%d trades",
+                [c["ticker"] for c in buys] or "—", [c["ticker"] for c in sells] or "—",
+                _CONSENSUS_DAYS, totals["buy"]["trades"], totals["sell"]["trades"])
     try:
         discord_notify.notify_congress_trades(
             shown[:_ALERT_N], buys, sells,
             watchlist_tickers=_watchlist_tickers(),
             total_new=len(new_rows),
             window_days=_CONSENSUS_DAYS, min_filers=_CONSENSUS_MIN,
-            latest_only=latest_only)
+            latest_only=latest_only, totals=totals)
     except Exception:
         logger.exception("  congress_trades: Discord notify failed")
 

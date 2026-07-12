@@ -5,7 +5,7 @@ name: summa-congress
 # (normalized House PTR + Senate eFD + executive-branch STOCK-Act filings,
 # refreshed daily) and upserts every tickered transaction, keyed on the
 # source's stable id — re-runs are idempotent. Powers the frontend "Congress"
-# view (consensus buys/sells: stocks 2+ members bought or sold in a window)
+# view (consensus buys/sells: stocks 3+ members bought or sold in a window)
 # and posts a Discord digest of the genuinely-new disclosures + the current
 # consensus — quiet when nothing is new, suppressed on the first-ever seed.
 # The feed updates ~daily, so two runs bracket the US day: 11:25 UTC (pre-open

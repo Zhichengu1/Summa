@@ -265,6 +265,31 @@ export type CongressTrade = {
   excess_since: number | null;      // vs the market since the trade (percent)
 };
 
+// One weekly CFTC Commitments of Traders report row for one futures market
+// (backend ingest/cot_ingest.py → cot_reports, from the free CFTC Public
+// Reporting API's legacy futures-only report). GLOBAL, not watchlist-scoped;
+// ~28 curated major markets. Powers the COT view's positioning index
+// (lib/domain/cot.ts derives crowded longs/shorts, flips, weekly shifts).
+export type CotReport = {
+  market_code: string;              // CFTC contract market code, e.g. '088691'
+  report_date: string;              // ISO date — the Tuesday the data is as of
+  market_name: string | null;       // display name, e.g. 'Gold'
+  market_group: string | null;      // indices|rates|fx|crypto|energy|metals|ags
+  open_interest: number | null;
+  oi_change: number | null;         // WoW change in open interest
+  noncomm_long: number | null;      // large speculators (funds)
+  noncomm_short: number | null;
+  comm_long: number | null;         // commercials (hedgers)
+  comm_short: number | null;
+  nonrept_long: number | null;      // small traders
+  nonrept_short: number | null;
+  noncomm_net: number | null;       // long - short (the headline series)
+  comm_net: number | null;
+  nonrept_net: number | null;
+  noncomm_net_pct_oi: number | null; // spec net as % of open interest
+  traders_total: number | null;
+};
+
 export type DailyPrice = {
   cik: string;
   ticker: string | null;
@@ -308,7 +333,7 @@ export type PeriodType = "annual" | "quarterly";
 // ─── View routing ───────────────────────────────────────────────────────────────
 // The top-level dashboard view and the per-company tab. Shared by the root Page,
 // the Sidebar, and CompanyPage so the hash router and the components agree.
-export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "congress" | "guide" | "company";
+export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "congress" | "cot" | "guide" | "company";
 export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings" | "news";
 
 // ─── Reference data (backend-populated; read once per session) ──────────────────

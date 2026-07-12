@@ -57,6 +57,7 @@ Summa/
 │   │   ├── market_news_ingest.py ← GLOBAL curated market-mover RSS (SEC/Fed/FDA/PRN) → market_news
 │   │   ├── reddit_trends_ingest.py ← GLOBAL daily Reddit most-discussed tickers (ApeWisdom/Tradestie) → reddit_trends + Discord digest
 │   │   ├── congress_trades_ingest.py ← GLOBAL congressional STOCK-Act trades (Kadoa monitor JSON) → congress_trades + Discord new-disclosure/consensus digest
+│   │   ├── cot_ingest.py         ← GLOBAL weekly CFTC Commitments of Traders (public reporting API) → cot_reports + Discord positioning digest
 │   │   ├── summary_ingest.py     ← precomputes company_summary (price+technicals+activity)
 │   │   ├── reference_ingest.py   ← SIC industry/theme → company_profiles / company_themes
 │   │   └── entity_ingest.py      ← seeds/entities.yaml → entities registry (global, runs once)
@@ -75,6 +76,7 @@ Summa/
 │   │   ├── daily_brief.py        ← daily watchlist brief → Discord (edgar-free; company_summary + earnings radar)
 │   │   ├── reddit_trends.py      ← daily Reddit trending-stocks digest → Discord (edgar-free; thin wrapper over ingest/reddit_trends_ingest)
 │   │   ├── congress_trades.py    ← congressional-trades refresh (edgar-free; thin wrapper over ingest/congress_trades_ingest)
+│   │   ├── cot.py                ← weekly CFTC COT refresh (edgar-free; thin wrapper over ingest/cot_ingest)
 │   │   ├── cleanup.py            ← monthly retention maintenance
 │   │   └── backfill_manager_quarters.py ← seeds prior 13F quarters so the Institutional Investors latest-vs-prior comparison works immediately (idempotent)
 │   ├── seeds/                    ← entities.yaml, profiles.yaml (curated reference data)
@@ -88,6 +90,7 @@ Summa/
 │   ├── summa-brief.yml            ← weekday-morning Discord watchlist brief (python -m tools.daily_brief; requirements-news.txt)
 │   ├── summa-reddit.yml           ← Reddit trending-stocks: 13:15 UTC daily full digest + weekday 16:15/20:15 UTC intraday refresh with surge-only alerts (python -m tools.reddit_trends; requirements-news.txt)
 │   ├── summa-congress.yml         ← congressional trades 2×/day (11:25/22:25 UTC; python -m tools.congress_trades; requirements-news.txt) + Discord digest when new disclosures land
+│   ├── summa-cot.yml              ← weekly CFTC COT (Fri 21:05 UTC after the ~3:30pm ET release + Mon 22:05 UTC holiday catch-up; python -m tools.cot; requirements-news.txt) + Discord digest when a new report week lands
 │   ├── summa-cleanup.yml          ← monthly retention (python -m tools.cleanup)
 │   ├── summa-secindex.yml         ← weekly SEC index rebuild (python -m tools.build_sec_index)
 │   ├── summa-13f-quarter.yml      ← post-deadline (16th of Feb/May/Aug/Nov) 13F quarter roll-forward (python -m tools.backfill_manager_quarters)
@@ -112,7 +115,8 @@ Summa/
     │   │                            session status/ET clock), OverviewPage, ScannerSection (+ MomentumScanner),
     │   │                            SearchPage, FeedPage, NewsPage, CalendarView, ManagersPage, IposPage,
     │   │                            RedditPage (Reddit Buzz leaderboard over reddit_trends),
-    │   │                            CongressPage (consensus buys/sells over congress_trades), GuidePage
+    │   │                            CongressPage (consensus buys/sells over congress_trades),
+    │   │                            CotPage (COT futures positioning index over cot_reports), GuidePage
     │   └── company/               ← the per-company page + its tabs:
     │                                CompanyPage, CompanyOverviewTab, StrategyTab, FundamentalsTab,
     │                                PeersTab, OwnershipTab, CatalystsTab, FilingsTab, NewsTab, companyAux.ts (shared CompanyAux)
@@ -182,7 +186,10 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
     STOCK-Act trade feed in `congress_trades_ingest.py` (the keyless static JSON behind
     Kadoa's open-source Congress Trading Monitor — normalized House PTR + Senate eFD
     disclosures → `congress_trades`; scraping the official sites directly would need
-    session handling / PDF parsing). SEC EDGAR remains the
+    session handling / PDF parsing), and the weekly CFTC Commitments of Traders report
+    in `cot_ingest.py` (the keyless CFTC Public Reporting API / Socrata, legacy
+    futures-only dataset 6dca-aqww → `cot_reports` for ~28 curated major futures
+    markets). SEC EDGAR remains the
     source for all structured filings data. Any new source must keep the same contract: keyless,
     zero-cost, and fail-soft (a dead feed logs and is skipped, never aborting a run).
     (Reuters/Bloomberg are intentionally NOT added — no free RSS; their coverage
@@ -296,6 +303,7 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `market_news` | `guid` | GLOBAL curated market-mover feed (SEC/Fed/FDA/PRN), importance-filtered (30-day window) |
 | `reddit_trends` | trend_date+ticker | GLOBAL daily top-N most-discussed tickers on the investing subreddits (ApeWisdom ranks + optional Tradestie WSB sentiment + persisted Yahoo price context `last_price`/`day_pct`/`off_high_pct`/`off_low_pct`/`is_etf`; 30-day window; surfaced by the Reddit Buzz view via `fetchRedditTrends`) |
 | `congress_trades` | `id` (source txn id) | GLOBAL congressional (+ executive-branch) STOCK-Act stock trades from the Kadoa monitor feed (tickered rows only; ~400-day window; surfaced by the Congress view's consensus buys/sells via `fetchCongressTrades`) |
+| `cot_reports` | market_code+report_date | GLOBAL weekly CFTC Commitments of Traders positioning for ~28 curated futures markets (legacy futures-only report: spec/commercial/small-trader longs+shorts + precomputed nets; ~1200-day window; surfaced by the COT view's positioning index via `fetchCotReports`, signals derived in `lib/domain/cot.ts`) |
 | `company_profiles` | `cik` | SIC industry/sector |
 | `company_themes` | cik+name | Recomputed theme tags (delete+insert per cik) |
 | `entities` | `match_key` | Global entity-context registry (seeded) |
@@ -320,7 +328,9 @@ days** (`prune_old_market_news`); `reddit_trends` daily snapshots are pruned pas
 days** (`prune_old_reddit_trends`) — one tiny top-N snapshot per day, kept just long
 enough for week-over-week comparisons; `congress_trades` rows are pruned past **400
 days** (`prune_old_congress_trades`) — the Congress view aggregates 30–90-day consensus
-windows, so ~13 months of history is plenty. All other structured warehouse tables
+windows, so ~13 months of history is plenty; `cot_reports` rows are pruned past **1200
+days** (`prune_old_cot_reports`) — the COT positioning index is a percentile over a
+trailing 3-year range, so ~3.3y keeps the full 156-week lookback with margin. All other structured warehouse tables
 (fundamentals, holdings, events) are small/bounded per company and retained.
 
 > The price reads (`fetchPrices`, `summary_ingest`) fetch the most-recent N sessions via
@@ -440,14 +450,24 @@ Congress-trades tuning: `CONGRESS_TRADES_URL` (override the feed URL; default th
 monitor's static trades.json), `CONGRESS_ALERT_N` (new-disclosure lines in the Discord
 digest, default 10 — largest amount ranges first), `CONGRESS_CONSENSUS_DAYS` /
 `CONGRESS_CONSENSUS_MIN` (the digest + log consensus screen: tickers where MIN+ distinct
-members — default 2 — traded the same side within DAYS — default 30; the frontend
+members — default 3 — traded the same side within DAYS — default 30; the digest header
+also carries the window's total buy-vs-sell activity — trades, distinct members, est. $ —
+and each consensus line its trade count + ⚖️ opposed-members marker; the frontend
 Congress view recomputes the same screen client-side with its own toggles),
 `CONGRESS_FORCE_DIGEST` (`"1"` — or `--force` on `tools.congress_trades` — posts the
 latest-state digest even when nothing is new; the summa-congress workflow_dispatch
 `force_digest` input sets it), `DISCORD_CONGRESS_WEBHOOK_URL` (optional dedicated Discord
 channel for the congress digest; falls back to `DISCORD_WEBHOOK_URL`. New-disclosure
 alerts are suppressed on the table's first-ever seed and skipped when a run finds no new
-ids). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
+ids). COT tuning: `COT_HISTORY_WEEKS` (first-seed backfill + the digest's COT-index
+lookback, default 156 ≈ 3y), `COT_ALERT_N` (markets in the digest's biggest-weekly-shifts
+list, default 8), `COT_SHIFT_PCT_OI` (a weekly spec-net change ≥ this % of open interest
+counts as a notable flow, default 2.0), `COT_API_URL` (override the CFTC Socrata endpoint),
+`COT_FORCE_DIGEST` (`"1"` — or `--force` on `tools.cot` — posts the latest-state digest
+even when no new report week landed; the summa-cot workflow_dispatch `force_digest` input
+sets it), `DISCORD_COT_WEBHOOK_URL` (optional dedicated Discord channel for the COT
+digest; falls back to `DISCORD_WEBHOOK_URL`. The digest is suppressed on the table's
+first-ever seed and skipped when no new report week arrived). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
 edgartools; SEC's ceiling is ~10/s) — read by edgartools **at import time**, so it must be
 set in the environment (workflow `env:` / `backend/.env`) before `main.py` imports `edgar`,
 not assigned in Python. Set to `"9"` in the EDGAR workflows (pipeline, 13F-quarter).

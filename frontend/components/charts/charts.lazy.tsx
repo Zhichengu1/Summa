@@ -16,6 +16,7 @@ export const SimpleBarChart = dynamic(() => import("./charts").then((m) => ({ de
 export const PairedBarChart = dynamic(() => import("./charts").then((m) => ({ default: m.PairedBarChart })), { ssr: false, loading });
 export const StackedBarChart = dynamic(() => import("./charts").then((m) => ({ default: m.StackedBarChart })), { ssr: false, loading });
 export const DivergingBarChart = dynamic(() => import("./charts").then((m) => ({ default: m.DivergingBarChart })), { ssr: false, loading });
+export const NetPositionChart = dynamic(() => import("./charts").then((m) => ({ default: m.NetPositionChart })), { ssr: false, loading });
 export const HorizontalBarChart = dynamic(() => import("./charts").then((m) => ({ default: m.HorizontalBarChart })), { ssr: false, loading });
 export const CumulativeLineChart = dynamic(() => import("./charts").then((m) => ({ default: m.CumulativeLineChart })), { ssr: false, loading });
 export const PriceChart = dynamic(() => import("./charts").then((m) => ({ default: m.PriceChart })), { ssr: false, loading });

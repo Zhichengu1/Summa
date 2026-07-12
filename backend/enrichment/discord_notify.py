@@ -977,12 +977,16 @@ def _congress_trade_line(t: dict[str, Any], watched: set[str]) -> str:
 
 
 def _congress_consensus_line(c: dict[str, Any], watched: set[str]) -> str:
-    """One consensus line: ticker ×N members, est. total, who, latest trade."""
+    """One consensus line: ticker ×N members, trades, est. total, who, latest
+    trade, plus a ⚖️ marker when members traded the other side too."""
     members = list(c.get("members") or [])
     shown = ", ".join(_label(m, 24) for m in members[:3])
     if len(members) > 3:
         shown += f" +{len(members) - 3}"
-    bits = [f"{_congress_ticker_md(c, watched)} ×{c.get('count')}"]
+    bits = [f"{_congress_ticker_md(c, watched)} ×{c.get('count')} members"]
+    trades = c.get("trades")
+    if trades:
+        bits.append(f"{trades} trade{'s' if trades != 1 else ''}")
     est = _usd_unsigned(c.get("est_total"))
     if est:
         bits.append(f"~{est}")
@@ -991,7 +995,26 @@ def _congress_consensus_line(c: dict[str, Any], watched: set[str]) -> str:
     last = _congress_short_date(c.get("last_date"))
     if last:
         bits.append(f"last {last}")
+    opposed = c.get("opposed")
+    if opposed:
+        bits.append(f"⚖️ {opposed} opposed")
     return "  ·  ".join(bits)
+
+
+def _congress_totals_line(window_days: int, totals: dict[str, Any]) -> str:
+    """The window's total buy-vs-sell activity, e.g.
+    '📊 Last 30d: 🟢 124 buys · 37 members · ~$8.4M  |  🔴 210 sells · 45 members · ~$12.6M'."""
+    def side(emoji: str, label: str, d: dict[str, Any]) -> str:
+        n = int(d.get("trades") or 0)
+        parts = [f"{emoji} **{n}** {label if n != 1 else label.rstrip('s')}",
+                 f"{int(d.get('members') or 0)} members"]
+        est = _usd_unsigned(d.get("est"))
+        if est:
+            parts.append(f"~{est}")
+        return " · ".join(parts)
+    return (f"📊 Last {window_days}d: "
+            f"{side('🟢', 'buys', totals.get('buy') or {})}"
+            f"  |  {side('🔴', 'sells', totals.get('sell') or {})}")
 
 
 def notify_congress_trades(new_trades: list[dict[str, Any]],
@@ -1000,14 +1023,16 @@ def notify_congress_trades(new_trades: list[dict[str, Any]],
                            watchlist_tickers: set[str] | None = None,
                            total_new: int = 0,
                            window_days: int = 30,
-                           min_filers: int = 2,
-                           latest_only: bool = False) -> None:
+                           min_filers: int = 3,
+                           latest_only: bool = False,
+                           totals: dict[str, Any] | None = None) -> None:
     """Post ONE embed digest of congressional trade disclosures.
 
-    Description: the newly-disclosed trades (largest amount range first, already
-    capped by the caller). Fields: the current consensus buys/sells — tickers
-    with `min_filers`+ distinct members on the same side inside `window_days` —
-    plus a watchlist-hits strip. `latest_only=True` relabels the description as
+    Description: the window's total buy-vs-sell activity (`totals`, from
+    congress_trades_ingest._totals) followed by the newly-disclosed trades
+    (largest amount range first, already capped by the caller). Fields: the
+    current consensus buys/sells — tickers with `min_filers`+ distinct members
+    on the same side inside `window_days` — plus a watchlist-hits strip. `latest_only=True` relabels the description as
     the most recent disclosures (forced digest with no new delta). Posts to the
     dedicated DISCORD_CONGRESS_WEBHOOK_URL when set, else the shared
     DISCORD_WEBHOOK_URL. No-op without a webhook or content; fail-soft.
@@ -1028,6 +1053,8 @@ def notify_congress_trades(new_trades: list[dict[str, Any]],
         header = f"Latest {len(new_trades)} disclosures on file"
     else:
         header = f"{total_new} new disclosure{'s' if total_new != 1 else ''} since the last check"
+    if totals:
+        header += "\n" + _congress_totals_line(window_days, totals)
     lines = [_congress_trade_line(t, watched) for t in new_trades]
     desc = header + ("\n\n" + "\n".join(lines) if lines else "")
 
@@ -1070,6 +1097,134 @@ def notify_congress_trades(new_trades: list[dict[str, Any]],
                            resp.status_code, resp.text[:200])
     except requests.RequestException:
         logger.exception("Discord congress-trades webhook post failed")
+
+
+_COT_COLOR = 0x0D_94_88  # teal — matches the frontend chart-series teal
+
+
+def _cot_contracts(n: Any) -> str:
+    """Signed compact contract count, e.g. '+194.2K' / '-8,340'."""
+    try:
+        v = int(n)
+    except (TypeError, ValueError):
+        return "0"
+    a = abs(v)
+    body = f"{a / 1_000_000:.2f}M" if a >= 1_000_000 else (
+        f"{a / 1_000:.1f}K" if a >= 10_000 else f"{a:,}")
+    return f"{'+' if v >= 0 else '-'}{body}"
+
+
+def _cot_shift_line(s: dict[str, Any]) -> str:
+    """One weekly-shift line: market, WoW spec flow, resulting net, COT index."""
+    arrow = "🟢" if (s.get("wow") or 0) >= 0 else "🔴"
+    idx = s.get("spec_index")
+    bits = [f"**{_label(s.get('market_name'), 24)}** {arrow} "
+            f"{_cot_contracts(s.get('wow'))} wk ({abs(s.get('wow_pct_oi') or 0):.1f}% OI)",
+            f"net {_cot_contracts(s.get('net'))} ({s.get('net_pct_oi') or 0:+.1f}% OI)"]
+    if idx is not None:
+        bits.append(f"idx {idx:.0f}")
+    if s.get("flipped"):
+        bits.append("🔁 flip")
+    return "  ·  ".join(bits)
+
+
+def _cot_extreme_line(s: dict[str, Any]) -> str:
+    """One crowded-extreme line: market, COT index, current net."""
+    return (f"**{_label(s.get('market_name'), 24)}**  idx {s.get('spec_index', 0):.0f}"
+            f"  ·  net {_cot_contracts(s.get('net'))} ({s.get('net_pct_oi') or 0:+.1f}% OI)")
+
+
+def _cot_streak_line(s: dict[str, Any]) -> str:
+    """One persistent-trend line: market, streak length/direction, current net."""
+    streak = int(s.get("streak") or 0)
+    arrow, verb = ("▲", "adding") if streak > 0 else ("▼", "cutting")
+    return (f"**{_label(s.get('market_name'), 24)}**  {arrow} {abs(streak)} wks {verb}"
+            f"  ·  net {_cot_contracts(s.get('net'))} ({s.get('net_pct_oi') or 0:+.1f}% OI)"
+            f"  ·  idx {s.get('spec_index', 0):.0f}")
+
+
+def notify_cot_report(report_date: str,
+                      shifts: list[dict[str, Any]],
+                      crowded_long: list[dict[str, Any]],
+                      crowded_short: list[dict[str, Any]],
+                      flips: list[dict[str, Any]],
+                      streaks: list[dict[str, Any]] | None = None,
+                      index_weeks: int = 156,
+                      shift_pct_oi: float = 2.0,
+                      latest_only: bool = False) -> None:
+    """Post ONE embed digest for a new weekly CFTC COT report.
+
+    Description: the biggest week-over-week large-speculator position shifts
+    (from cot_ingest._digest_stats, ranked by |shift| as % of open interest,
+    already capped by the caller). Fields: crowded-long / crowded-short
+    extremes (COT index ≥ 90 / ≤ 10 over the trailing `index_weeks`) — the
+    contrarian watch list — this week's net-position flips, and `streaks`
+    (markets where specs have moved one way 4+ straight weeks). `latest_only`
+    relabels the digest as a forced re-post with no new week. Posts to the
+    dedicated DISCORD_COT_WEBHOOK_URL when set, else the shared
+    DISCORD_WEBHOOK_URL. No-op without a webhook or content; fail-soft.
+    """
+    webhook = (os.environ.get("DISCORD_COT_WEBHOOK_URL")
+               or os.environ.get("DISCORD_WEBHOOK_URL"))
+    if not webhook or not (shifts or crowded_long or crowded_short or flips):
+        return
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not installed — skipping Discord COT notification")
+        return
+
+    years = max(1, round(index_weeks / 52))
+    header = (f"{'Latest report on file' if latest_only else 'New weekly report'} — "
+              f"positions as of Tue {report_date}\n"
+              f"Large speculators (funds) vs commercials (hedgers) · COT idx = where "
+              f"today's spec net sits in its {years}y range (≥90 crowded long · ≤10 crowded short)")
+    big = [s for s in shifts if abs(s.get("wow_pct_oi") or 0) >= shift_pct_oi]
+    lines = [_cot_shift_line(s) for s in (big or shifts[:3])]
+    label = ("Biggest weekly spec shifts" if big
+             else "Quiet week — largest spec shifts")
+    desc = header + f"\n\n__{label}__\n" + "\n".join(lines)
+
+    fields: list[dict[str, Any]] = []
+    if crowded_long:
+        fields.append({
+            "name": "🔴  Crowded LONG (idx ≥ 90) — reversal risk if news turns",
+            "value": _join_fit([_cot_extreme_line(s) for s in crowded_long], 1000),
+            "inline": False})
+    if crowded_short:
+        fields.append({
+            "name": "🟢  Crowded SHORT (idx ≤ 10) — squeeze / bottom setup",
+            "value": _join_fit([_cot_extreme_line(s) for s in crowded_short], 1000),
+            "inline": False})
+    if flips:
+        fields.append({
+            "name": "🔁  Spec net flipped sides this week",
+            "value": _join_fit([_cot_shift_line(s) for s in flips], 1000),
+            "inline": False})
+    if streaks:
+        fields.append({
+            "name": "📌  Persistent trends — specs one-way 4+ weeks",
+            "value": _join_fit([_cot_streak_line(s) for s in streaks], 1000),
+            "inline": False})
+
+    embed: dict[str, Any] = {
+        "title": "📈  CFTC COT — futures positioning"[:256],
+        "color": _COT_COLOR,
+        "description": desc[:4000],
+        "footer": {"text": "Summa · CFTC legacy futures-only report · published Fri ~3:30pm ET,"
+                           " data as of Tue · not investment advice"},
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    if fields:
+        embed["fields"] = fields[:25]
+
+    try:
+        resp = requests.post(webhook, json={"embeds": [embed]}, timeout=_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Discord COT webhook returned %s: %s",
+                           resp.status_code, resp.text[:200])
+    except requests.RequestException:
+        logger.exception("Discord COT webhook post failed")
 
 
 # Feed form → (emoji, trader-facing label, embed color). 8-K is the market-moving

@@ -280,6 +280,31 @@ export function PriceChart({
 }
 
 /** Diverging bar — buys above zero axis (green), sells below (red). Net insider flow. */
+/** Two signed contract-count series around a zero line (COT: specs vs commercials). */
+export function NetPositionChart({
+  data, lines, title, info, height,
+}: { data: ChartRow[]; lines: { key: string; name: string }[]; title: string; info?: string; height?: number }) {
+  const { toggle, isHidden } = useHidden();
+  const fmtContracts = (v: number | null) =>
+    v == null ? "—" : `${v >= 0 ? "+" : "−"}${fmtTick(Math.abs(v))}`;
+  return (
+    <ChartFrame title={title} info={info} height={height}>
+      <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+        <CartesianGrid stroke={GRID} strokeDasharray="2 4" vertical={false} />
+        <XAxis dataKey="x" tick={AXIS} tickLine={false} axisLine={{ stroke: GRID }} minTickGap={32} />
+        <YAxis tick={AXIS} tickLine={false} axisLine={false} tickFormatter={fmtTick} width={52} />
+        <Tooltip cursor={CURSOR_LINE} content={<ChartTip fmt={fmtContracts} />} />
+        <Legend wrapperStyle={legendStyle} onClick={(o) => toggle(o.dataKey)} />
+        <ReferenceLine y={0} stroke={GRID} strokeWidth={1} />
+        {lines.map((l, i) => (
+          <Line key={l.key} dataKey={l.key} name={l.name} hide={isHidden(l.key)} stroke={SERIES[i % SERIES.length]}
+            strokeWidth={1.5} dot={false} activeDot={{ r: 4 }} connectNulls />
+        ))}
+      </LineChart>
+    </ChartFrame>
+  );
+}
+
 export function DivergingBarChart({
   data, barKey, title, info,
 }: { data: ChartRow[]; barKey: string; title: string; info?: string }) {

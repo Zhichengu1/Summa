@@ -126,6 +126,58 @@ def upsert_congress_trades(rows: list[dict[str, Any]]) -> int:
     return upsert_many("congress_trades", rows, on_conflict="id")
 
 
+def upsert_cot_reports(rows: list[dict[str, Any]]) -> int:
+    """Upsert weekly CFTC COT report rows, keyed on (market_code, report_date)."""
+    return upsert_many("cot_reports", rows, on_conflict="market_code,report_date")
+
+
+def get_latest_cot_date() -> str | None:
+    """Most recent stored COT report date (ISO), or None if the table is empty.
+
+    Drives the incremental fetch: the ingest only asks the CFTC API for report
+    weeks after this date (None → first-seed history backfill). Fails soft to
+    None, which just makes the next run re-fetch the backfill window — upserts
+    keep that idempotent.
+    """
+    try:
+        result = (
+            get_client().table("cot_reports").select("report_date")
+            .order("report_date", desc=True).limit(1).execute()
+        )
+        return result.data[0]["report_date"] if result.data else None
+    except Exception:
+        logger.exception("get_latest_cot_date failed")
+        return None
+
+
+def fetch_cot_history(weeks: int = 156) -> list[dict[str, Any]]:
+    """Trailing `weeks` of `cot_reports` rows (the digest's COT-index window).
+
+    Paged (the window is ~28 markets × weeks ≈ a few thousand skinny rows, past
+    PostgREST's 1000-row page). Fails soft to [].
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(weeks=weeks)).date().isoformat()
+    page, out = 1000, []
+    try:
+        client = get_client()
+        for start in range(0, 100_000, page):
+            result = (
+                client.table("cot_reports")
+                .select("market_code, market_name, market_group, report_date, "
+                        "open_interest, noncomm_net")
+                .gte("report_date", cutoff)
+                .order("report_date").order("market_code")
+                .range(start, start + page - 1).execute()
+            )
+            out.extend(result.data or [])
+            if len(result.data or []) < page:
+                break
+        return out
+    except Exception:
+        logger.exception("fetch_cot_history failed")
+        return []
+
+
 def fetch_reddit_trends_day(trend_date: str) -> list[dict[str, Any]]:
     """Return the (ticker, rank) rows already stored for one snapshot day.
 
@@ -627,6 +679,26 @@ def prune_old_congress_trades(days: int = 400) -> int:
         return len(result.data or [])
     except Exception:
         logger.exception("prune_old_congress_trades failed")
+        return 0
+
+
+def prune_old_cot_reports(days: int = 1200) -> int:
+    """Delete `cot_reports` rows older than `days` (~3.3y rolling window).
+
+    The COT positioning index is a percentile over a trailing 3-year range, so
+    the window keeps just enough history for a full 156-week lookback plus
+    margin. ~28 markets × 52 weeks/year — the table stays tiny. Monthly
+    cadence (cleanup.py).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        result = (
+            get_client().table("cot_reports").delete()
+            .lt("report_date", cutoff).execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_cot_reports failed")
         return 0
 
 
