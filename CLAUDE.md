@@ -53,6 +53,7 @@ Summa/
 │   │   ├── data_ingest.py        ← fundamentals (XBRL) → financial_facts
 │   │   ├── filings_ingest.py     ← narrative filings feed → filings
 │   │   ├── price_ingest.py       ← Yahoo EOD bars → daily_prices (non-SEC source)
+│   │   ├── options_ingest.py     ← CBOE delayed options chain → options_snapshots (non-SEC source)
 │   │   ├── news_ingest.py        ← Google News RSS → company_news (per-company, non-SEC source)
 │   │   ├── market_news_ingest.py ← GLOBAL curated market-mover RSS (SEC/Fed/FDA/PRN) → market_news
 │   │   ├── reddit_trends_ingest.py ← GLOBAL daily Reddit most-discussed tickers (ApeWisdom/Tradestie) → reddit_trends + Discord digest
@@ -68,7 +69,8 @@ Summa/
 │   │   ├── ownership_extractor.py ← SC 13D/13G + Form 144 → beneficial_ownership / proposed_sales
 │   │   └── ipo_extractor.py       ← GLOBAL: recent S-1/F-1/424B/RW across the market → ipos
 │   ├── enrichment/               ← OPTIONAL Phase-2 channels (not in the ingest path)
-│   │   ├── gemini_enricher.py    ← Gemini enrichment
+│   │   ├── gemini_client.py      ← shared Gemini singleton (google-genai SDK, AI Studio key only; budget/throttle/429-fail-soft) + analyze_filing()
+│   │   ├── gemini_enricher.py    ← Gemini enrichment (calls gemini_client.generate_json)
 │   │   └── discord_notify.py     ← Discord alerts (filing embeds + notify_news for new headlines)
 │   ├── tools/                    ← standalone maintenance scripts (python -m tools.<name>)
 │   │   ├── build_sec_index.py    ← rebuilds frontend/public/sec-companies.json (stdlib only)
@@ -116,7 +118,9 @@ Summa/
     │   │                            SearchPage, FeedPage, NewsPage, CalendarView, ManagersPage, IposPage,
     │   │                            RedditPage (Reddit Buzz leaderboard over reddit_trends),
     │   │                            CongressPage (consensus buys/sells over congress_trades),
-    │   │                            CotPage (COT futures positioning index over cot_reports), GuidePage
+    │   │                            CotPage (COT futures positioning index over cot_reports),
+    │   │                            OptionsPage (Options Radar: calls-vs-puts bias + structure over
+    │   │                            options_snapshots), GuidePage
     │   └── company/               ← the per-company page + its tabs:
     │                                CompanyPage, CompanyOverviewTab, StrategyTab, FundamentalsTab,
     │                                PeersTab, OwnershipTab, CatalystsTab, FilingsTab, NewsTab, companyAux.ts (shared CompanyAux)
@@ -124,7 +128,7 @@ Summa/
     │   ├── data/                    supabase.ts, data.ts, watchlist.ts
     │   ├── hooks/                   useWatchlist.ts, useLastSeen.ts, useWatchlistPulse.ts
     │   ├── domain/                  fundamentals, pulse, scorecard, technicals, valuation,
-    │   │                            insider, catalysts, prices, taxonomy, entities, glossary, secIndex
+    │   │                            insider, catalysts, prices, options, taxonomy, entities, glossary, secIndex
     │   ├── utils/                   format.ts, url.ts
     │   └── types.ts                 row + view-routing types (stays at lib root, imported everywhere)
     └── public/sec-companies.json  ← bundled SEC company index (universal search)
@@ -138,7 +142,8 @@ Summa/
 shared by Scanner + Calendar). **`domain/`** (pure logic): `fundamentals.ts` · `pulse.ts`
 (tape/signals) · `taxonomy.ts` · `entities.ts` · `insider.ts` · `prices.ts` (incl.
 `reactionStats`) · `valuation.ts` · `technicals.ts` · `catalysts.ts` (next-earnings estimate) ·
-`scorecard.ts` (`buildScorecard` + Grade types) · `secIndex.ts` · `glossary.ts`. **`utils/`**:
+`scorecard.ts` (`buildScorecard` + Grade types) · `options.ts` (`buildOptionsRadar` — options flow/pricing →
+directional bias + suggested structure) · `secIndex.ts` · `glossary.ts`. **`utils/`**:
 `format.ts` · `url.ts` (`safeHref` guard). **`lib/types.ts`** (row + `MainView`/`CompanyTab`
 types) stays at the `lib/` root because it is imported everywhere.
 
@@ -189,7 +194,12 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
     session handling / PDF parsing), and the weekly CFTC Commitments of Traders report
     in `cot_ingest.py` (the keyless CFTC Public Reporting API / Socrata, legacy
     futures-only dataset 6dca-aqww → `cot_reports` for ~28 curated major futures
-    markets). SEC EDGAR remains the
+    markets), and the options chain in `options_ingest.py` (CBOE's free keyless
+    delayed-quotes JSON, `cdn.cboe.com/api/global/delayed_quotes/…` — the WHOLE chain for
+    an underlying in one request with IV + greeks, plus `_VIX.json` for the volatility
+    regime → `options_snapshots`; ~15-min delayed, which is fine for a once-or-twice-daily
+    positioning snapshot, and it is the exchange's own data rather than a scrape).
+    SEC EDGAR remains the
     source for all structured filings data. Any new source must keep the same contract: keyless,
     zero-cost, and fail-soft (a dead feed logs and is skipped, never aborting a run).
     (Reuters/Bloomberg are intentionally NOT added — no free RSS; their coverage
@@ -304,6 +314,7 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `reddit_trends` | trend_date+ticker | GLOBAL daily top-N most-discussed tickers on the investing subreddits (ApeWisdom ranks + optional Tradestie WSB sentiment + persisted Yahoo price context `last_price`/`day_pct`/`off_high_pct`/`off_low_pct`/`is_etf`; 30-day window; surfaced by the Reddit Buzz view via `fetchRedditTrends`) |
 | `congress_trades` | `id` (source txn id) | GLOBAL congressional (+ executive-branch) STOCK-Act stock trades from the Kadoa monitor feed (tickered rows only; ~400-day window; surfaced by the Congress view's consensus buys/sells via `fetchCongressTrades`) |
 | `cot_reports` | market_code+report_date | GLOBAL weekly CFTC Commitments of Traders positioning for ~28 curated futures markets (legacy futures-only report: spec/commercial/small-trader longs+shorts + precomputed nets; ~1200-day window; surfaced by the COT view's positioning index via `fetchCotReports`, signals derived in `lib/domain/cot.ts`) |
+| `options_snapshots` | cik+snapshot_date | One daily options-chain snapshot per watchlist company (CBOE): call/put flow by volume, open interest and PREMIUM ($), IV30 vs 30d realized vol + an IV rank built from this table's own history, 25Δ skew, front/~30d expected move, max pain, VIX, the day's biggest volume-over-OI contracts (`unusual` jsonb), and a tradeable delta ladder (`candidates` jsonb — ~5 strikes/side across a ~30d and ~60d expiry, filtered for a live two-sided quote and ≥25 OI, with quote+greeks+liquidity per contract). The calls-vs-puts decision inputs — the bias score, the suggested structure, and every per-contract economic (breakeven, breakeven-vs-priced-move, cost per delta, decay and bid/ask friction, vertical-spread construction) are DERIVED client-side in `lib/domain/options.ts`, never stored, so the read can be retuned without a re-ingest |
 | `company_profiles` | `cik` | SIC industry/sector |
 | `company_themes` | cik+name | Recomputed theme tags (delete+insert per cik) |
 | `entities` | `match_key` | Global entity-context registry (seeded) |
@@ -328,7 +339,10 @@ days** (`prune_old_market_news`); `reddit_trends` daily snapshots are pruned pas
 days** (`prune_old_reddit_trends`) — one tiny top-N snapshot per day, kept just long
 enough for week-over-week comparisons; `congress_trades` rows are pruned past **400
 days** (`prune_old_congress_trades`) — the Congress view aggregates 30–90-day consensus
-windows, so ~13 months of history is plenty; `cot_reports` rows are pruned past **1200
+windows, so ~13 months of history is plenty; `options_snapshots` rows are pruned past **400 days**
+(`prune_old_options_snapshots`) — sized to the trailing-1-year IV-rank lookback plus a
+month of margin;
+`cot_reports` rows are pruned past **1200
 days** (`prune_old_cot_reports`) — the COT positioning index is a percentile over a
 trailing 3-year range, so ~3.3y keeps the full 156-week lookback with margin. All other structured warehouse tables
 (fundamentals, holdings, events) are small/bounded per company and retained.
@@ -394,7 +408,9 @@ trailing 3-year range, so ~3.3y keeps the full 156-week lookback with margin. Al
 
 **Cadence defaults** (`DATASET_INTERVALS_H`, all env-overridable via `INTERVAL_*`):
 filings 0 (every visit) · events 12h · insider 24h · ownership 48h · fundamentals 168h ·
-prices 24h · news 1h (the main pipeline's per-company cadence; the summa-news */5 job also
+prices 24h · options 12h (the row is keyed by DATE, so the
+second visit just refreshes the same day's row with later/post-close flow; it runs AFTER
+prices because its realized-vol yardstick reads `daily_prices`) · news 1h (the main pipeline's per-company cadence; the summa-news */5 job also
 polls every company's Google News each tick via `--company`, so effective news latency is
 ~5 min — dedupe by guid makes the overlap harmless; `INTERVAL_NEWS` tunes the pipeline side) ·
 reference 720h. (13F institutional is global/quarterly — see step 7
@@ -408,7 +424,9 @@ Backend (`backend/.env`, mapped from `${{ secrets.* }}` in the workflows):
 `SUPABASE_URL`, `SUPABASE_KEY` (service_role), `EDGAR_IDENTITY` (SEC User-Agent, e.g.
 `"Summa/1.0 (you@example.com)"`), and — Phase-2 only — `GEMINI_API_KEY`,
 `DISCORD_WEBHOOK_URL`. Tuning: `INGEST_MAX_PER_RUN` (default 12), `INGEST_TIME_BUDGET_S`
-(default 360), `INTERVAL_<DATASET>` overrides, `IPO_WINDOW_DAYS` (default 10; raise for
+(default 360), `INTERVAL_<DATASET>` overrides (incl. `INTERVAL_OPTIONS`,
+hours, default 12 — the CBOE chain payload is ~1.5 MB per company, so this knob is about
+bandwidth and run time, not an API quota: the source is keyless and unmetered), `IPO_WINDOW_DAYS` (default 10; raise for
 a one-off IPO backfill on an empty table). News tuning: `INTERVAL_NEWS` (hours, default 1),
 `NEWS_MAX_ITEMS` (per-company Google feed cap, default 100), `NEWS_MAX_AGE_DAYS` (recency
 window, default 3 — the news channel is "latest only": headlines older than this are never

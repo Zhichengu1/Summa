@@ -7,7 +7,7 @@ import type {
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
   BeneficialOwnership, ProposedSale, DailyPrice,
   CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary, Ipo, NewsItem, MarketNews,
-  RedditTrend, CongressTrade, CotReport,
+  RedditTrend, CongressTrade, CotReport, OptionsSnapshot,
 } from "../types";
 
 // Whole-table read, paged in 1000-row chunks. Any "fetch every row" query must use
@@ -79,6 +79,39 @@ export async function fetchCotReports(weeks = 156): Promise<CotReport[]> {
     { col: "report_date", asc: true },
     { col: "report_date", value: cutoff },
   );
+}
+
+const OPTIONS_COLS =
+  "cik, snapshot_date, ticker, spot, price_change_pct, iv30, iv30_change_pct, rv30, iv_rv_ratio, " +
+  "iv_rank, iv_rank_obs, call_volume, put_volume, call_oi, put_oi, call_premium, put_premium, " +
+  "pc_volume_ratio, pc_oi_ratio, pc_premium_ratio, contracts_count, skew_25d, skew_expiry, " +
+  "front_expiry, front_dte, atm_straddle, expected_move_pct, max_pain, max_pain_pct, " +
+  "near_expiry, near_dte, near_move_pct, vix, vix_change_pct, unusual, candidates";
+
+// Recent options-chain snapshots across the watchlist (options_snapshots), for the
+// Options Radar. Bounded by a short recency window rather than a row cap —
+// companies × ~`days` rows, well inside one page — so per-company coverage never
+// thins as the watchlist grows. Callers reduce to the latest row per company
+// (buildOptionsRadar); the extra days give the day-over-day flow/IV deltas.
+export async function fetchOptionsSnapshots(days = 6): Promise<OptionsSnapshot[]> {
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+  return selectAllPaged<OptionsSnapshot>(
+    "options_snapshots", OPTIONS_COLS,
+    { col: "snapshot_date", asc: false },
+    { col: "snapshot_date", value: cutoff },
+  );
+}
+
+// One company's options history — the IV / flow trend behind the radar row.
+// Bounded (one row per day) and ascending for charting. Returns [] on error.
+export async function fetchOptionsHistory(cik: string, days = 120): Promise<OptionsSnapshot[]> {
+  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+  const { data, error } = await supabase
+    .from("options_snapshots").select(OPTIONS_COLS)
+    .eq("cik", cik).gte("snapshot_date", cutoff)
+    .order("snapshot_date", { ascending: true });
+  if (error || !data) return [];
+  return data as unknown as OptionsSnapshot[];
 }
 
 // Daily Reddit most-discussed snapshots (reddit_trends), global/market-wide.

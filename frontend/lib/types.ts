@@ -290,6 +290,90 @@ export type CotReport = {
   traders_total: number | null;
 };
 
+// One daily options-chain snapshot for one company (backend
+// ingest/options_ingest.py → options_snapshots, from CBOE's free delayed-quotes
+// JSON). The call-vs-put decision inputs: flow (who's buying which side), how
+// premium is priced (IV vs realized vol, IV rank), skew, what move is already
+// priced in, and the day's biggest volume-over-OI contracts. The directional
+// bias and suggested structure are DERIVED from these in lib/domain/options.ts,
+// not stored — so the read can be retuned without a re-ingest.
+export type OptionsSnapshot = {
+  cik: string;
+  snapshot_date: string;             // ISO date the snapshot was taken (UTC)
+  ticker: string | null;
+  spot: number | null;
+  price_change_pct: number | null;
+  iv30: number | null;               // 30-day implied vol, PERCENT (e.g. 28.4)
+  iv30_change_pct: number | null;
+  rv30: number | null;               // 30-session realized vol, annualized %
+  iv_rv_ratio: number | null;        // iv30/rv30 — >1 = options priced above recent reality
+  iv_rank: number | null;            // percentile of iv30 in trailing 1y (null until enough history)
+  iv_rank_obs: number | null;        // observations behind iv_rank
+  call_volume: number | null;
+  put_volume: number | null;
+  call_oi: number | null;
+  put_oi: number | null;
+  call_premium: number | null;       // $ premium traded today on calls
+  put_premium: number | null;
+  pc_volume_ratio: number | null;    // put/call by contracts
+  pc_oi_ratio: number | null;        // put/call by open interest
+  pc_premium_ratio: number | null;   // put/call by dollars — the truest flow read
+  contracts_count: number | null;
+  skew_25d: number | null;           // 25-delta put IV − call IV, vol points
+  skew_expiry: string | null;
+  front_expiry: string | null;
+  front_dte: number | null;
+  atm_straddle: number | null;
+  expected_move_pct: number | null;  // front-expiry straddle as % of spot
+  max_pain: number | null;
+  max_pain_pct: number | null;       // max-pain distance from spot, %
+  near_expiry: string | null;        // ~30-day expiry — the swing-trade horizon
+  near_dte: number | null;
+  near_move_pct: number | null;
+  vix: number | null;
+  vix_change_pct: number | null;
+  unusual: UnusualContract[] | null;
+  candidates: OptionCandidateRow[] | null;
+};
+
+// One actually-tradeable contract from the stored delta ladder (~5 strikes per side
+// across a ~30d and ~60d expiry, filtered for a live two-sided quote and real open
+// interest). Raw economics only — breakeven, cost per delta, friction and the value
+// ranking are derived in lib/domain/options.ts so they stay retunable.
+export type OptionCandidateRow = {
+  right: "C" | "P";
+  strike: number;
+  expiry: string;
+  dte: number;
+  bid: number | null;
+  ask: number | null;
+  mid: number;
+  iv: number | null;                 // contract IV, percent
+  delta: number;
+  theta: number | null;              // $/share/day
+  vega: number | null;
+  oi: number;
+  volume: number;
+};
+
+// One notable contract inside OptionsSnapshot.unusual — volume far above the
+// resting open interest, i.e. positions opened TODAY rather than traded between
+// existing holders. Deep-ITM (stock-replacement) contracts are filtered out at
+// ingest, so these are speculative bets.
+export type UnusualContract = {
+  right: "C" | "P";
+  strike: number;
+  expiry: string;
+  dte: number;
+  volume: number;
+  oi: number;
+  vol_oi: number | null;
+  iv: number | null;                 // contract IV, percent
+  delta: number | null;
+  premium: number;                   // $ traded (volume × mid × 100)
+  otm_pct: number | null;            // strike distance from spot, %
+};
+
 export type DailyPrice = {
   cik: string;
   ticker: string | null;
@@ -333,7 +417,7 @@ export type PeriodType = "annual" | "quarterly";
 // ─── View routing ───────────────────────────────────────────────────────────────
 // The top-level dashboard view and the per-company tab. Shared by the root Page,
 // the Sidebar, and CompanyPage so the hash router and the components agree.
-export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "congress" | "cot" | "guide" | "company";
+export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "congress" | "cot" | "options" | "guide" | "company";
 export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings" | "news";
 
 // ─── Reference data (backend-populated; read once per session) ──────────────────

@@ -74,6 +74,10 @@ try:
 except Exception:  # pragma: no cover
     summary_ingest = None
 try:
+    from ingest import options_ingest
+except Exception:  # pragma: no cover
+    options_ingest = None
+try:
     from ingest import news_ingest
 except Exception:  # pragma: no cover
     news_ingest = None
@@ -154,6 +158,7 @@ DATASET_INTERVALS_H: dict[str, float] = {
     # roll-forward (institutional_extractor.ingest_institutional_global, wired in main()).
     # Per-company only runs once for first-time/forced coverage (see process()).
     "prices":        float(os.environ.get("INTERVAL_PRICES",        "24")),   # EOD bars: daily
+    "options":       float(os.environ.get("INTERVAL_OPTIONS",       "12")),   # CBOE chain snapshot: the row is keyed by DATE, so a 12h cadence just refreshes the same day's row with later (post-close) flow
     "news":          float(os.environ.get("INTERVAL_NEWS",          "1")),    # Google News RSS: hourly poll (safely inside free tier); Realtime pushes new rows to the UI instantly. INTERVAL_NEWS tunes it.
     "reference":     float(os.environ.get("INTERVAL_REFERENCE",     "720")),  # SIC/seed ~static → monthly
     "summary":       float(os.environ.get("INTERVAL_SUMMARY",       "0")),    # cheap recompute; refresh every visit
@@ -296,6 +301,8 @@ def process(company: WatchedCompany, datasets: dict[str, str], *, force: bool = 
     # coverage; ongoing refresh is the global pass's job.
     if (force or "institutional" not in datasets) and _run_optional(institutional_extractor, "ingest_institutional", cik, ticker): new_state["institutional"] = stamp
     if due("prices")        and _run_optional(price_ingest,            "ingest_prices",        cik, ticker): new_state["prices"] = stamp
+    # Options runs AFTER prices: its realized-vol yardstick reads daily_prices.
+    if due("options")       and _run_optional(options_ingest,          "ingest_options",       cik, ticker): new_state["options"] = stamp
     if due("news")          and _run_optional(news_ingest,             "ingest_news",          cik, ticker, name): new_state["news"] = stamp
     if due("reference")     and _run_optional(reference_ingest,        "ingest_profile",       cik, ticker): new_state["reference"] = stamp
 
