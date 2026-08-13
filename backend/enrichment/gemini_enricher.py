@@ -8,15 +8,13 @@ GEMINI_API_KEY being present; without it, enrichment is a silent no-op so the
 rest of the pipeline still writes complete signal data.
 """
 
-import json
 import logging
-import os
-import re
 from typing import Any
+
+from enrichment import gemini_client
 
 logger = logging.getLogger(__name__)
 
-_MODEL_NAME = "gemini-2.0-flash-exp"
 _MAX_EXCERPT_CHARS = 2_000  # hard cap — excerpt only, never a full section
 
 # Human-readable labels for the signal columns, used to describe what fired.
@@ -32,30 +30,6 @@ _SIGNAL_LABELS: dict[str, str] = {
     "section_length_anomaly": "risk factors section expanded anomalously",
     "burst_8k_flag":        "burst of 8-K filings in 30 days",
 }
-
-_model: Any = None
-_init_failed = False
-
-
-def _get_model() -> Any:
-    """Lazily configure the Gemini client; returns None when unavailable."""
-    global _model, _init_failed
-    if _model is not None or _init_failed:
-        return _model
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        _init_failed = True
-        return None
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        _model = genai.GenerativeModel(_MODEL_NAME)
-    except Exception:
-        logger.exception("Gemini client init failed — enrichment disabled")
-        _init_failed = True
-        return None
-    return _model
-
 
 def _build_excerpt(signals: dict[str, Any]) -> tuple[str, list[str]]:
     """
@@ -78,25 +52,12 @@ def _build_excerpt(signals: dict[str, Any]) -> tuple[str, list[str]]:
                 "friday_dump", "section_length_anomaly", "burst_8k_flag"):
         # risk_factor_delta is a float; treat >0.25 as fired, others are bools
         val = signals.get(key)
-        fired_flag = (val > 0.25) if key == "risk_factor_delta" else bool(val)
+        fired_flag = ((val or 0) > 0.25) if key == "risk_factor_delta" else bool(val)
         if fired_flag:
             fired.append(_SIGNAL_LABELS[key])
 
     excerpt_text = " ".join(parts)[:_MAX_EXCERPT_CHARS]
     return excerpt_text, fired
-
-
-def _parse_json(raw: str) -> dict[str, Any] | None:
-    """Extract the first JSON object from a model response (handles code fences)."""
-    if not raw:
-        return None
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
 
 
 def enrich(
@@ -111,10 +72,6 @@ def enrich(
     Returns {"summary": str, "confidence": float, "tags": list[str]} or None
     when Gemini is unavailable or the response cannot be parsed.
     """
-    model = _get_model()
-    if model is None:
-        return None
-
     excerpt, fired = _build_excerpt(signals)
     if not fired:
         return None  # nothing flagged — should not happen, but guard anyway
@@ -130,13 +87,7 @@ def enrich(
         '"tags": ["short", "lowercase", "theme", "tags"]}'
     )
 
-    try:
-        response = model.generate_content(prompt)
-        parsed = _parse_json(getattr(response, "text", "") or "")
-    except Exception:
-        logger.exception("Gemini enrichment call failed for %s %s", ticker, form_type)
-        return None
-
+    parsed = gemini_client.generate_json(prompt)
     if not parsed:
         return None
 

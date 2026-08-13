@@ -131,6 +131,44 @@ def upsert_cot_reports(rows: list[dict[str, Any]]) -> int:
     return upsert_many("cot_reports", rows, on_conflict="market_code,report_date")
 
 
+def upsert_options_snapshots(rows: list[dict[str, Any]]) -> int:
+    """Upsert daily options-chain snapshot rows, keyed on (cik, snapshot_date)."""
+    return upsert_many("options_snapshots", rows, on_conflict="cik,snapshot_date")
+
+
+def fetch_recent_closes(cik: str, sessions: int = 60) -> list[float]:
+    """Most-recent `sessions` closes for a company, oldest → newest.
+
+    order(desc) + limit then reverse — ascending + limit would return the OLDEST
+    bars once a company exceeds the limit (see the retention note in CLAUDE.md).
+    """
+    try:
+        rows = (
+            get_client().table("daily_prices").select("close")
+            .eq("cik", cik).order("date", desc=True).limit(sessions).execute().data or []
+        )
+    except Exception:
+        logger.exception("fetch_recent_closes failed for %s", cik)
+        return []
+    closes = [float(r["close"]) for r in rows if r.get("close") is not None]
+    closes.reverse()
+    return closes
+
+
+def fetch_iv_history(cik: str, days: int = 365) -> list[float]:
+    """Trailing IV30 observations for a company — the basis for its IV rank."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        rows = (
+            get_client().table("options_snapshots").select("iv30")
+            .eq("cik", cik).gte("snapshot_date", cutoff).execute().data or []
+        )
+    except Exception:
+        logger.exception("fetch_iv_history failed for %s", cik)
+        return []
+    return [float(r["iv30"]) for r in rows if r.get("iv30") is not None]
+
+
 def get_latest_cot_date() -> str | None:
     """Most recent stored COT report date (ISO), or None if the table is empty.
 
@@ -699,6 +737,26 @@ def prune_old_cot_reports(days: int = 1200) -> int:
         return len(result.data or [])
     except Exception:
         logger.exception("prune_old_cot_reports failed")
+        return 0
+
+
+def prune_old_options_snapshots(days: int = 400) -> int:
+    """Delete `options_snapshots` rows older than `days` (~13 months).
+
+    One small row per company per day. The window is sized to the IV-rank
+    lookback (a trailing 1-year percentile) plus a month of margin — trimming
+    tighter would degrade the rank the longer the pipeline runs. Monthly
+    cadence (cleanup.py).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        result = (
+            get_client().table("options_snapshots").delete()
+            .lt("snapshot_date", cutoff).execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_options_snapshots failed")
         return 0
 
 

@@ -650,3 +650,81 @@ DROP POLICY IF EXISTS "anon read cot_reports" ON cot_reports;
 CREATE POLICY "anon read cot_reports" ON cot_reports FOR SELECT TO anon USING (true);
 
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
+
+-- ===========================================================================
+-- options_snapshots — one daily options-chain snapshot per watchlist company,
+-- written by ingest/options_ingest.py from CBOE's free keyless delayed-quotes
+-- JSON (the whole chain in one request, with IV and greeks). This is the
+-- call-vs-put decision layer: today's call/put flow (volume, open interest,
+-- premium traded), how options are PRICED (IV30 vs 30-day realized vol, plus an
+-- IV rank percentile that builds from this table's own history), the 25-delta
+-- skew, what move is already priced in (ATM straddle for the front and ~30-day
+-- expiries), max pain, and the day's biggest volume-over-open-interest
+-- contracts. The frontend derives the directional bias and the suggested
+-- structure from these columns (lib/domain/options.ts) so the read can be
+-- retuned without a re-ingest. ~400-day rolling window (cleanup.py
+-- prune_old_options_snapshots), sized to the 1-year IV-rank lookback.
+-- Idempotent.
+-- ===========================================================================
+CREATE TABLE IF NOT EXISTS options_snapshots (
+    cik                TEXT NOT NULL,
+    snapshot_date      DATE NOT NULL,            -- UTC date the snapshot was taken
+    ticker             TEXT,
+    spot               NUMERIC,                  -- underlying price at snapshot time
+    price_change_pct   NUMERIC,                  -- underlying % change on the day
+
+    -- Pricing: is premium cheap or rich?
+    iv30               NUMERIC,                  -- CBOE 30-day implied vol, in PERCENT (e.g. 28.4)
+    iv30_change_pct    NUMERIC,                  -- day-over-day % change in IV30
+    rv30               NUMERIC,                  -- 30-session realized vol, annualized %
+    iv_rv_ratio        NUMERIC,                  -- iv30 / rv30 — >1 = options priced above recent reality
+    iv_rank            NUMERIC,                  -- percentile of iv30 in trailing 1y (NULL until enough history)
+    iv_rank_obs        INT,                      -- observations behind iv_rank (honesty about the sample)
+
+    -- Flow: which side is money going to today?
+    call_volume        BIGINT,
+    put_volume         BIGINT,
+    call_oi            BIGINT,
+    put_oi             BIGINT,
+    call_premium       NUMERIC,                  -- $ premium traded (volume × mid × 100)
+    put_premium        NUMERIC,
+    pc_volume_ratio    NUMERIC,                  -- put/call by contracts traded
+    pc_oi_ratio        NUMERIC,                  -- put/call by resting open interest
+    pc_premium_ratio   NUMERIC,                  -- put/call by dollars — the truest flow read
+    contracts_count    INT,                      -- listed contracts in the chain
+
+    -- Shape: what does the market fear, and what is already priced in?
+    skew_25d           NUMERIC,                  -- 25-delta put IV − call IV, vol points
+    skew_expiry        DATE,                     -- expiry the skew was measured on (~30 DTE)
+    front_expiry       DATE,                     -- nearest expiry that traded
+    front_dte          INT,
+    atm_straddle       NUMERIC,                  -- front-expiry ATM straddle price
+    expected_move_pct  NUMERIC,                  -- that straddle as % of spot
+    max_pain           NUMERIC,                  -- front-expiry strike with least ITM open interest
+    max_pain_pct       NUMERIC,                  -- max_pain distance from spot, %
+    near_expiry        DATE,                     -- ~30-day expiry (the swing-trade horizon)
+    near_dte           INT,
+    near_move_pct      NUMERIC,                  -- expected move to near_expiry, % of spot
+
+    -- Context + notable single contracts
+    vix                NUMERIC,                  -- VIX level at snapshot (volatility regime)
+    vix_change_pct     NUMERIC,
+    unusual            JSONB,                    -- top volume-over-OI contracts (bounded list)
+    candidates         JSONB,                    -- tradeable delta-ladder: ~5 strikes/side across 2 expiries, with quote+greeks+liquidity
+
+    updated_at         TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (cik, snapshot_date)
+);
+CREATE INDEX IF NOT EXISTS idx_options_snapshots_date ON options_snapshots (snapshot_date DESC);
+
+ALTER TABLE options_snapshots ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON options_snapshots FROM anon, authenticated;
+GRANT SELECT ON options_snapshots TO anon;
+DROP POLICY IF EXISTS "anon read options_snapshots" ON options_snapshots;
+CREATE POLICY "anon read options_snapshots" ON options_snapshots FOR SELECT TO anon USING (true);
+
+-- Added after the initial options_snapshots release: the tradeable contract ladder
+-- behind the "which strike, at what cost, is it a good deal" read. CREATE TABLE IF
+-- NOT EXISTS above will not add it to an already-applied table, so do it explicitly.
+ALTER TABLE options_snapshots ADD COLUMN IF NOT EXISTS candidates JSONB;
