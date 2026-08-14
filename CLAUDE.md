@@ -24,8 +24,15 @@ cron tick visits a bounded batch of companies, and within a visit each dataset
 only refreshes if its own cadence has elapsed. Coverage scales by spreading work
 across runs, not by doing more per run.
 
-> Optional Phase-2 enrichment channels (`gemini_enricher.py`, `discord_notify.py`)
-> exist but are **not** part of the Phase-1 ingest path — with two exceptions:
+> **No LLM/AI service is part of this project.** Every signal is computed by
+> deterministic code over the warehouse; nothing is generated or summarized by a model.
+> (The former Gemini enrichment channel was removed on 2026-08-13 — do not reintroduce a
+> provider without an explicit decision.) Narrative *is* produced, but by template:
+> `recap.py` assembles the daily prose recap from stored numbers, so the same rows always
+> yield the same sentences. Written summaries belong there, not in a model.
+>
+> The one optional out-of-band channel is `enrichment/discord_notify.py`, which is
+> **not** part of the Phase-1 ingest path — with two exceptions:
 > `news_ingest.py` calls `discord_notify.notify_news()` for genuinely-new headlines,
 > and `filings_ingest.py` calls `discord_notify.notify_filings()` for just-filed
 > feed documents (8-K/10-K/10-Q/DEF 14A within `FILING_ALERT_RECENCY_DAYS`). Both
@@ -49,6 +56,7 @@ Summa/
 │   ├── watchlist.py              ← SEED list + get_active_watchlist() (SEED ∪ watchlist table)
 │   ├── edgar_cache.py            ← get_company(cik): per-run shared edgartools Company cache
 │   ├── news_score.py             ← composite catalyst scorer: event×source×fundamentals×directness×move (company + market news)
+│   ├── recap.py                  ← PURE prose builder: company_summary rows → the daily narrative recap (deterministic templates, no LLM) + the shared next-earnings estimator
 │   ├── ingest/                   ← per-company dataset ingestors (from ingest import …)
 │   │   ├── data_ingest.py        ← fundamentals (XBRL) → financial_facts
 │   │   ├── filings_ingest.py     ← narrative filings feed → filings
@@ -68,14 +76,13 @@ Summa/
 │   │   ├── institutional_extractor.py ← 13F-HR → institutional_holdings / manager_portfolios
 │   │   ├── ownership_extractor.py ← SC 13D/13G + Form 144 → beneficial_ownership / proposed_sales
 │   │   └── ipo_extractor.py       ← GLOBAL: recent S-1/F-1/424B/RW across the market → ipos
-│   ├── enrichment/               ← OPTIONAL Phase-2 channels (not in the ingest path)
-│   │   ├── gemini_client.py      ← shared Gemini singleton (google-genai SDK, AI Studio key only; budget/throttle/429-fail-soft) + analyze_filing()
-│   │   ├── gemini_enricher.py    ← Gemini enrichment (calls gemini_client.generate_json)
+│   ├── enrichment/               ← OPTIONAL notification channel (not in the ingest path)
 │   │   └── discord_notify.py     ← Discord alerts (filing embeds + notify_news for new headlines)
 │   ├── tools/                    ← standalone maintenance scripts (python -m tools.<name>)
 │   │   ├── build_sec_index.py    ← rebuilds frontend/public/sec-companies.json (stdlib only)
 │   │   ├── refresh_news.py       ← lightweight news-only entry point (edgar-free; summa-news */5)
 │   │   ├── daily_brief.py        ← daily watchlist brief → Discord (edgar-free; company_summary + earnings radar)
+│   │   ├── daily_recap.py        ← weekday-evening prose recap → Discord (edgar-free; thin wrapper over recap.py; --dry-run prints without posting)
 │   │   ├── reddit_trends.py      ← daily Reddit trending-stocks digest → Discord (edgar-free; thin wrapper over ingest/reddit_trends_ingest)
 │   │   ├── congress_trades.py    ← congressional-trades refresh (edgar-free; thin wrapper over ingest/congress_trades_ingest)
 │   │   ├── cot.py                ← weekly CFTC COT refresh (edgar-free; thin wrapper over ingest/cot_ingest)
@@ -90,6 +97,7 @@ Summa/
 │   ├── summa-pipeline.yml         ← */10 min ingest (main.py)
 │   ├── summa-news.yml             ← */5 min fast news refresh: market feeds + per-company Google News via --company (tools.refresh_news; requirements-news.txt, edgar-free)
 │   ├── summa-brief.yml            ← weekday-morning Discord watchlist brief (python -m tools.daily_brief; requirements-news.txt)
+│   ├── summa-recap.yml            ← weekday-evening (22:30 UTC) Discord prose recap of the session (python -m tools.daily_recap; requirements-news.txt; workflow_dispatch `dry_run` input)
 │   ├── summa-reddit.yml           ← Reddit trending-stocks: 13:15 UTC daily full digest + weekday 16:15/20:15 UTC intraday refresh with surge-only alerts (python -m tools.reddit_trends; requirements-news.txt)
 │   ├── summa-congress.yml         ← congressional trades 2×/day (11:25/22:25 UTC; python -m tools.congress_trades; requirements-news.txt) + Discord digest when new disclosures land
 │   ├── summa-cot.yml              ← weekly CFTC COT (Fri 21:05 UTC after the ~3:30pm ET release + Mon 22:05 UTC holiday catch-up; python -m tools.cot; requirements-news.txt) + Discord digest when a new report week lands
@@ -227,7 +235,7 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
   rest filter it in-memory. The cache is per-process, so it resets each Actions run.
 - **Package layout & imports.** Scripts are grouped by role under `backend/`:
   `ingest/` (per-company ingestors), `extractors/` (SEC-form parsers), `enrichment/`
-  (optional Phase-2), `tools/` (standalone maintenance). `main.py`, `db.py`,
+  (optional Discord alerts), `tools/` (standalone maintenance). `main.py`, `db.py`,
   `watchlist.py` stay at the `backend/` root. Because the root is always on `sys.path`
   (the entry point `main.py` runs from `backend/`), modules in the subpackages still
   import the core flat — `import db`, `from watchlist import …`. `main.py` imports the
@@ -422,8 +430,7 @@ reference 720h. (13F institutional is global/quarterly — see step 7
 
 Backend (`backend/.env`, mapped from `${{ secrets.* }}` in the workflows):
 `SUPABASE_URL`, `SUPABASE_KEY` (service_role), `EDGAR_IDENTITY` (SEC User-Agent, e.g.
-`"Summa/1.0 (you@example.com)"`), and — Phase-2 only — `GEMINI_API_KEY`,
-`DISCORD_WEBHOOK_URL`. Tuning: `INGEST_MAX_PER_RUN` (default 12), `INGEST_TIME_BUDGET_S`
+`"Summa/1.0 (you@example.com)"`), and — optional alerts only — `DISCORD_WEBHOOK_URL`. Tuning: `INGEST_MAX_PER_RUN` (default 12), `INGEST_TIME_BUDGET_S`
 (default 360), `INTERVAL_<DATASET>` overrides (incl. `INTERVAL_OPTIONS`,
 hours, default 12 — the CBOE chain payload is ~1.5 MB per company, so this knob is about
 bandwidth and run time, not an API quota: the source is keyless and unmetered), `IPO_WINDOW_DAYS` (default 10; raise for
@@ -485,7 +492,11 @@ counts as a notable flow, default 2.0), `COT_API_URL` (override the CFTC Socrata
 even when no new report week landed; the summa-cot workflow_dispatch `force_digest` input
 sets it), `DISCORD_COT_WEBHOOK_URL` (optional dedicated Discord channel for the COT
 digest; falls back to `DISCORD_WEBHOOK_URL`. The digest is suppressed on the table's
-first-ever seed and skipped when no new report week arrived). `EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
+first-ever seed and skipped when no new report week arrived). Recap: `DISCORD_RECAP_WEBHOOK_URL`
+(optional dedicated Discord channel for the weekday-evening prose recap; falls back to
+`DISCORD_WEBHOOK_URL`. The recap has no thresholds to tune — it describes whatever
+`company_summary` holds, and each paragraph is simply omitted when it has nothing to say).
+`EDGAR_RATE_LIMIT_PER_SEC` (default 9 in
 edgartools; SEC's ceiling is ~10/s) — read by edgartools **at import time**, so it must be
 set in the environment (workflow `env:` / `backend/.env`) before `main.py` imports `edgar`,
 not assigned in Python. Set to `"9"` in the EDGAR workflows (pipeline, 13F-quarter).
@@ -568,12 +579,12 @@ The watchlist is meant to grow. These rules keep every tier within budget as N
 (companies) increases. **If you add a feature that reads across the watchlist, it must
 follow the precompute-or-paginate rule below — do not fetch N×history in one query.**
 
-**Ingest (EDGAR / Gemini / Actions) — already bounded, scales by spreading work.**
+**Ingest (EDGAR / Actions) — already bounded, scales by spreading work.**
 Per-run cost is fixed by `INGEST_MAX_PER_RUN` (companies/run) + `INGEST_TIME_BUDGET_S`
 + the 8-min Actions cap — *independent of N*. Growing the watchlist only increases
 *coverage latency* (time for a full sweep), never per-run rate. The knob to rebalance as
-N grows is **raising `INGEST_MAX_PER_RUN`**, not changing the design. EDGAR's 10 req/s and
-Gemini's free tier are never approached because work-per-run is capped.
+N grows is **raising `INGEST_MAX_PER_RUN`**, not changing the design. EDGAR's 10 req/s is
+never approached because work-per-run is capped.
 
 **Whole-table reads must page.** PostgREST caps a bare `.select()` at ~1000 rows, so any
 "read every row" query silently truncates as tables grow. Use the paged helpers:
@@ -619,14 +630,14 @@ scanner is needed.)
 **what companies are collectively investing in** and **what the next industry trend is**,
 by aggregating forward-looking signals across the whole tracked universe over time.
 
-**Core principle (unchanged).** The algorithm finds the trend; the LLM only names and
-explains it. Stage 1 aggregates the warehouse for free; Stage 2 (Gemini) runs only on
-small aggregated excerpts to label clusters and write the "why." Never re-derive trends
-from full filings; never call Gemini when Stage 1 surfaced nothing.
+**Core principle.** The algorithm finds the trend, end to end — there is **no LLM stage**
+(the Gemini channel was removed 2026-08-13). Themes come from a curated keyword/taxonomy
+normalization over stored text; labels are taxonomy labels, not generated prose. Never
+re-derive trends from full filings.
 
 **Relationship to existing roadmaps.** Phase 2 *consumes* the per-company themes produced
-by the reference-data pipeline's Phase B (`backend/docs/REFERENCE_DATA_SCOPE.md` — LLM
-theme/thesis extraction from 10-Ks). That pipeline answers "what is *this* company's
+by the reference-data pipeline's Phase B (`backend/docs/REFERENCE_DATA_SCOPE.md` —
+keyword theme extraction from 10-Ks). That pipeline answers "what is *this* company's
 thesis"; Phase 2 answers "what are *most* companies converging on." Phase B is the
 richest input but not a hard dependency — Stage 1 also works off a keyword pass when
 themes are sparse.
@@ -645,7 +656,7 @@ themes are sparse.
 
 ### Pipeline
 
-**Stage 1 (free, always runs):**
+**One free deterministic stage — always runs, no model calls:**
 1. **Theme normalization** — map raw per-company theme phrases + a keyword pass over
    `section_business`/`section_mda` onto canonical theme keys (a curated taxonomy;
    optional embedding similarity in 2C).
@@ -657,10 +668,9 @@ themes are sparse.
    (dollars flowing) + recency. Emerging = low base, high velocity.
 5. **Stage classification** — emerging / accelerating / mainstream / cooling.
 
-**Stage 2 (Gemini, optional, formats only — gated on `GEMINI_API_KEY`, throttled):**
-cluster synonymous raw phrases into one canonical theme, name nascent clusters, and write
-a one-paragraph "why this is the next trend." Runs on the small aggregated phrase set,
-never on filings.
+Synonym clustering and theme labels come from the curated taxonomy (extend the taxonomy
+when a new theme appears); `theme_trends.summary` is a templated sentence built from the
+computed breadth/capital numbers, not generated text.
 
 ### New schema (idempotent — add to `schema.sql`, RLS anon SELECT only)
 
@@ -678,14 +688,13 @@ never on filings.
   `entity_ingest`, **not** per company). Reads the warehouse, computes `theme_mentions` +
   `theme_trends`. Wire at the end of `main()` via
   `_run_optional(trend_aggregator, "ingest_trends")` on a slow cadence
-  (`INTERVAL_TRENDS`, default ~weekly — trends move slowly). Stage 1 always; the Stage 2
-  naming pass gated + throttled.
+  (`INTERVAL_TRENDS`, default ~weekly — trends move slowly).
 - A lightweight keyword extraction over `section_business`/`section_mda` should run inside
   the per-company `filings`/reference ingest (while the text is still in-window) and write
   `theme_mentions`; `trend_aggregator` only *aggregates* stored mentions.
 - New `db.py` helpers: `upsert_theme_mentions`, `upsert_theme_trends`.
-- **Cost stays flat:** aggregation is over already-stored rows — no new EDGAR load, and
-  only a throttled Gemini naming pass. Tables are bounded (one row per theme×period).
+- **Cost stays flat:** aggregation is over already-stored rows — no new EDGAR load and no
+  external API calls at all. Tables are bounded (one row per theme×period).
 
 ### Frontend
 
@@ -699,11 +708,10 @@ never on filings.
 
 ### Phasing
 
-- **2A (free, no LLM):** keyword/taxonomy normalization + breadth/capital momentum from
-  the existing warehouse → `theme_trends` + the Trends view. Fully works without Gemini.
-- **2B (LLM naming):** Gemini clusters/names emerging themes and writes the "why,"
-  throttled and gated.
-- **2C (semantic):** pgvector embeddings for theme clustering beyond the keyword taxonomy.
+- **2A (the whole of Phase 2):** keyword/taxonomy normalization + breadth/capital momentum
+  from the existing warehouse → `theme_trends` + the Trends view. No model in the loop.
+- **2C (semantic, optional later):** pgvector embeddings for theme clustering beyond the
+  keyword taxonomy — a local embedding model only; adding a hosted LLM is out of scope.
 
 ### Risks / notes
 
@@ -712,12 +720,20 @@ never on filings.
   with universe size, so a thin watchlist gives a thin signal.
 - **Retention timing** (above): persist theme mentions at ingest; never rely on
   `section_*` text surviving past 30 days.
-- **No regression of invariants:** excerpts-only to Gemini, Stage-1-gates-Stage-2,
-  warehouse-first, bounded/recomputed aggregate tables, reads fetched-once + client-matched.
+- **No regression of invariants:** no external AI service, warehouse-first,
+  bounded/recomputed aggregate tables, reads fetched-once + client-matched.
 
 ---
 
 ## Key Decisions Log
+
+**Why there is no LLM (2026-08-13):** the optional Gemini channel
+(`enrichment/gemini_client.py`, `enrichment/gemini_enricher.py`, the `google-genai`
+dependency, `GEMINI_API_KEY`, and the Discord embed's "AI summary" field) was removed. It
+was never wired into `main.py` — nothing imported it outside itself — so it was a dormant
+API-key surface and an extra dependency for zero shipped behaviour. Summa's output is now
+100% deterministic code over the warehouse. Do not reintroduce a model provider without an
+explicit decision; the roadmap's theme/trend work is specified keyword/taxonomy-only.
 
 **Why `page.tsx` started as one large file:** shared `Filing`/row types, formatters,
 and design-token references made an early split create prop-drilling/context overhead.

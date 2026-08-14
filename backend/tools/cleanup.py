@@ -4,7 +4,7 @@
 Per the Phase 1 retention split: every structured warehouse table is retained
 permanently; only the bulky narrative sections on `filings` roll off. The
 filing metadata row (form, date, url) is kept. Runs on the 1st via
-summa-cleanup.yml. (Gemini reports / digests are Phase 2.)
+summa-cleanup.yml.
 """
 
 import logging

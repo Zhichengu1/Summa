@@ -13,9 +13,7 @@ requirements-news.txt. A silent no-op when DISCORD_WEBHOOK_URL is unset.
 Run:  python -m tools.daily_brief
 """
 
-import datetime as _dt
 import logging
-import statistics
 import sys
 from typing import Any
 
@@ -24,6 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import db  # noqa: E402  (needs env loaded first)
+import recap  # noqa: E402  (shared earnings-estimate helpers)
 from enrichment import discord_notify  # noqa: E402
 
 for _stream in (sys.stdout, sys.stderr):
@@ -40,45 +39,13 @@ logging.basicConfig(
 logger = logging.getLogger("summa.brief")
 
 
-# Radar window: companies estimated to report within this many days (a few days
-# overdue still shows as "any day now" — estimates drift a little run to run).
-_RADAR_AHEAD_DAYS = 10
-_RADAR_OVERDUE_DAYS = 5
-
-
-def _next_earnings_estimate(dates: list[str]) -> tuple[str, int] | None:
-    """(est ISO date, days away) from past report dates, or None.
-
-    Python port of frontend lib/domain/catalysts.ts nextEarningsEstimate: needs
-    >= 3 dates and a quarterly-ish median gap (45–200 days) so we never fabricate
-    a date from sparse or noisy history. Always an estimate, never a promise.
-    """
-    ds = sorted({_dt.date.fromisoformat(d[:10]) for d in dates if d})
-    if len(ds) < 3:
-        return None
-    gaps = [(b - a).days for a, b in zip(ds, ds[1:])]
-    med = statistics.median_low(gaps)
-    if not 45 <= med <= 200:
-        return None  # not a clean quarterly cadence
-    est = ds[-1] + _dt.timedelta(days=med)
-    return est.isoformat(), (est - _dt.date.today()).days
-
-
 def _earnings_radar() -> list[dict[str, Any]]:
-    """Watchlist companies estimated to report within the radar window."""
-    by_cik: dict[str, dict[str, Any]] = {}
-    for r in db.fetch_earnings_dates():
-        e = by_cik.setdefault(r["cik"], {"ticker": r.get("ticker"), "dates": []})
-        if r.get("reported_date"):
-            e["dates"].append(r["reported_date"])
-        if r.get("ticker"):
-            e["ticker"] = r["ticker"]
-    radar: list[dict[str, Any]] = []
-    for cik, e in by_cik.items():
-        est = _next_earnings_estimate(e["dates"])
-        if est and -_RADAR_OVERDUE_DAYS <= est[1] <= _RADAR_AHEAD_DAYS:
-            radar.append({"ticker": e["ticker"] or cik, "est_date": est[0], "days_away": est[1]})
-    return radar
+    """Watchlist companies estimated to report within the radar window.
+
+    The estimate itself lives in `recap.py` so the brief and the evening recap
+    can never drift apart on which companies are "about to report".
+    """
+    return recap.earnings_radar(db.fetch_earnings_dates())
 
 
 def main() -> int:

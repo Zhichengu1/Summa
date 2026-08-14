@@ -83,9 +83,10 @@ Read-only over Supabase (anon key, RLS-enforced), hash-routed, client-side sort/
 
 ### 4. Operations
 
-Seven scheduled workflows, all free-tier: the 10-min ingest, 5-min news refresh, weekday
-morning brief, daily+intraday Reddit digest, monthly retention cleanup, weekly SEC-index
-rebuild, and a post-deadline quarterly 13F roll-forward — plus CI (typecheck + compile) and
+Eleven scheduled workflows, all free-tier: the 10-min ingest, 5-min news refresh, weekday
+morning brief, weekday-evening prose recap, daily+intraday Reddit digest, twice-daily
+congressional trades, weekly CFTC COT, monthly retention cleanup, weekly SEC-index rebuild,
+a post-deadline quarterly 13F roll-forward, and a weekly keepalive heartbeat — plus CI (typecheck + compile) and
 gitleaks secret scanning on every push. Retention keeps storage bounded: filing text 30d, feed
 rows 90d, prices ~2y, manager portfolios 4 quarters, news/Reddit 30d, IPOs 120d.
 
@@ -93,18 +94,22 @@ rows 90d, prices ~2y, manager portfolios 4 quarters, news/Reddit 30d, IPOs 120d.
 
 ## AI Scope
 
-The AI layer follows one rule everywhere: **the algorithm finds the signal; the LLM only names
-and explains it.** Deterministic, free Stage-1 computation gates every LLM call, so AI cost
-stays near zero and nothing hallucinated ever enters the warehouse.
+**There is no LLM in the pipeline today.** Every signal Summa surfaces is computed by
+deterministic, explainable code over the warehouse — nothing generated, nothing hallucinated,
+no third-party AI service in the data path. The rule for any future addition stays: **the
+algorithm finds the signal; an LLM would only name and explain it**, gated behind a free
+Stage-1 computation.
 
-### Today (shipped or scaffolded)
+### Today (shipped)
 
 - **Composite catalyst scoring** (`news_score.py`) — a hand-built, explainable model that
   scores every headline for trader-importance before storage or alerting. No LLM in the loop;
   this is the pattern all Stage-1 gates follow.
-- **Gemini enrichment channel** (`enrichment/gemini_enricher.py`) — optional, gated on
-  `GEMINI_API_KEY`, throttled to the free tier. Receives only small extracted excerpts, never
-  full filings.
+- **Rule-based signal, scoring, and options logic** — `pulse.ts`, `scorecard.ts`,
+  `options.ts`, `technicals.ts` and friends are pure functions over stored rows.
+- **Templated prose recap** (`recap.py`) — the daily watchlist wrap-up is written in plain
+  English from `company_summary` numbers by deterministic templates, posted to Discord each
+  weekday evening. Reproducible sentence-for-sentence, and impossible to hallucinate.
 
 ### Phase 2 — Trend Intelligence (designed, next up)
 
@@ -116,12 +121,13 @@ on, and what's the next industry trend?**
    adopting a theme per quarter) and **depth** (R&D/CapEx growth, M&A, offering proceeds tagged
    to the theme) → a momentum score → stage-classify each theme (emerging / accelerating /
    mainstream / cooling) into `theme_trends`.
-2. **Stage 2 (Gemini, optional):** cluster synonymous phrases, name nascent clusters, and write
-   the one-paragraph "why this is the next trend" — over the small aggregated phrase set only.
+2. **Naming (optional, not implemented):** clustering synonymous phrases and writing the
+   "why this is the next trend" blurb would be the only place an LLM could earn its place —
+   over the small aggregated phrase set, never over filings. No provider is wired in.
 3. **Frontend:** a Trends leaderboard ranked by momentum, with breadth, capital flow, stage
    badges, and drill-down to the companies driving each theme.
 
-### Phase 2C+ — the deeper AI roadmap
+### Phase 2C+ — the deeper AI roadmap (ideas only — no LLM provider is wired in)
 
 - **Semantic layer (pgvector):** embeddings on theme mentions and filing sections for
   similarity clustering beyond the keyword taxonomy — "companies talking like NVDA did in

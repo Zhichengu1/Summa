@@ -2,7 +2,7 @@
 Discord webhook alerts.
 
 Posts a single rich embed per flagged filing: company, form type, signals
-fired, composite severity, AI summary excerpt, and a direct EDGAR link.
+fired, composite severity, and a direct EDGAR link.
 A silent no-op when DISCORD_WEBHOOK_URL is unset, so the pipeline still runs
 without notifications configured.
 """
@@ -1447,6 +1447,52 @@ def notify_daily_brief(
         return False
 
 
+def notify_daily_recap(recap: dict[str, Any]) -> bool:
+    """Post the deterministic prose recap (one embed) built by recap.build_recap.
+
+    The narrative arrives already assembled and sanitized — this only wraps it in
+    an embed and posts it. Returns True if posted; a no-op (False) without a
+    webhook or a recap, and fail-soft like every other webhook path.
+
+    DISCORD_RECAP_WEBHOOK_URL routes the recap to its own channel; it falls back
+    to DISCORD_WEBHOOK_URL, matching the Reddit/Congress/COT digests.
+    """
+    webhook = os.environ.get("DISCORD_RECAP_WEBHOOK_URL") or os.environ.get("DISCORD_WEBHOOK_URL")
+    paragraphs = recap.get("paragraphs") if recap else None
+    if not webhook or not paragraphs:
+        return False
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not installed — skipping Discord daily recap")
+        return False
+
+    median = recap.get("median_chg")
+    try:
+        median = float(median) if median is not None else None
+    except (TypeError, ValueError):
+        median = None
+
+    embed: dict[str, Any] = {
+        "title": f"📝  {_label(recap.get('title') or 'Watchlist Recap', 120)}",
+        "color": (_POS_COLOR if median and median > 0 else
+                  _NEG_COLOR if median and median < 0 else _NEWS_COLOR),
+        "description": "\n\n".join(paragraphs)[:4_000],
+        "footer": {"text": f"Summa · {recap.get('companies', 0)} companies · "
+                           "computed from company_summary, no AI"},
+    }
+    try:
+        resp = requests.post(webhook, json={"embeds": [embed]}, timeout=_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Discord daily-recap webhook returned %s: %s",
+                           resp.status_code, resp.text[:200])
+            return False
+        return True
+    except requests.RequestException:
+        logger.exception("Discord daily-recap webhook post failed")
+        return False
+
+
 def _band(severity: float) -> tuple[int, str]:
     for floor, color, label in _SEVERITY_BANDS:
         if severity >= floor:
@@ -1476,7 +1522,6 @@ def send(
     form_type: str,
     filing_url: str | None,
     signals: dict[str, Any],
-    enrichment: dict[str, Any] | None = None,
 ) -> None:
     """Post a rich embed for a flagged filing. No-op if no webhook configured."""
     webhook = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -1498,13 +1543,6 @@ def send(
         {"name": "Severity", "value": f"{int(severity)} · {band_label}", "inline": True},
         {"name": "Signals",  "value": ", ".join(fired), "inline": False},
     ]
-
-    if enrichment and enrichment.get("summary"):
-        summary = enrichment["summary"][:1_000]
-        conf = enrichment.get("confidence")
-        if conf is not None:
-            summary += f"\n\n_confidence {float(conf):.0%}_"
-        fields.append({"name": "AI summary", "value": summary, "inline": False})
 
     embed: dict[str, Any] = {
         "title": f"{_label(company_name)} ({_label(ticker, 12)})",

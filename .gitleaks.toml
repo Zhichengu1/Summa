@@ -1,5 +1,6 @@
 # gitleaks config for Summa — extends the built-in ruleset and adds the
-# specific credentials this project uses (Supabase, Gemini, Discord, EDGAR).
+# specific credentials this project uses (Supabase, Discord, EDGAR). The Google
+# API-key rule is kept as a defensive catch even though no AI service is used.
 # Used by both the local pre-commit hook (.githooks/pre-commit) and the
 # secret-scan GitHub Action.
 

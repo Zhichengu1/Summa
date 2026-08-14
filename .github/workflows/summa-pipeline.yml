@@ -3,8 +3,8 @@ name: summa-pipeline
 # Runs the SEC filing intelligence pipeline every 10 minutes.
 # main.py uses a staged cadence: each run ingests newly-queued companies plus a
 # bounded batch of the stalest ones (INGEST_MAX_PER_RUN), so runtime and EDGAR/
-# Supabase load stay flat as the watchlist grows. Stage 1 is free; Stage 2
-# (Gemini) + Discord run only on flagged filings. Credentials come from secrets.
+# Supabase load stay flat as the watchlist grows. Discord alerts run only on
+# just-filed documents. Credentials come from secrets.
 
 on:
   schedule:
@@ -52,7 +52,6 @@ jobs:
           # defaults to 9 (SEC's ~10 req/s ceiling); set explicitly so the limit
           # is documented and survives a future change to the library default.
           EDGAR_RATE_LIMIT_PER_SEC: "9"
-          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           # Match summa-news.yml: alert company headlines at the UI's "important"
           # floor (3), not just Notable+ catalysts (code default 6).
