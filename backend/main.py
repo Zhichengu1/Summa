@@ -161,7 +161,7 @@ DATASET_INTERVALS_H: dict[str, float] = {
     "options":       float(os.environ.get("INTERVAL_OPTIONS",       "12")),   # CBOE chain snapshot: the row is keyed by DATE, so a 12h cadence just refreshes the same day's row with later (post-close) flow
     "news":          float(os.environ.get("INTERVAL_NEWS",          "1")),    # Google News RSS: hourly poll (safely inside free tier); Realtime pushes new rows to the UI instantly. INTERVAL_NEWS tunes it.
     "reference":     float(os.environ.get("INTERVAL_REFERENCE",     "720")),  # SIC/seed ~static → monthly
-    "summary":       float(os.environ.get("INTERVAL_SUMMARY",       "0")),    # cheap recompute; refresh every visit
+    "summary":       float(os.environ.get("INTERVAL_SUMMARY",       "6")),    # cheap in CPU but the project's largest Supabase READER (~47 KB/company: 400 price bars + 200 insider rows). Its inputs (prices, insider) are all 24h-cadence, so "every visit" re-read identical rows 144x/day (~5 GB/mo egress). 4x/day is still finer than any input changes.
 }
 
 

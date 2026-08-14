@@ -418,11 +418,20 @@ trailing 3-year range, so ~3.3y keeps the full 156-week lookback with margin. Al
 filings 0 (every visit) · events 12h · insider 24h · ownership 48h · fundamentals 168h ·
 prices 24h · options 12h (the row is keyed by DATE, so the
 second visit just refreshes the same day's row with later/post-close flow; it runs AFTER
-prices because its realized-vol yardstick reads `daily_prices`) · news 1h (the main pipeline's per-company cadence; the summa-news */5 job also
+prices because its realized-vol yardstick reads `daily_prices`) · news 6h (the main pipeline's per-company cadence; the summa-news */5 job also
 polls every company's Google News each tick via `--company`, so effective news latency is
-~5 min — dedupe by guid makes the overlap harmless; `INTERVAL_NEWS` tunes the pipeline side) ·
-reference 720h. (13F institutional is global/quarterly — see step 7
+~5 min — dedupe by guid makes the overlap harmless. The pipeline pass therefore owns no
+latency budget and is a pure backstop, so it is deliberately slow; `INTERVAL_NEWS` tunes
+the pipeline side) · summary 6h · reference 720h. (13F institutional is global/quarterly — see step 7
 — not a per-company `DATASET_INTERVALS_H` entry.)
+
+> **Cadence is the Supabase egress budget, not just a freshness knob.** The reads scale
+> `companies × runs/day`, and the free tier allows 5 GB/month. `summary` is the largest
+> reader in the project (~47 KB/company/run: 400 `daily_prices` bars + 200 insider rows),
+> so its old "every visit" default cost ~5 GB/month by itself at 25 companies × 144
+> runs/day — the whole allowance, spent re-reading identical rows. Before setting any
+> `INTERVAL_*` to 0, check what the dataset *reads*, and never set one finer than the
+> cadence of the data it consumes.
 
 ---
 
