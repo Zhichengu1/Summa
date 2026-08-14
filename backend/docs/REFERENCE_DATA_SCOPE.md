@@ -80,30 +80,30 @@ object already exposes `.sic` / `.sic_description` (and is already constructed d
 SIC-group table and write to `company_profiles` with `source='sic'`. This alone makes the
 "category industry" feature data-driven for *any* company, not just the curated 7.
 
-### 4b. Themes + thesis — LLM-extracted from the 10-K, cached
-The strategic narrative is qualitative and not in structured XBRL. Reuse the existing
-`gemini_enricher.py` (already gated on `GEMINI_API_KEY`, already in the pipeline):
+### 4b. Themes + thesis — keyword extraction from the 10-K, cached
+The strategic narrative is qualitative and not in structured XBRL. There is **no LLM in
+this project** (the Gemini channel was removed), so themes come from a deterministic
+keyword/taxonomy pass:
 
 - Input: the **Item 1 "Business"** section of the latest 10-K (already retrievable via
-  edgartools; cap the excerpt — never send the full filing, per the project invariant).
-- Output: `{ thesis, themes: [{name, note, rank}] }`.
-- **Cost control:** run **only when a new 10-K appears** (annual cadence → ~7 calls/year
-  for the current watchlist), and **only if the company has no profile for that fiscal
-  year**. Cache in the tables; never call on every pipeline run.
-- Fallback: if `GEMINI_API_KEY` is absent, skip (no-op) — the curated seed (§4d) covers it.
+  edgartools).
+- Output: `{ themes: [{name, note, rank}] }` matched against the curated taxonomy.
+- **Cost control:** run **only when a new 10-K appears** (annual cadence), and **only if
+  the company has no profile for that fiscal year**. Cache in the tables; never recompute
+  on every pipeline run.
+- Floor: the curated seed (§4d) covers anything the keyword pass misses.
 
-### 4c. Entity context — seed list + LLM fallback for unknowns
+### 4c. Entity context — seed list, extended by hand
 - Seed the `entities` table from the current `lib/entities.ts` registry (one-time port to
   a YAML/JSON seed in the repo).
-- For manager/filer names seen in `institutional_holdings` / `beneficial_ownership` that
-  match no seed entry, optionally batch-classify the **distinct** names via Gemini once
-  (kind + one-line note), cache to `entities`. Distinct managers across the watchlist is a
-  few hundred at most — a one-time backfill, then near-zero ongoing.
+- Manager/filer names seen in `institutional_holdings` / `beneficial_ownership` that match
+  no seed entry fall back to the raw name; add the notable ones to the seed as they show
+  up. Distinct managers across the watchlist is a few hundred at most.
 
 ### 4d. Seeds as the floor
 Port the existing curated `taxonomy.ts` / `entities.ts` content into repo seed files
 (`backend/seeds/profiles.yaml`, `backend/seeds/entities.yaml`). A `seed_reference.py`
-loads them with `source='seed'`. LLM/SIC results overwrite seeds only when present, so we
+loads them with `source='seed'`. Extracted/SIC results overwrite seeds only when present, so we
 never regress below today's hand-curated quality.
 
 ## 5. New backend modules & wiring
@@ -111,7 +111,7 @@ never regress below today's hand-curated quality.
 ```
 backend/
   reference_ingest.py     # NEW — populates company_profiles + company_themes
-  entity_ingest.py        # NEW — seeds + (optional) LLM-classifies entities
+  entity_ingest.py        # NEW — seeds the entities registry
   seeds/
     profiles.yaml         # NEW — ported from taxonomy.ts (floor quality)
     entities.yaml         # NEW — ported from entities.ts
@@ -126,7 +126,7 @@ Wire into `main.py.process()` using the existing optional-extractor pattern
 db.upsert_company({...})                              # existing
 data_ingest.ingest_fundamentals(cik, ticker)          # existing
 filings_ingest.ingest_filings_feed(cik, ticker, name) # existing
-_run_optional(reference_ingest, "ingest_profile", cik, ticker)   # NEW (SIC always; LLM only on new 10-K)
+_run_optional(reference_ingest, "ingest_profile", cik, ticker)   # NEW (SIC always; themes only on new 10-K)
 ...
 # Entities run once at end of main(), not per-company:
 _run_optional(entity_ingest, "ingest_entities")       # NEW
@@ -171,28 +171,29 @@ isn't wired yet.
 | Entity writes | once (seed) + rare unknown backfill | negligible |
 | Frontend reads (§7 export) | **0** at runtime | **none** |
 | Frontend reads (§6 fallback) | 1× `entities` per session + 1× profile per company open | tiny, capped |
-| Gemini calls | ~7/year + one-time entity backfill | within free tier |
 
 No table grows unbounded; no per-row joins; no per-render queries.
 
 ## 9. Phasing & acceptance
 
-- **Phase A — DONE (no LLM):** SIC → `company_profiles.sector/industry`; seeds ported to
+- **Phase A — DONE:** SIC → `company_profiles.sector/industry`; seeds ported to
   `seeds/profiles.yaml` + `seeds/entities.yaml`; `reference_ingest.py` + `entity_ingest.py`
   wired into `main.py`; `db.py` helpers added; schema tables added. Frontend: `data.ts`
   fetchers, `taxonomy.ts`/`entities.ts` refactored to adapters that prefer the warehouse and
   fall back to embedded seeds; reference data fetched **once** in the app's initial load and
   matched client-side. Net new Supabase reads per session: **3** (profiles, themes, entities),
   none per-row or per-page.
-- **Phase B:** LLM theme/thesis extraction from 10-K, cached & gated on new filings.
+- **Phase B:** keyword/taxonomy theme extraction from 10-K, cached & gated on new filings.
 - **Phase C:** build-time static export (§7); remove runtime reference reads.
 
 ## 10. Risks / notes
 
-- **Invariant:** never send a full filing to Gemini — Business-section excerpt only, capped
-  (consistent with `gemini_enricher.py`'s `_MAX_EXCERPT_CHARS`).
-- **No regression below seeds:** LLM/SIC overwrite seed rows only when they produce a value.
-- **SIC is coarse** (e.g. all of Apple/Microsoft land in broad tech SICs); the LLM `thesis`
-  and curated `industry` add the nuance SIC lacks. Keep both.
+- **Invariant:** no LLM/third-party AI service is in this project — theme extraction is a
+  local keyword/taxonomy pass over the Business section, and no filing text leaves the
+  pipeline.
+- **No regression below seeds:** extracted/SIC values overwrite seed rows only when they
+  produce a value.
+- **SIC is coarse** (e.g. all of Apple/Microsoft land in broad tech SICs); the curated
+  `industry` and themes add the nuance SIC lacks. Keep both.
 - Frontend keeps the embedded seed as a hard fallback so an empty/unreachable warehouse
   never blanks the UI.

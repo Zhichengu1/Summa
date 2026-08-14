@@ -40,6 +40,5 @@ jobs:
           SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
           EDGAR_IDENTITY:      ${{ secrets.EDGAR_IDENTITY }}
-          GEMINI_API_KEY:      ${{ secrets.GEMINI_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python -m tools.cleanup

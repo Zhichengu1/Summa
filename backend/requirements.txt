@@ -7,7 +7,3 @@ python-dotenv>=1.0.0
 pandas>=2.0.0
 requests>=2.31.0
 PyYAML>=6.0
-# Phase 2 enrichment channels (optional, not used by the Phase 1 ingest).
-# google-genai is the current SDK (google-generativeai is deprecated); AI Studio
-# API key only — never Vertex AI / GCP billing.
-google-genai>=1.0.0

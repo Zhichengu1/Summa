@@ -389,13 +389,15 @@ def fetch_company_summaries() -> list[dict[str, Any]]:
     """Return every company_summary row (paged) for watchlist-wide surfaces.
 
     One tiny row per company, so this stays cheap at any watchlist size. Used by
-    the daily Discord brief (tools/daily_brief.py). Fails soft to [].
+    the daily Discord brief (tools/daily_brief.py) and the prose recap
+    (tools/daily_recap.py). Fails soft to [].
     """
     try:
         return _select_all(
             "company_summary",
             "cik, ticker, last_close, as_of, chg_1d, ret_ytd, pct_off_high, rsi14, "
-            "ma_cross, vol_spike, new_52w_high, new_52w_low, net_insider_90d, cluster_buy",
+            "pct_from_50, pct_from_200, ma_cross, vol_spike, new_52w_high, new_52w_low, "
+            "filings_30d, last_filing_form, last_filing_at, net_insider_90d, cluster_buy",
         )
     except Exception:
         logger.exception("fetch_company_summaries failed")
