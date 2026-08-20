@@ -7,7 +7,7 @@ import type {
   CorporateEvent, EarningsEvent, LateFiling, SecuritiesOffering,
   BeneficialOwnership, ProposedSale, DailyPrice,
   CompanyProfileRow, CompanyThemeRow, EntityRow, CompanySummary, Ipo, NewsItem, MarketNews,
-  RedditTrend, CongressTrade, CotReport, OptionsSnapshot,
+  RedditTrend, CongressTrade, CotReport, OptionsSnapshot, ThemeTrend,
 } from "../types";
 
 // Whole-table read, paged in 1000-row chunks. Any "fetch every row" query must use
@@ -78,6 +78,21 @@ export async function fetchCotReports(weeks = 156): Promise<CotReport[]> {
     "market_code, report_date, market_name, market_group, open_interest, oi_change, noncomm_long, noncomm_short, comm_long, comm_short, nonrept_long, nonrept_short, noncomm_net, comm_net, nonrept_net, noncomm_net_pct_oi, traders_total",
     { col: "report_date", asc: true },
     { col: "report_date", value: cutoff },
+  );
+}
+
+// Phase 2 cross-company theme aggregates (theme_trends), global — not
+// watchlist-scoped. One small row per theme per quarter (a few hundred in
+// total, fully recomputed by the backend each cycle), so the whole aggregate
+// comes down in one paged read and the Trends view slices it client-side:
+// ranking the latest quarter, and building each theme's history from the rest.
+export async function fetchThemeTrends(): Promise<ThemeTrend[]> {
+  return selectAllPaged<ThemeTrend>(
+    "theme_trends",
+    "theme_key, period, label, category, company_count, coverage, mention_total, " +
+    "breadth_delta, breadth_growth, capital_flow, capital_growth, momentum_score, " +
+    "stage, sector, sector_flow, drivers, thin, summary, updated_at",
+    { col: "period", asc: true },
   );
 }
 

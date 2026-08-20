@@ -9,14 +9,14 @@ import type { Company, Filing, MainView, CompanySummary } from "../lib/types";
 
 export function Sidebar({
   companies, filings, activeCik, view, ingestedCiks, prices,
-  onCompany, onOverview, onSearch, onFeed, onNews, onCalendar, onManagers, onIpos, onReddit, onCongress, onCot, onOptions, onGuide, onRemove, newFilings = 0, newNews = 0,
+  onCompany, onOverview, onSearch, onFeed, onNews, onCalendar, onManagers, onIpos, onReddit, onCongress, onCot, onOptions, onTrends, onGuide, onRemove, newFilings = 0, newNews = 0,
 }: {
   companies: Company[]; filings: Filing[];
   activeCik: string | null; view: MainView;
   ingestedCiks: Set<string>;
   prices: Map<string, CompanySummary>;
   onCompany: (cik: string) => void;
-  onOverview: () => void; onSearch: () => void; onFeed: () => void; onNews: () => void; onCalendar: () => void; onManagers: () => void; onIpos: () => void; onReddit: () => void; onCongress: () => void; onCot: () => void; onOptions: () => void; onGuide: () => void;
+  onOverview: () => void; onSearch: () => void; onFeed: () => void; onNews: () => void; onCalendar: () => void; onManagers: () => void; onIpos: () => void; onReddit: () => void; onCongress: () => void; onCot: () => void; onOptions: () => void; onTrends: () => void; onGuide: () => void;
   onRemove: (cik: string) => void;
   newFilings?: number;
   newNews?: number;
@@ -71,6 +71,9 @@ export function Sidebar({
         </div>
         <div className={`nav-item${view === "options" ? " active" : ""}`} onClick={onOptions}>
           ⧉ Options Radar
+        </div>
+        <div className={`nav-item${view === "trends" ? " active" : ""}`} onClick={onTrends}>
+          ◭ Trends
         </div>
         <div className={`nav-item${view === "guide" ? " active" : ""}`} onClick={onGuide}>
           ◇ Data Guide

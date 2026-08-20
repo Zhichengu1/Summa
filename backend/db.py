@@ -136,6 +136,103 @@ def upsert_options_snapshots(rows: list[dict[str, Any]]) -> int:
     return upsert_many("options_snapshots", rows, on_conflict="cik,snapshot_date")
 
 
+def upsert_theme_mentions(rows: list[dict[str, Any]]) -> int:
+    """Upsert per-company theme mentions, keyed on (cik, theme_key, period)."""
+    return upsert_many("theme_mentions", rows, on_conflict="cik,theme_key,period")
+
+
+def replace_theme_trends(rows: list[dict[str, Any]]) -> int:
+    """Replace the whole `theme_trends` aggregate: delete every row, then insert.
+
+    The aggregate is small (themes × quarters ≈ a few hundred rows) and fully
+    recomputed from `theme_mentions` each cycle, so a wholesale replace is both
+    cheaper to reason about and the only way stale rows disappear — a theme that
+    drops out of a quarter produces no row, and an upsert alone would leave the
+    previous cycle's value sitting there looking current.
+    """
+    if not rows:
+        return 0
+    try:
+        get_client().table("theme_trends").delete().neq("theme_key", "").execute()
+    except Exception:
+        logger.exception("clearing theme_trends failed")
+    return upsert_many("theme_trends", rows, on_conflict="theme_key,period")
+
+
+def get_theme_accessions(cik: str) -> set[str]:
+    """Accession numbers already extracted into `theme_mentions` for a company.
+
+    The incremental gate for theme_ingest: filings in this set are never
+    downloaded again, so the steady state costs one query and no EDGAR text.
+    """
+    try:
+        rows = (
+            get_client().table("theme_mentions").select("source_accession")
+            .eq("cik", cik).execute().data or []
+        )
+        return {r["source_accession"] for r in rows if r.get("source_accession")}
+    except Exception:
+        logger.exception("get_theme_accessions failed for %s", cik)
+        return set()
+
+
+def fetch_capital_facts(cik: str, concepts: list[str]) -> list[dict[str, Any]]:
+    """R&D / capex rows from `financial_facts` for one company (already ingested)."""
+    try:
+        return (
+            get_client().table("financial_facts")
+            .select("standard_concept, period_end, period_type, value")
+            .eq("cik", cik).in_("standard_concept", concepts)
+            .execute().data or []
+        )
+    except Exception:
+        logger.exception("fetch_capital_facts failed for %s", cik)
+        return []
+
+
+def fetch_theme_mentions(since: str | None = None) -> list[dict[str, Any]]:
+    """Every stored theme mention (optionally from `since` onward), paged.
+
+    Whole-table read, so it must page — see _select_all. The table is bounded
+    by companies × themes × quarters, which stays small, but a bare .select()
+    would still truncate at ~1000 rows and silently shrink the aggregate.
+    """
+    client = get_client()
+    out: list[dict[str, Any]] = []
+    cols = "cik, ticker, theme_key, period, mention_count, mention_share, capital_signal"
+    start = 0
+    try:
+        while True:
+            q = client.table("theme_mentions").select(cols)
+            if since:
+                q = q.gte("period", since)
+            batch = q.range(start, start + _PAGE - 1).execute().data or []
+            out.extend(batch)
+            if len(batch) < _PAGE:
+                return out
+            start += _PAGE
+    except Exception:
+        logger.exception("fetch_theme_mentions failed")
+        return out
+
+
+def latest_theme_trends_at() -> str | None:
+    """Newest `theme_trends.updated_at`, or None if the aggregate is empty.
+
+    Self-gates the global trend pass: it runs once per INTERVAL_TRENDS rather
+    than on every 10-minute tick, at the cost of one tiny query.
+    """
+    try:
+        rows = (
+            get_client().table("theme_trends").select("updated_at")
+            .order("updated_at", desc=True).limit(1).execute().data or []
+        )
+        return rows[0]["updated_at"] if rows else None
+    except Exception:
+        logger.exception("latest_theme_trends_at failed")
+        return None
+
+
 def fetch_recent_closes(cik: str, sessions: int = 60) -> list[float]:
     """Most-recent `sessions` closes for a company, oldest → newest.
 
@@ -759,6 +856,28 @@ def prune_old_options_snapshots(days: int = 400) -> int:
         return len(result.data or [])
     except Exception:
         logger.exception("prune_old_options_snapshots failed")
+        return 0
+
+
+def prune_old_theme_mentions(days: int = 1900) -> int:
+    """Delete `theme_mentions` rows older than `days` (~5 years of quarters).
+
+    One tiny row per company per theme per quarter — the table is small, but it
+    grows forever with time, and the Trends view's longest series is a few years.
+    Five years leaves ample runway for the year-over-year breadth comparison
+    while keeping the aggregator's whole-table scan bounded. Monthly cadence
+    (cleanup.py). The aggregate itself (`theme_trends`) is fully recomputed from
+    whatever survives, so pruning here shrinks the trend history in step.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    try:
+        result = (
+            get_client().table("theme_mentions").delete()
+            .lt("period", cutoff).execute()
+        )
+        return len(result.data or [])
+    except Exception:
+        logger.exception("prune_old_theme_mentions failed")
         return 0
 
 

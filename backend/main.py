@@ -89,6 +89,14 @@ try:
     from extractors import ipo_extractor
 except Exception:  # pragma: no cover
     ipo_extractor = None
+try:
+    from ingest import theme_ingest
+except Exception:  # pragma: no cover
+    theme_ingest = None
+try:
+    import trend_aggregator
+except Exception:  # pragma: no cover
+    trend_aggregator = None
 
 load_dotenv()
 
@@ -161,6 +169,7 @@ DATASET_INTERVALS_H: dict[str, float] = {
     "options":       float(os.environ.get("INTERVAL_OPTIONS",       "12")),   # CBOE chain snapshot: the row is keyed by DATE, so a 12h cadence just refreshes the same day's row with later (post-close) flow
     "news":          float(os.environ.get("INTERVAL_NEWS",          "1")),    # Google News RSS: hourly poll (safely inside free tier); Realtime pushes new rows to the UI instantly. INTERVAL_NEWS tunes it.
     "reference":     float(os.environ.get("INTERVAL_REFERENCE",     "720")),  # SIC/seed ~static → monthly
+    "themes":        float(os.environ.get("INTERVAL_THEMES",        "168")),  # Phase 2 keyword pass over new 10-K/10-Q narrative. Weekly is a POLL for new filings, not a re-parse: already-extracted accessions are skipped before any download, so a due visit with nothing new costs one small query. New reports only land quarterly.
     "summary":       float(os.environ.get("INTERVAL_SUMMARY",       "6")),    # cheap in CPU but the project's largest Supabase READER (~47 KB/company: 400 price bars + 200 insider rows). Its inputs (prices, insider) are all 24h-cadence, so "every visit" re-read identical rows 144x/day (~5 GB/mo egress). 4x/day is still finer than any input changes.
 }
 
@@ -305,6 +314,9 @@ def process(company: WatchedCompany, datasets: dict[str, str], *, force: bool = 
     if due("options")       and _run_optional(options_ingest,          "ingest_options",       cik, ticker): new_state["options"] = stamp
     if due("news")          and _run_optional(news_ingest,             "ingest_news",          cik, ticker, name): new_state["news"] = stamp
     if due("reference")     and _run_optional(reference_ingest,        "ingest_profile",       cik, ticker): new_state["reference"] = stamp
+    # Phase 2 input: distil canonical themes from any NEW 10-K/10-Q narrative
+    # while the text is still reachable (the filings feed stores no prose).
+    if due("themes")        and _run_optional(theme_ingest,            "ingest_themes",        cik, ticker): new_state["themes"] = stamp
 
     # Summary runs LAST so it aggregates the data the slices above just wrote.
     if due("summary")       and _run_optional(summary_ingest,          "ingest_summary",       cik, ticker): new_state["summary"] = stamp
@@ -381,6 +393,12 @@ def main() -> int:
     # free macro/regulatory RSS feeds (SEC/Fed/FDA/PRN), keeps only market-movers.
     # Incremental (only new items written) + fail-soft per feed.
     _run_optional(market_news_ingest, "ingest_market_news_global")
+    # Phase 2 trend aggregation (global): rolls the stored per-company
+    # theme_mentions up into the cross-company theme_trends leaderboard. Pure
+    # arithmetic over rows already in the warehouse — no EDGAR, no external
+    # call — and self-gated to INTERVAL_TRENDS (weekly), so all but one run a
+    # week costs a single tiny freshness query.
+    _run_optional(trend_aggregator, "ingest_trends")
     logger.info("Done | %d/%d companies processed", ok, len(companies))
     return 0 if ok else 1
 

@@ -728,3 +728,109 @@ CREATE POLICY "anon read options_snapshots" ON options_snapshots FOR SELECT TO a
 -- behind the "which strike, at what cost, is it a good deal" read. CREATE TABLE IF
 -- NOT EXISTS above will not add it to an already-applied table, so do it explicitly.
 ALTER TABLE options_snapshots ADD COLUMN IF NOT EXISTS candidates JSONB;
+
+-- ===========================================================================
+-- PHASE 2 — Trend Intelligence. Two tables that move the warehouse from
+-- per-company facts to a cross-company read: what tracked companies are
+-- collectively investing in, and which theme is next.
+--
+-- Both are produced entirely by deterministic code over data already stored
+-- (a curated keyword taxonomy + arithmetic). No model, no external service.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- theme_mentions — the raw per-company-per-quarter material, written at INGEST
+-- time by ingest/theme_ingest.py from the Business + MD&A sections of each new
+-- 10-K / 10-Q. It has to be written then and there: the `filings` feed stores
+-- no narrative text and its rows are deleted at 90 days, so the prose cannot be
+-- re-read later.
+--
+--   mention_count  — hits for the theme in that filing (the intensity signal)
+--   mention_share  — the theme's share of ALL theme language in that filing
+--   capital_signal — the period's R&D + capex attributed to the theme in
+--                    proportion to mention_share, normalized to a QUARTERLY
+--                    figure (an annual 10-K figure is divided by four; see
+--                    capital_basis). Companies never break capex out by theme,
+--                    so this is an attribution, and the UI says so.
+--
+-- One row per (company, theme, calendar quarter). Periods are bucketed to the
+-- CALENDAR quarter end, never the filer's fiscal period, or two companies with
+-- different year-ends would never land in the same bucket. ~5-year rolling
+-- window (cleanup.py prune_old_theme_mentions). Idempotent.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS theme_mentions (
+    cik               TEXT NOT NULL,
+    theme_key         TEXT NOT NULL,            -- canonical key from ingest/theme_taxonomy.py
+    period            DATE NOT NULL,            -- CALENDAR quarter end, e.g. 2026-03-31
+    ticker            TEXT,
+    mention_count     INT,
+    mention_share     NUMERIC,                  -- 0..1 share of the filing's theme language
+    capital_signal    NUMERIC,                  -- attributed R&D + capex, quarterly-normalized USD
+    capital_basis     TEXT,                     -- 'quarterly' | 'annual' (what the figure came from)
+    form              TEXT,                     -- '10-K' | '10-Q'
+    source_accession  TEXT,                     -- provenance + the incremental skip key
+    created_at        TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (cik, theme_key, period)
+);
+CREATE INDEX IF NOT EXISTS idx_theme_mentions_period ON theme_mentions (period DESC);
+CREATE INDEX IF NOT EXISTS idx_theme_mentions_theme  ON theme_mentions (theme_key, period DESC);
+CREATE INDEX IF NOT EXISTS idx_theme_mentions_cik    ON theme_mentions (cik);
+
+ALTER TABLE theme_mentions ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON theme_mentions FROM anon, authenticated;
+GRANT SELECT ON theme_mentions TO anon;
+DROP POLICY IF EXISTS "anon read theme_mentions" ON theme_mentions;
+CREATE POLICY "anon read theme_mentions" ON theme_mentions FOR SELECT TO anon USING (true);
+
+-- ---------------------------------------------------------------------------
+-- theme_trends — the cross-company aggregate, recomputed WHOLESALE each cycle
+-- by trend_aggregator.py (global pass, weekly via INTERVAL_TRENDS). Small and
+-- slowly-changing: one row per theme per published quarter.
+--
+-- The two signals are kept apart on purpose. BREADTH (company_count) is what
+-- companies say — cheap, so it measures narrative. CAPITAL (capital_flow) is
+-- attributed R&D + capex — expensive, so it measures commitment. A theme rising
+-- on breadth alone is a story; one rising on both is a buildout.
+--
+--   momentum_score — 0-100 blend of breadth velocity, capital velocity, adoption
+--   stage          — 'emerging' | 'accelerating' | 'mainstream' | 'cooling'
+--   coverage       — companies that reported ANY theme that quarter: the honest
+--                    denominator behind company_count, since the watchlist is
+--                    not the market
+--   thin           — coverage below the meaningful minimum; the UI flags it
+--   summary        — a TEMPLATED sentence built from the numbers in this row
+--                    (deterministic; the same row always yields the same prose)
+--
+-- Fully replaced on each recompute, so a theme that drops out of a quarter
+-- leaves no stale row behind. Idempotent.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS theme_trends (
+    theme_key        TEXT NOT NULL,
+    period           DATE NOT NULL,             -- calendar quarter end
+    label            TEXT,                      -- display name from the taxonomy
+    category         TEXT,                      -- taxonomy category, e.g. 'ai'
+    company_count    INT,                       -- distinct companies citing it (BREADTH)
+    coverage         INT,                       -- companies reporting at all that quarter
+    mention_total    INT,
+    breadth_delta    INT,                       -- company_count vs the prior quarter
+    breadth_growth   NUMERIC,                   -- that change as a %
+    capital_flow     NUMERIC,                   -- attributed R&D + capex, USD (DEPTH)
+    capital_growth   NUMERIC,                   -- % change vs the prior quarter (NULL if no base)
+    momentum_score   NUMERIC,                   -- 0-100 composite
+    stage            TEXT,
+    sector           TEXT,                      -- leading sector by attributed capital
+    sector_flow      JSONB,                     -- {sector: attributed capital} breakdown
+    drivers          JSONB,                     -- top companies [{cik,ticker,mentions,capital}]
+    thin             BOOLEAN DEFAULT FALSE,
+    summary          TEXT,
+    updated_at       TIMESTAMPTZ,
+    PRIMARY KEY (theme_key, period)
+);
+CREATE INDEX IF NOT EXISTS idx_theme_trends_period ON theme_trends (period DESC);
+CREATE INDEX IF NOT EXISTS idx_theme_trends_score  ON theme_trends (momentum_score DESC);
+
+ALTER TABLE theme_trends ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON theme_trends FROM anon, authenticated;
+GRANT SELECT ON theme_trends TO anon;
+DROP POLICY IF EXISTS "anon read theme_trends" ON theme_trends;
+CREATE POLICY "anon read theme_trends" ON theme_trends FOR SELECT TO anon USING (true);

@@ -39,6 +39,7 @@ REDDIT_RETENTION_DAYS = 30  # reddit_trends daily snapshots pruned past a rollin
 CONGRESS_RETENTION_DAYS = 400  # congress_trades kept ~13 months of consensus history
 COT_RETENTION_DAYS = 1200   # cot_reports kept ~3.3y (full 156-week COT-index lookback + margin)
 OPTIONS_RETENTION_DAYS = 400  # options_snapshots kept ~13 months (1-year IV-rank lookback + margin)
+THEME_RETENTION_DAYS = 1900   # theme_mentions kept ~5y of quarters (Phase 2 breadth series + YoY)
 
 # Note: the current ingest stores only filing metadata in `filings` (no narrative
 # section text), and feed rows are deleted wholesale at FEED_RETENTION_DAYS, so
@@ -87,6 +88,10 @@ def run_cleanup() -> None:
 
     opt_pruned = db.prune_old_options_snapshots(OPTIONS_RETENTION_DAYS)
     logger.info("Pruned %d options_snapshots rows older than %d days", opt_pruned, OPTIONS_RETENTION_DAYS)
+
+    theme_pruned = db.prune_old_theme_mentions(THEME_RETENTION_DAYS)
+    logger.info("Pruned %d theme_mentions rows older than %d days (~5y of quarters)",
+                theme_pruned, THEME_RETENTION_DAYS)
 
 
 if __name__ == "__main__":

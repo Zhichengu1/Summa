@@ -411,13 +411,53 @@ export type CompanySummary = {
   cluster_buy: boolean | null;
 };
 
+// ─── Phase 2: Trend Intelligence ────────────────────────────────────────────────
+// Cross-company theme aggregates (backend trend_aggregator.py → theme_trends),
+// recomputed wholesale each cycle from the per-company `theme_mentions` rows the
+// ingest distils out of 10-K/10-Q narrative. Two signals that deliberately
+// disagree: BREADTH (company_count — what companies SAY, cheap) and CAPITAL
+// (capital_flow — attributed R&D + capex, expensive). Breadth alone is a
+// narrative; breadth plus capital is a buildout.
+
+// One company behind a theme in a quarter, ranked by attributed capital.
+export type ThemeDriver = {
+  cik: string;
+  ticker: string;
+  mentions: number;
+  capital: number;                  // attributed R&D + capex, USD
+};
+
+export type ThemeTrend = {
+  theme_key: string;
+  period: string;                   // calendar quarter end, ISO date
+  label: string | null;
+  category: string | null;
+  company_count: number | null;     // distinct companies citing it — BREADTH
+  coverage: number | null;          // companies reporting at all: the honest denominator
+  mention_total: number | null;
+  breadth_delta: number | null;     // company_count vs the prior quarter
+  breadth_growth: number | null;    // that change, %
+  capital_flow: number | null;      // attributed R&D + capex, USD — DEPTH
+  capital_growth: number | null;    // % vs the prior quarter (null when no base)
+  momentum_score: number | null;    // 0–100 composite
+  stage: ThemeStage | null;
+  sector: string | null;            // leading sector by attributed capital
+  sector_flow: Record<string, number> | null;
+  drivers: ThemeDriver[] | null;
+  thin: boolean | null;             // coverage too small for the numbers to mean much
+  summary: string | null;           // templated sentence built from this row's numbers
+  updated_at: string | null;
+};
+
+export type ThemeStage = "emerging" | "accelerating" | "mainstream" | "cooling";
+
 export type StatementKind = "income" | "balance" | "cashflow";
 export type PeriodType = "annual" | "quarterly";
 
 // ─── View routing ───────────────────────────────────────────────────────────────
 // The top-level dashboard view and the per-company tab. Shared by the root Page,
 // the Sidebar, and CompanyPage so the hash router and the components agree.
-export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "congress" | "cot" | "options" | "guide" | "company";
+export type MainView = "overview" | "search" | "feed" | "news" | "calendar" | "managers" | "ipos" | "reddit" | "congress" | "cot" | "options" | "trends" | "guide" | "company";
 export type CompanyTab = "overview" | "strategy" | "fundamentals" | "peers" | "ownership" | "catalysts" | "filings" | "news";
 
 // ─── Reference data (backend-populated; read once per session) ──────────────────

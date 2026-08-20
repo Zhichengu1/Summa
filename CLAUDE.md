@@ -17,7 +17,10 @@ filings feed, insider transactions, institutional holdings, beneficial ownership
 proposed sales, earnings, corporate events, late filings, securities offerings —
 plus end-of-day prices, and writes everything to Supabase (Postgres). A Next.js 14
 frontend (static export) reads from Supabase through `lib/data/data.ts` (anon key) and
-renders an interactive per-company research UI with a live filings feed.
+renders an interactive per-company research UI with a live filings feed. On top of those
+per-company facts sits **Phase 2, Trend Intelligence** — a cross-company layer that
+distils canonical themes from 10-K/10-Q language at ingest and aggregates them into a
+ranked "what is the whole universe investing in" board (see the Phase 2 section).
 
 **Core principle:** ingest once, cheaply, and spread the work across runs. Each
 cron tick visits a bounded batch of companies, and within a visit each dataset
@@ -57,6 +60,7 @@ Summa/
 │   ├── edgar_cache.py            ← get_company(cik): per-run shared edgartools Company cache
 │   ├── news_score.py             ← composite catalyst scorer: event×source×fundamentals×directness×move (company + market news)
 │   ├── recap.py                  ← PURE prose builder: company_summary rows → the daily narrative recap (deterministic templates, no LLM) + the shared next-earnings estimator
+│   ├── trend_aggregator.py       ← PHASE 2 (global): theme_mentions → theme_trends — breadth × capital momentum, stage, templated summary
 │   ├── ingest/                   ← per-company dataset ingestors (from ingest import …)
 │   │   ├── data_ingest.py        ← fundamentals (XBRL) → financial_facts
 │   │   ├── filings_ingest.py     ← narrative filings feed → filings
@@ -68,6 +72,8 @@ Summa/
 │   │   ├── congress_trades_ingest.py ← GLOBAL congressional STOCK-Act trades (Kadoa monitor JSON) → congress_trades + Discord new-disclosure/consensus digest
 │   │   ├── cot_ingest.py         ← GLOBAL weekly CFTC Commitments of Traders (public reporting API) → cot_reports + Discord positioning digest
 │   │   ├── summary_ingest.py     ← precomputes company_summary (price+technicals+activity)
+│   │   ├── theme_taxonomy.py     ← PHASE 2: the curated canonical theme vocabulary + keyword matcher (stdlib only)
+│   │   ├── theme_ingest.py       ← PHASE 2: keyword pass over new 10-K/10-Q Business + MD&A → theme_mentions
 │   │   ├── reference_ingest.py   ← SIC industry/theme → company_profiles / company_themes
 │   │   └── entity_ingest.py      ← seeds/entities.yaml → entities registry (global, runs once)
 │   ├── extractors/               ← SEC-form extractors (from extractors import …)
@@ -128,7 +134,8 @@ Summa/
     │   │                            CongressPage (consensus buys/sells over congress_trades),
     │   │                            CotPage (COT futures positioning index over cot_reports),
     │   │                            OptionsPage (Options Radar: calls-vs-puts bias + structure over
-    │   │                            options_snapshots), GuidePage
+    │   │                            options_snapshots), TrendsPage (PHASE 2 Trend Intelligence:
+    │   │                            cross-company theme leaderboard over theme_trends), GuidePage
     │   └── company/               ← the per-company page + its tabs:
     │                                CompanyPage, CompanyOverviewTab, StrategyTab, FundamentalsTab,
     │                                PeersTab, OwnershipTab, CatalystsTab, FilingsTab, NewsTab, companyAux.ts (shared CompanyAux)
@@ -136,7 +143,7 @@ Summa/
     │   ├── data/                    supabase.ts, data.ts, watchlist.ts
     │   ├── hooks/                   useWatchlist.ts, useLastSeen.ts, useWatchlistPulse.ts
     │   ├── domain/                  fundamentals, pulse, scorecard, technicals, valuation,
-    │   │                            insider, catalysts, prices, options, taxonomy, entities, glossary, secIndex
+    │   │                            insider, catalysts, prices, options, trends, taxonomy, entities, glossary, secIndex
     │   ├── utils/                   format.ts, url.ts
     │   └── types.ts                 row + view-routing types (stays at lib root, imported everywhere)
     └── public/sec-companies.json  ← bundled SEC company index (universal search)
@@ -151,7 +158,8 @@ shared by Scanner + Calendar). **`domain/`** (pure logic): `fundamentals.ts` · 
 (tape/signals) · `taxonomy.ts` · `entities.ts` · `insider.ts` · `prices.ts` (incl.
 `reactionStats`) · `valuation.ts` · `technicals.ts` · `catalysts.ts` (next-earnings estimate) ·
 `scorecard.ts` (`buildScorecard` + Grade types) · `options.ts` (`buildOptionsRadar` — options flow/pricing →
-directional bias + suggested structure) · `secIndex.ts` · `glossary.ts`. **`utils/`**:
+directional bias + suggested structure) · `trends.ts` (`buildTrends` / `nextTrend` / `capitalBySector` —
+theme_trends rows → the ranked cross-company theme board) · `secIndex.ts` · `glossary.ts`. **`utils/`**:
 `format.ts` · `url.ts` (`safeHref` guard). **`lib/types.ts`** (row + `MainView`/`CompanyTab`
 types) stays at the `lib/` root because it is imported everywhere.
 
@@ -323,6 +331,8 @@ Run `schema.sql` once in the Supabase SQL Editor (idempotent). Tables:
 | `congress_trades` | `id` (source txn id) | GLOBAL congressional (+ executive-branch) STOCK-Act stock trades from the Kadoa monitor feed (tickered rows only; ~400-day window; surfaced by the Congress view's consensus buys/sells via `fetchCongressTrades`) |
 | `cot_reports` | market_code+report_date | GLOBAL weekly CFTC Commitments of Traders positioning for ~28 curated futures markets (legacy futures-only report: spec/commercial/small-trader longs+shorts + precomputed nets; ~1200-day window; surfaced by the COT view's positioning index via `fetchCotReports`, signals derived in `lib/domain/cot.ts`) |
 | `options_snapshots` | cik+snapshot_date | One daily options-chain snapshot per watchlist company (CBOE): call/put flow by volume, open interest and PREMIUM ($), IV30 vs 30d realized vol + an IV rank built from this table's own history, 25Δ skew, front/~30d expected move, max pain, VIX, the day's biggest volume-over-OI contracts (`unusual` jsonb), and a tradeable delta ladder (`candidates` jsonb — ~5 strikes/side across a ~30d and ~60d expiry, filtered for a live two-sided quote and ≥25 OI, with quote+greeks+liquidity per contract). The calls-vs-puts decision inputs — the bias score, the suggested structure, and every per-contract economic (breakeven, breakeven-vs-priced-move, cost per delta, decay and bid/ask friction, vertical-spread construction) are DERIVED client-side in `lib/domain/options.ts`, never stored, so the read can be retuned without a re-ingest |
+| `theme_mentions` | cik+theme_key+period | PHASE 2 raw material: per-company canonical-theme hits per CALENDAR quarter, distilled at ingest from 10-K/10-Q Business + MD&A (`theme_ingest.py`), with the period's R&D + capex attributed across themes by share of forward-looking language. Written at ingest because the `filings` feed stores no prose and its rows are deleted at 90 days. ~5-year window |
+| `theme_trends` | theme_key+period | PHASE 2 aggregate, recomputed WHOLESALE each cycle by `trend_aggregator.py`: per theme per quarter, BREADTH (`company_count` — how many companies cite it, out of the honest `coverage` denominator) against CAPITAL (`capital_flow` — attributed R&D + capex), plus `momentum_score`, `stage`, the leading sector + `sector_flow` split, the `drivers` companies, and a TEMPLATED `summary` sentence built from the row's own numbers. Surfaced by the Trends view via `fetchThemeTrends` |
 | `company_profiles` | `cik` | SIC industry/sector |
 | `company_themes` | cik+name | Recomputed theme tags (delete+insert per cik) |
 | `entities` | `match_key` | Global entity-context registry (seeded) |
@@ -350,6 +360,10 @@ days** (`prune_old_congress_trades`) — the Congress view aggregates 30–90-da
 windows, so ~13 months of history is plenty; `options_snapshots` rows are pruned past **400 days**
 (`prune_old_options_snapshots`) — sized to the trailing-1-year IV-rank lookback plus a
 month of margin;
+`theme_mentions` rows are pruned past **1900 days**
+(`prune_old_theme_mentions`) — ~5 years of quarters, comfortably more than the Trends
+view's published window plus its year-over-year comparison, and the aggregate is
+recomputed from whatever survives so the trend history shrinks in step;
 `cot_reports` rows are pruned past **1200
 days** (`prune_old_cot_reports`) — the COT positioning index is a percentile over a
 trailing 3-year range, so ~3.3y keeps the full 156-week lookback with margin. All other structured warehouse tables
@@ -377,7 +391,7 @@ trailing 3-year range, so ~3.3y keeps the full 156-week lookback with margin. Al
 5. For each company (until INGEST_TIME_BUDGET_S wall-clock budget):
       process(): for each dataset whose cadence is due —
         filings_ingest, data_ingest (fundamentals), then optional extractors
-        (events, insider, ownership, prices, reference) via _run_optional(); stamp
+        (events, insider, ownership, prices, reference, themes) via _run_optional(); stamp
         only datasets that ran; one final db.update_company_state() write.
         13F institutional is NOT cadence-driven per company — `ingest_institutional`
         runs only ONCE per company (first ingest / --force) to seed its first holder
@@ -405,7 +419,14 @@ trailing 3-year range, so ~3.3y keeps the full 156-week lookback with margin. Al
    price/shares/proceeds) runs ONLY for new 424B pricings, so most runs are cheap
    metadata-only index reads. Market-wide — independent of the watchlist. Window is
    `IPO_WINDOW_DAYS` (default 10); rows are pruned past 120d by cleanup.py.
-9. market_news_ingest.ingest_market_news_global() — global, once per run. Polls the
+9. trend_aggregator.ingest_trends() — global, once per run, SELF-GATED to
+   INTERVAL_TRENDS (default weekly): if `theme_trends` was written within the window
+   it returns after one tiny freshness query. Otherwise it pages the whole (small)
+   `theme_mentions` table, aggregates it per theme per quarter — breadth, attributed
+   capital, momentum, stage, drivers, templated summary — and REPLACES `theme_trends`
+   wholesale, so a theme that drops out of a quarter leaves no stale row. Pure
+   arithmetic over rows already in the warehouse: no EDGAR, no external API, no model.
+10. market_news_ingest.ingest_market_news_global() — global, once per run. Polls the
    curated free federal/gov + macro RSS feeds (Fed press/speeches/testimony · BEA ·
    SEC · FDA · FTC · CFTC · White House · PR Newswire), scores each
    headline for trader-importance, and stores ONLY market-movers above
@@ -422,7 +443,10 @@ prices because its realized-vol yardstick reads `daily_prices`) · news 6h (the 
 polls every company's Google News each tick via `--company`, so effective news latency is
 ~5 min — dedupe by guid makes the overlap harmless. The pipeline pass therefore owns no
 latency budget and is a pure backstop, so it is deliberately slow; `INTERVAL_NEWS` tunes
-the pipeline side) · summary 6h · reference 720h. (13F institutional is global/quarterly — see step 7
+the pipeline side) · summary 6h · themes 168h (Phase 2: a POLL for a new 10-K/10-Q, not a
+re-parse — already-extracted accessions are skipped *before* any document is fetched, so a
+due visit with nothing new costs one small query and zero EDGAR text; new reports only land
+quarterly) · reference 720h. (13F institutional is global/quarterly — see step 7
 — not a per-company `DATASET_INTERVALS_H` entry.)
 
 > **Cadence is the Supabase egress budget, not just a freshness knob.** The reads scale
@@ -443,7 +467,17 @@ Backend (`backend/.env`, mapped from `${{ secrets.* }}` in the workflows):
 (default 360), `INTERVAL_<DATASET>` overrides (incl. `INTERVAL_OPTIONS`,
 hours, default 12 — the CBOE chain payload is ~1.5 MB per company, so this knob is about
 bandwidth and run time, not an API quota: the source is keyless and unmetered), `IPO_WINDOW_DAYS` (default 10; raise for
-a one-off IPO backfill on an empty table). News tuning: `INTERVAL_NEWS` (hours, default 1),
+a one-off IPO backfill on an empty table). Phase 2 tuning — themes:
+`INTERVAL_THEMES` (hours, default 168), `THEME_LOOKBACK_QUARTERS` (filings considered per
+company, default 8), `THEME_MAX_DOCS_PER_RUN` (documents actually downloaded per company
+per visit, default 3 — a first-ever company backfills this many and defers the rest to
+later visits, the same spread-the-work rule the company scheduler uses),
+`THEME_MIN_HITS` (times a theme must appear in ONE filing to be recorded at all,
+default 2 — the single knob that keeps breadth from measuring boilerplate); trends:
+`INTERVAL_TRENDS` (hours between global recomputes, default 168), `TREND_QUARTERS`
+(quarters published, default 8), `TREND_MIN_COVERAGE` (companies a quarter needs before
+its breadth is treated as meaningful, default 3 — below it the row is flagged `thin` and
+the UI says so). News tuning: `INTERVAL_NEWS` (hours, default 1),
 `NEWS_MAX_ITEMS` (per-company Google feed cap, default 100), `NEWS_MAX_AGE_DAYS` (recency
 window, default 3 — the news channel is "latest only": headlines older than this are never
 ingested; summa-news.yml pins the same value), `NEWS_MIN_SCORE` (catalyst KEEP threshold,
@@ -633,104 +667,113 @@ scanner is needed.)
 
 ---
 
-## Phase 2 — Trend Intelligence (planned)
+## Phase 2 — Trend Intelligence (shipped 2026-08-20)
 
-**Goal.** Move from *per-company* facts (Phase 1) to a *cross-company* read: detect
-**what companies are collectively investing in** and **what the next industry trend is**,
-by aggregating forward-looking signals across the whole tracked universe over time.
+**What it answers.** Phase 1 gives per-company facts. Phase 2 gives the
+*cross-company* read: **what tracked companies are collectively investing in**,
+and **which theme is next** — by aggregating forward-looking language and
+capital allocation across the whole tracked universe over time.
 
-**Core principle.** The algorithm finds the trend, end to end — there is **no LLM stage**
-(the Gemini channel was removed 2026-08-13). Themes come from a curated keyword/taxonomy
-normalization over stored text; labels are taxonomy labels, not generated prose. Never
-re-derive trends from full filings.
+**Core principle.** The algorithm finds the trend end to end — there is **no LLM
+stage** (the Gemini channel was removed 2026-08-13). Themes come from a curated
+keyword taxonomy over stored filing text; labels are taxonomy labels; the
+`theme_trends.summary` sentence is a template filled with the row's own computed
+numbers, so the same rows always produce the same prose. Never re-derive trends
+from full filings at read time.
 
-**Relationship to existing roadmaps.** Phase 2 *consumes* the per-company themes produced
-by the reference-data pipeline's Phase B (`backend/docs/REFERENCE_DATA_SCOPE.md` —
-keyword theme extraction from 10-Ks). That pipeline answers "what is *this* company's
-thesis"; Phase 2 answers "what are *most* companies converging on." Phase B is the
-richest input but not a hard dependency — Stage 1 also works off a keyword pass when
-themes are sparse.
+### The one distinction the whole feature rests on
 
-### Inputs (all already in the Phase-1 warehouse)
+- **BREADTH** (`company_count`) — how many distinct companies cite a theme in a
+  quarter. Language is free, so breadth on its own measures *narrative*.
+- **CAPITAL** (`capital_flow`) — the R&D + capex attributed to the theme.
+  Dollars are expensive, so capital measures *commitment*.
 
-- `company_themes` — per-company forward themes (reference-data Phase B output).
-- `filings.section_business` / `section_mda` — the narrative "what we'll invest in"
-  language. **Note:** these roll off at 30 days (retention), so theme signals must be
-  extracted *at ingest time* and persisted, not recomputed from old filing text later.
-- `financial_facts` — R&D and CapEx trajectories: where money *actually* flows (depth),
-  not just what's said (breadth).
-- `corporate_events` (M&A, capital_return), `securities_offerings` (what raises fund),
-  `earnings_events` guidance — corroborating capital-allocation signals.
-- `company_profiles.sector/industry` — to roll trends up by sector.
+They are stored, charted and ranked separately, never blended into one number,
+because their disagreement is the signal: breadth climbing with capital behind
+it is a real buildout; breadth climbing without it is a story to fade. Keep it
+that way — collapsing them into a single "score" column would destroy the read.
 
-### Pipeline
+### Pipeline (two stages, both deterministic)
 
-**One free deterministic stage — always runs, no model calls:**
-1. **Theme normalization** — map raw per-company theme phrases + a keyword pass over
-   `section_business`/`section_mda` onto canonical theme keys (a curated taxonomy;
-   optional embedding similarity in 2C).
-2. **Breadth series** — per theme per quarter, count the *distinct companies* mentioning
-   / investing in it (adoption).
-3. **Capital signal (depth)** — aggregate R&D/CapEx growth + M&A / offering activity
-   tagged to each theme/sector (real dollars behind the talk).
-4. **Momentum score** — combine breadth velocity (companies adopting) + capital velocity
-   (dollars flowing) + recency. Emerging = low base, high velocity.
-5. **Stage classification** — emerging / accelerating / mainstream / cooling.
+**1. Extraction — per company, at ingest time** (`ingest/theme_ingest.py`,
+dataset `themes`, cadence `INTERVAL_THEMES` ≈ weekly).
+Runs the `ingest/theme_taxonomy.py` keyword matcher over the **Business + MD&A**
+sections of each new 10-K / 10-Q and writes `theme_mentions`.
+- *Why at ingest:* the `filings` feed stores no narrative text and its rows are
+  deleted at 90 days — the prose cannot be re-read later. Themes must be
+  distilled while the document is in reach and then persisted as small rows.
+- *Why Risk Factors is excluded:* it names every technology a company could
+  conceivably be affected by, which would turn breadth into a measure of legal
+  boilerplate rather than of investment.
+- *Why it is cheap:* the filing index comes from the shared `edgar_cache`
+  Company, and accessions already in `theme_mentions` are skipped **before** any
+  document is fetched (`db.get_theme_accessions`). Steady state is one small
+  query and zero downloads; new reports only land quarterly.
+- *Periods are CALENDAR quarters*, never the filer's fiscal period — otherwise
+  two companies with different year-ends never land in the same bucket and
+  cross-company breadth is meaningless.
+- *Capital is ATTRIBUTED, not disclosed:* companies never break R&D or capex out
+  by theme, so the period's spend is allocated in proportion to how much of the
+  filing's forward-looking language each theme accounts for, and normalized to a
+  quarterly figure (an annual 10-K number is divided by four — summing it raw
+  would quadruple every fourth point of the series). The UI says "attributed"
+  everywhere it appears. Do not restate it as a disclosed number.
 
-Synonym clustering and theme labels come from the curated taxonomy (extend the taxonomy
-when a new theme appears); `theme_trends.summary` is a templated sentence built from the
-computed breadth/capital numbers, not generated text.
+**2. Aggregation — global, once per run** (`trend_aggregator.py`, self-gated to
+`INTERVAL_TRENDS` ≈ weekly). Pages `theme_mentions`, and per theme per quarter
+computes breadth, attributed capital, both velocities, `momentum_score` (0–100:
+0.45 breadth velocity + 0.35 capital velocity + 0.20 adoption), `stage`
+(emerging / accelerating / mainstream / cooling), the leading sector +
+`sector_flow` split, the `drivers` companies, and the templated `summary`. Then
+**replaces `theme_trends` wholesale** — a full recompute is the only way a theme
+that dropped out of a quarter stops looking current.
 
-### New schema (idempotent — add to `schema.sql`, RLS anon SELECT only)
+`build_trends()` is kept pure (no I/O) so the scoring can be exercised without a
+database; `ingest_trends()` does the reading and writing around it.
 
-- `theme_mentions` — `cik, theme_key, period, mention_count, capital_signal,
-  source_accession`. The raw per-company-per-period material, written at ingest time.
-- `theme_trends` — recomputed aggregate: `theme_key, label, period, company_count,
-  breadth_delta, capital_flow, momentum_score, stage, sector, summary`. Small,
-  slowly-changing, fully recomputed each cycle.
-- *(2C, optional)* `embedding vector(768)` on `theme_mentions` via pgvector for semantic
-  clustering — defer; the keyword taxonomy is the free floor.
+### Coverage honesty (non-negotiable)
 
-### Backend
-
-- **New `trend_aggregator.py`** — a *global* extractor (runs once per run, like
-  `entity_ingest`, **not** per company). Reads the warehouse, computes `theme_mentions` +
-  `theme_trends`. Wire at the end of `main()` via
-  `_run_optional(trend_aggregator, "ingest_trends")` on a slow cadence
-  (`INTERVAL_TRENDS`, default ~weekly — trends move slowly).
-- A lightweight keyword extraction over `section_business`/`section_mda` should run inside
-  the per-company `filings`/reference ingest (while the text is still in-window) and write
-  `theme_mentions`; `trend_aggregator` only *aggregates* stored mentions.
-- New `db.py` helpers: `upsert_theme_mentions`, `upsert_theme_trends`.
-- **Cost stays flat:** aggregation is over already-stored rows — no new EDGAR load and no
-  external API calls at all. Tables are bounded (one row per theme×period).
+The watchlist is **not the market**. Every quarter's rows carry `coverage` — the
+number of companies that reported *any* theme that quarter — and every share is
+quoted against it ("12 of 18 tracked companies", never "67% of the market"). A
+quarter below `TREND_MIN_COVERAGE` is flagged `thin` and the view says so. Trend
+confidence scales with universe size: a thin watchlist gives a thin signal.
 
 ### Frontend
 
-- **New "Trends" top-level view** (`views/`): a ranked emerging-themes leaderboard by
-  `momentum_score`, each row showing breadth (N companies), capital flow, a stage badge,
-  and the companies driving it (drill into the company page). Plus a capital-allocation-
-  by-sector chart (R&D/CapEx flow) and a "Next Trend" highlight.
-- **`fetchThemeTrends()`** in `lib/data/data.ts`: one `SELECT`, cached per session (slowly-
-  changing, matched client-side) — same read-budget discipline as reference data.
-- Reuses existing patterns: lazy chart wrappers (`charts.lazy`), `DataTable`, `SignalCard`.
+`views/TrendsPage.tsx` (nav: **◭ Trends**, hash `#trends`) over
+`lib/domain/trends.ts` (`buildTrends` / `nextTrend` / `capitalBySector`) and
+`fetchThemeTrends()` in `lib/data/data.ts` — one paged read of the whole small
+aggregate, sliced client-side into the ranked board plus each theme's history.
+The view shows breadth and capital as adjacent columns, a stage badge, a
+per-theme detail panel (talk-vs-money indexed chart + driver companies +
+capital by sector), a "next trend" pick (highest momentum that is *still early*
+**and** has real dollars behind it), and a capital-allocation-by-sector chart
+that follows the active filters.
 
-### Phasing
+### Cost
 
-- **2A (the whole of Phase 2):** keyword/taxonomy normalization + breadth/capital momentum
-  from the existing warehouse → `theme_trends` + the Trends view. No model in the loop.
-- **2C (semantic, optional later):** pgvector embeddings for theme clustering beyond the
-  keyword taxonomy — a local embedding model only; adding a hosted LLM is out of scope.
+Flat. Extraction adds text downloads only when a new annual/quarterly report
+appears; aggregation is arithmetic over already-stored rows with no EDGAR and no
+external API. Both tables are small and bounded — `theme_mentions` by
+companies × themes × quarters (pruned to ~5 years), `theme_trends` by
+themes × published quarters (a few hundred rows, fully replaced each cycle).
 
-### Risks / notes
+### Extending it
 
-- **Coverage honesty:** the watchlist isn't the whole market — label trends "across
-  tracked companies," and surface a coverage/confidence indicator. Trend confidence scales
-  with universe size, so a thin watchlist gives a thin signal.
-- **Retention timing** (above): persist theme mentions at ingest; never rely on
-  `section_*` text surviving past 30 days.
-- **No regression of invariants:** no external AI service, warehouse-first,
-  bounded/recomputed aggregate tables, reads fetched-once + client-matched.
+Add a theme by appending a `Theme` to `THEMES` in `ingest/theme_taxonomy.py`
+(and its category to `TREND_CATEGORIES` in `lib/domain/trends.ts` if new). Two
+rules: **theme keys are permanent** — renaming one orphans its stored history —
+and **never widen an existing theme's patterns to swallow a new one**, which
+silently rewrites the past. Pattern-writing rules (multi-word phrases for
+anything ambiguous, boundary-anchored acronyms) are documented in the taxonomy
+module; a sloppy pattern inflates breadth directly.
+
+### Optional later: 2C (semantic)
+
+pgvector embeddings on `theme_mentions` for clustering beyond the keyword
+taxonomy — a **local** embedding model only. Adding a hosted LLM is out of scope
+and would violate the no-model-provider decision below.
 
 ---
 
@@ -743,6 +786,26 @@ was never wired into `main.py` — nothing imported it outside itself — so it 
 API-key surface and an extra dependency for zero shipped behaviour. Summa's output is now
 100% deterministic code over the warehouse. Do not reintroduce a model provider without an
 explicit decision; the roadmap's theme/trend work is specified keyword/taxonomy-only.
+
+**Why Phase 2 measures breadth and capital separately (2026-08-20):** the obvious design
+was one "trend score" per theme. It was rejected because the two inputs are only
+interesting when they *disagree*. Filing language is free, so breadth alone tracks the
+quarter's vocabulary — every company said "AI" whether or not they spent on it. R&D and
+capex are expensive, so capital is the commitment test. Blending them into one number
+hides exactly the case the feature exists to catch (loud theme, no money). They are
+stored, charted and ranked as two columns; `momentum_score` is offered as a *ranking* of
+the pair, never as a verdict. The related honesty constraint: capital is **attributed**
+(allocated by share of a filing's forward-looking language), because companies never break
+spend out by theme — so it may be described as a direction and a rough scale, never as a
+disclosed figure.
+
+**Why theme extraction runs at ingest, not in the aggregator (2026-08-20):** the natural
+place to parse filings is the global aggregator, where everything else is recomputed. It
+cannot go there: `filings` stores no narrative text and its rows are deleted at 90 days, so
+the prose is gone by the next recompute. `theme_ingest` distils themes while the document
+is still reachable and persists small structured rows; `trend_aggregator` only ever
+aggregates those. This is also what keeps the cost flat — the aggregator touches no EDGAR
+at all.
 
 **Why `page.tsx` started as one large file:** shared `Filing`/row types, formatters,
 and design-token references made an early split create prop-drilling/context overhead.
