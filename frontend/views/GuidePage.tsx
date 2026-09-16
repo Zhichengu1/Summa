@@ -1,7 +1,8 @@
-// Data Guide view — a static reference page that defines every data domain the
-// warehouse tracks, ranked by how directly it tends to move the share price.
-// Fully self-contained (its own data + types, CSS classes only), so it is the
-// reference pattern for extracting a top-level view out of app/page.tsx.
+// Data Guide view — a static reference page: first a map of every page in the app
+// (from the sidebar's nav config, so it can never drift from the real navigation),
+// then a definition of every data domain the warehouse tracks, ranked by how
+// directly it tends to move the share price.
+import { NAV_GROUPS } from "./Sidebar";
 
 type ImpactTier = "high" | "medium" | "signal";
 
@@ -118,8 +119,36 @@ export function GuidePage() {
       <div className="page-head">
         <h1 className="page-title">Data Guide</h1>
         <div className="page-sub">
-          What every data point means — and how much it tends to move the share price. Ordered most to least impactful.
+          Where to find things, what every data point means, and how much it tends to move the share price.
         </div>
+      </div>
+
+      <div className="section">
+        <div className="section-title">Pages at a glance</div>
+        <div className="section-help">
+          Tip: press <kbd className="kbd">/</kbd> anywhere to search for a company, then <kbd className="kbd">Enter</kbd> to add or open it.
+        </div>
+        <div className="guide-nav-grid">
+          {NAV_GROUPS.map((g) => (
+            <div className="guide-nav-group" key={g.label}>
+              <div className="guide-nav-label">{g.label}</div>
+              {g.items.map((it) => (
+                <a className="guide-nav-item" href={`#${it.view}`} key={it.view}>
+                  <span className="nav-icon" aria-hidden>{it.icon}</span>
+                  <span>
+                    <span className="guide-nav-name">{it.label}</span>
+                    <span className="guide-nav-desc">{it.desc}</span>
+                  </span>
+                </a>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-title">Data domains, by price impact</div>
+        <div className="section-help">Ordered most to least impactful. Each card says where the data comes from, what it is, and why shareholders care.</div>
       </div>
 
       {IMPACT_TIERS.map((group) => (

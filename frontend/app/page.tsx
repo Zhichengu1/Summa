@@ -11,10 +11,10 @@ import dynamic from "next/dynamic";
 // is code-split: only the one the user routes to is fetched, keeping the initial
 // bundle small (the heavy views — Managers/charts, the company tabs — never ship
 // on first load). ssr:false matches the static-export + Realtime client model.
-import { Sidebar } from "../views/Sidebar";
+import { Sidebar, NAV_GROUPS } from "../views/Sidebar";
 import { TopBar } from "../views/TopBar";
 import { OverviewPage } from "../views/OverviewPage";
-const viewLoading = () => <div style={{ padding: 24, color: "var(--fg-4)" }}>Loading…</div>;
+const viewLoading = () => <div className="view-loading">Loading…</div>;
 const SearchPage = dynamic(() => import("../views/SearchPage").then((m) => ({ default: m.SearchPage })), { ssr: false, loading: viewLoading });
 const FeedPage = dynamic(() => import("../views/FeedPage").then((m) => ({ default: m.FeedPage })), { ssr: false, loading: viewLoading });
 const NewsPage = dynamic(() => import("../views/NewsPage").then((m) => ({ default: m.NewsPage })), { ssr: false, loading: viewLoading });
@@ -38,8 +38,14 @@ import { loadProfiles } from "../lib/domain/taxonomy";
 import { loadEntities } from "../lib/domain/entities";
 import { useWatchlist, type WatchItem } from "../lib/hooks/useWatchlist";
 import { useLastSeen } from "../lib/hooks/useLastSeen";
-import { loadSecIndex, searchSec, type SecCompany } from "../lib/domain/secIndex";
+import { loadSecIndex, type SecCompany } from "../lib/domain/secIndex";
 import type { Company, Filing, NewsItem, MainView, CompanyTab, CompanySummary } from "../lib/types";
+
+type NavView = Exclude<MainView, "company">;
+
+// Every routable top-level view, derived from the sidebar's nav config so a view
+// can't exist in the nav without a route (or vice versa). Hash === view key.
+const NAV_VIEWS = new Set<string>(NAV_GROUPS.flatMap((g) => g.items.map((it) => it.view)));
 
 export default function Page() {
   const [view, setView]           = useState<MainView>("overview");
@@ -51,6 +57,7 @@ export default function Page() {
   const [secIndex, setSecIndex]   = useState<SecCompany[]>([]);
   const [summaries, setSummaries] = useState<CompanySummary[]>([]);
   const [loading, setLoading]     = useState(true);
+  const [menuOpen, setMenuOpen]   = useState(false);   // sidebar drawer (narrow viewports)
   const watch = useWatchlist();
   const seen = useLastSeen();
 
@@ -58,18 +65,7 @@ export default function Page() {
   useEffect(() => {
     function parse() {
       const h = window.location.hash.replace(/^#/, "");
-      if (h === "search") { setView("search"); setActiveCik(null); return; }
-      if (h === "feed") { setView("feed"); setActiveCik(null); return; }
-      if (h === "news") { setView("news"); setActiveCik(null); return; }
-      if (h === "calendar") { setView("calendar"); setActiveCik(null); return; }
-      if (h === "managers") { setView("managers"); setActiveCik(null); return; }
-      if (h === "ipos") { setView("ipos"); setActiveCik(null); return; }
-      if (h === "reddit") { setView("reddit"); setActiveCik(null); return; }
-      if (h === "congress") { setView("congress"); setActiveCik(null); return; }
-      if (h === "cot") { setView("cot"); setActiveCik(null); return; }
-      if (h === "options") { setView("options"); setActiveCik(null); return; }
-      if (h === "trends") { setView("trends"); setActiveCik(null); return; }
-      if (h === "guide") { setView("guide"); setActiveCik(null); return; }
+      if (NAV_VIEWS.has(h)) { setView(h as NavView); setActiveCik(null); return; }
       const m = h.match(/^c=([^/]+)(?:\/(.*))?$/);
       if (m) {
         setView("company");
@@ -83,6 +79,12 @@ export default function Page() {
     window.addEventListener("hashchange", parse);
     return () => window.removeEventListener("hashchange", parse);
   }, []);
+
+  // Any route change closes the mobile drawer and scrolls the page to the top.
+  useEffect(() => {
+    setMenuOpen(false);
+    document.querySelector(".page-scroll")?.scrollTo({ top: 0 });
+  }, [view, activeCik, activeTab]);
 
   // Initial load. Reference data (profiles/themes/entities) is fetched once here
   // and matched client-side thereafter — no per-row or per-page reads.
@@ -128,6 +130,7 @@ export default function Page() {
   }, [loading, companies, watch.seedIfEmpty]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const navigate = useCallback((hash: string) => { window.location.hash = hash; }, []);
+  const goView = useCallback((v: NavView) => navigate(v), [navigate]);
   const openCompany = useCallback((cik: string, tab: CompanyTab = "overview") => {
     navigate(`c=${cik}${tab !== "overview" ? `/${tab}` : ""}`);
   }, [navigate]);
@@ -181,8 +184,10 @@ export default function Page() {
 
   if (loading) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", color: "var(--fg-4)" }}>
-        Loading…
+      <div className="app-splash" role="status" aria-live="polite">
+        <div className="app-splash-brand">Summa<span className="dot">.</span></div>
+        <div className="app-splash-bar"><span /></div>
+        <div className="app-splash-note">Loading your watchlist and the latest filings…</div>
       </div>
     );
   }
@@ -194,29 +199,22 @@ export default function Page() {
         activeCik={activeCik} view={view}
         ingestedCiks={ingestedCiks} prices={priceMap}
         onCompany={(cik) => openCompany(cik)}
-        onOverview={() => navigate("overview")}
-        onSearch={() => navigate("search")}
-        onFeed={() => navigate("feed")}
-        onNews={() => navigate("news")}
-        onCalendar={() => navigate("calendar")}
-        onManagers={() => navigate("managers")}
-        onIpos={() => navigate("ipos")}
-        onReddit={() => navigate("reddit")}
-        onCongress={() => navigate("congress")}
-        onCot={() => navigate("cot")}
-        onOptions={() => navigate("options")}
-        onTrends={() => navigate("trends")}
-        onGuide={() => navigate("guide")}
+        onNavigate={goView}
         onRemove={handleRemove}
         newFilings={newFilings}
         newNews={newNews}
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
       />
       <main className="main-area">
-        <TopBar watched={watchedCiks} onSelect={handleAdd} />
+        <TopBar watched={watchedCiks} onSelect={handleAdd} onMenu={() => setMenuOpen(true)} />
         <div className="page-scroll">
           <div key={view + activeCik + activeTab} className="page-content">
             {view === "overview" && (
-              <OverviewPage companies={watchCompanies} filings={filings} onCompany={openCompany} isNew={seen.isNew} />
+              <OverviewPage
+                companies={watchCompanies} filings={filings} onCompany={openCompany} isNew={seen.isNew}
+                newFilings={newFilings} newNews={newNews} onNavigate={goView}
+              />
             )}
             {view === "search" && (
               <SearchPage
@@ -252,6 +250,7 @@ export default function Page() {
                 cik={activeCik} tab={activeTab} companies={lookupCompanies}
                 pending={!ingestedCiks.has(activeCik)}
                 onTab={(tab) => openCompany(activeCik, tab)}
+                onBack={() => navigate("overview")}
               />
             )}
           </div>

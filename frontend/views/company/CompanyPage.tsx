@@ -29,8 +29,8 @@ const FilingsTab = dynamic(() => import("./FilingsTab").then((m) => ({ default: 
 const NewsTab = dynamic(() => import("./NewsTab").then((m) => ({ default: m.NewsTab })), { ssr: false, loading: tabLoading });
 
 export function CompanyPage({
-  cik, tab, companies, onTab, pending = false,
-}: { cik: string; tab: CompanyTab; companies: Company[]; onTab: (t: CompanyTab) => void; pending?: boolean }) {
+  cik, tab, companies, onTab, pending = false, onBack,
+}: { cik: string; tab: CompanyTab; companies: Company[]; onTab: (t: CompanyTab) => void; pending?: boolean; onBack?: () => void }) {
   const company = companies.find((c) => c.cik === cik) ?? null;
   const [facts, setFacts] = useState<FinancialFact[]>([]);
   const [loadingFacts, setLoadingFacts] = useState(true);
@@ -69,25 +69,30 @@ export function CompanyPage({
     return { close: last.close!, chg, asOf: last.date };
   }, [aux.prices]);
 
-  const TABS: { key: CompanyTab; label: string }[] = useMemo(() => [
-    { key: "overview",      label: "Overview" },
-    { key: "strategy",      label: "Strategy & Investments" },
-    { key: "fundamentals",  label: "Fundamentals" },
-    { key: "peers",         label: "Peers" },
-    { key: "ownership",     label: "Ownership" },
-    { key: "catalysts",     label: "Catalysts" },
-    { key: "filings",       label: "Filings" },
-    { key: "news",          label: "News" },
+  // Each tab carries a one-line description (tooltip) so the eight deep dives are
+  // self-explanatory before they are opened.
+  const TABS: { key: CompanyTab; label: string; desc: string }[] = useMemo(() => [
+    { key: "overview",      label: "Overview",     desc: "Health check, headline numbers, what just happened and where it's heading" },
+    { key: "strategy",      label: "Strategy",     desc: "What the company says it is investing in, from its own 10-K/10-Q language" },
+    { key: "fundamentals",  label: "Fundamentals", desc: "Income statement, balance sheet and cash-flow trends" },
+    { key: "peers",         label: "Peers",        desc: "Side-by-side comparison with the other companies you follow" },
+    { key: "ownership",     label: "Ownership",    desc: "Insider trades, institutional holders and large-stake filings" },
+    { key: "catalysts",     label: "Catalysts",    desc: "Earnings, material events, offerings and late-filing notices" },
+    { key: "filings",       label: "Filings",      desc: "Every recent SEC filing with a link to the source document" },
+    { key: "news",          label: "News",         desc: "Recent headlines about this company" },
   ], []);
 
   return (
     <div>
       <div className="company-hero">
+        {onBack && (
+          <button className="hero-back" onClick={onBack} title="Back to the overview" aria-label="Back to the overview">←</button>
+        )}
         <CompanyMark ticker={ticker} size={40} />
         <div style={{ minWidth: 0 }}>
           <h1 className="page-title" style={{ fontSize: 18 }}>{name}</h1>
           <div className="page-sub" style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-            <span>{ticker} · CIK {cik}</span>
+            <span title="SEC Central Index Key">{ticker} · CIK {cik}</span>
             {profile && profile.sector !== "—" && <span className="cat-chip sector">{profile.sector}</span>}
             {profile && profile.industry !== "—" && <span className="cat-chip">{profile.industry}</span>}
           </div>
@@ -100,7 +105,7 @@ export function CompanyPage({
                 {quote.chg >= 0 ? "▲" : "▼"} {quote.chg >= 0 ? "+" : ""}{quote.chg.toFixed(2)}%
               </div>
             )}
-            {quote.asOf && <div className="hero-asof">as of {quote.asOf}</div>}
+            {quote.asOf && <div className="hero-asof" title="End-of-day close, not a live quote">last close · {quote.asOf}</div>}
           </div>
         )}
       </div>
@@ -112,13 +117,17 @@ export function CompanyPage({
         </div>
       )}
 
-      <div className="tabs">
+      <div className="tabs" role="tablist" aria-label="Company sections">
         {TABS.map((t) => (
-          <div key={t.key} className={`tab${tab === t.key ? " active" : ""}`} onClick={() => onTab(t.key)}>
+          <button
+            key={t.key} role="tab" aria-selected={tab === t.key} title={t.desc}
+            className={`tab${tab === t.key ? " active" : ""}`} onClick={() => onTab(t.key)}
+          >
             {t.label}
-          </div>
+          </button>
         ))}
       </div>
+      <div className="tab-desc">{TABS.find((t) => t.key === tab)?.desc}</div>
 
       {tab === "overview"     && <CompanyOverviewTab facts={facts} loading={loadingFacts} aux={aux} />}
       {tab === "strategy"     && <StrategyTab cik={cik} ticker={ticker} facts={facts} loading={loadingFacts} />}
