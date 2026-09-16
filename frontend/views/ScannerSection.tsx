@@ -1,25 +1,71 @@
 "use client";
-// Watchlist-wide scanners surfaced on the Overview page:
-//   • ScannerSection — every actionable fundamentals/filings signal across the
-//     watchlist, ranked most-actionable first (buildWatchlistSignals), filterable
-//     by direction. Reuses the exact SignalCard from the company cockpit.
-//   • MomentumScanner — pure price-action setups (52-wk breakouts/lows, MA
-//     crosses, RSI extremes, volume spikes) derived from the technicals snapshot
-//     OverviewPage already fetched, ranked by how many setups are firing.
+// Watchlist-wide scanners rendered as compact dashboard panels on the Overview:
+//   • SignalsPanel  — every actionable fundamentals/filings signal across the
+//     watchlist (buildWatchlistSignals), one row per company with the signals as
+//     colored pills, filterable by direction. Same signal logic as the company
+//     cockpit; only the rendering is denser.
+//   • MomentumPanel — pure price-action setups (52-wk breakouts/lows, MA crosses,
+//     RSI extremes, volume spikes) from the technicals snapshot OverviewPage
+//     already fetched, ranked by how many setups are firing.
 import { useMemo, useState } from "react";
 
 import { CompanyMark } from "../components/badges/CompanyMark";
-import { SignalCard } from "../components/SignalCard";
-import { useWatchlistPulse } from "../lib/hooks/useWatchlistPulse";
-import { buildWatchlistSignals, type Direction } from "../lib/domain/pulse";
+import { Panel } from "../components/Panel";
+import { buildWatchlistSignals, type Direction, type Signal, type WatchEntry } from "../lib/domain/pulse";
 import { elapsed, fmtDate } from "../lib/utils/format";
 import type { Technicals } from "../lib/domain/technicals";
 import type { Company } from "../lib/types";
 
-export function ScannerSection({
-  companies, onCompany, isNew,
-}: { companies: Company[]; onCompany: (cik: string) => void; isNew?: (iso: string | null | undefined) => boolean }) {
-  const { entries, loading } = useWatchlistPulse(companies);
+const DIR_MARK: Record<Direction, string> = { bull: "▲", bear: "▼", flag: "◆", neutral: "●" };
+
+function SignalPill({ s }: { s: Signal }) {
+  return (
+    <span className={`pill dir-${s.dir}`} title={`${s.label} — ${s.detail}${s.date ? ` (${fmtDate(s.date)})` : ""}`}>
+      <span className="pill-mark" aria-hidden>{DIR_MARK[s.dir]}</span>
+      <span className="pill-label">{s.label}</span>
+      <span className="pill-status">{s.status}</span>
+    </span>
+  );
+}
+
+/** One compact company row: mark + ticker + name on top, pills below. */
+function CompanyRow({
+  ticker, name, meta, onOpen, children,
+}: { ticker: string; name: string; meta?: React.ReactNode; onOpen: () => void; children: React.ReactNode }) {
+  return (
+    <div
+      className="srow" role="button" tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
+    >
+      <CompanyMark ticker={ticker} size={26} />
+      <div className="srow-main">
+        <div className="srow-top">
+          <span className="srow-tkr">{ticker}</span>
+          <span className="srow-name">{name}</span>
+          {meta && <span className="srow-meta">{meta}</span>}
+        </div>
+        <div className="srow-pills">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function RowsSkeleton({ n = 4 }: { n?: number }) {
+  return (
+    <div className="srow-skel">
+      {Array.from({ length: n }, (_, i) => <div key={i} className="skeleton" style={{ height: 52, opacity: 0.8 - i * 0.15 }} />)}
+    </div>
+  );
+}
+
+export function SignalsPanel({
+  entries, loading, onCompany, isNew,
+}: {
+  entries: WatchEntry[]; loading: boolean;
+  onCompany: (cik: string) => void;
+  isNew?: (iso: string | null | undefined) => boolean;
+}) {
   const [dir, setDir] = useState<Direction | "all">("all");
 
   const rows = useMemo(() => buildWatchlistSignals(entries).filter((r) => r.signals.length > 0), [entries]);
@@ -37,53 +83,51 @@ export function ScannerSection({
     return { bull, bear, flag };
   }, [rows]);
 
+  const toggle = (d: Direction) => setDir(dir === d ? "all" : d);
+
   return (
-    <div className="section">
-      <div className="section-title">Live Signals · {rows.length} compan{rows.length === 1 ? "y" : "ies"} active</div>
-      <div className="toggle-row">
-        <button className={`chip${dir === "all" ? " active" : ""}`} onClick={() => setDir("all")}>All</button>
-        <button className={`chip${dir === "bull" ? " active" : ""}`} onClick={() => setDir(dir === "bull" ? "all" : "bull")}>▲ Bullish {counts.bull}</button>
-        <button className={`chip${dir === "bear" ? " active" : ""}`} onClick={() => setDir(dir === "bear" ? "all" : "bear")}>▼ Bearish {counts.bear}</button>
-        <button className={`chip${dir === "flag" ? " active" : ""}`} onClick={() => setDir(dir === "flag" ? "all" : "flag")}>◆ Flags {counts.flag}</button>
-      </div>
-      {loading ? (
-        <div className="skeleton-block">
-          {[0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 84, borderRadius: 6, opacity: 0.8 - i * 0.18 }} />)}
+    <Panel
+      title="Signals" count={rows.length}
+      sub="From the latest filings — most actionable first"
+      flush
+      actions={
+        <div className="seg" role="group" aria-label="Filter signals by direction">
+          <button className={`seg-btn${dir === "all" ? " active" : ""}`} onClick={() => setDir("all")}>All</button>
+          <button className={`seg-btn dir-bull${dir === "bull" ? " active" : ""}`} onClick={() => toggle("bull")} title="Bullish signals">▲ {counts.bull}</button>
+          <button className={`seg-btn dir-bear${dir === "bear" ? " active" : ""}`} onClick={() => toggle("bear")} title="Bearish signals">▼ {counts.bear}</button>
+          <button className={`seg-btn dir-flag${dir === "flag" ? " active" : ""}`} onClick={() => toggle("flag")} title="Flags — needs a look">◆ {counts.flag}</button>
         </div>
+      }
+    >
+      {loading ? (
+        <RowsSkeleton />
       ) : shown.length === 0 ? (
-        <div className="empty-note">No active signals across your watchlist yet. Signals appear as filings are ingested.</div>
+        <div className="panel-empty">No active signals across your watchlist yet. Signals appear as filings are ingested.</div>
       ) : (
-        <div className="scan-list">
+        <div className="srow-list">
           {shown.map((r) => (
-            <div
-              key={r.cik} className={`scan-row dir-${r.dominant}`} role="button" tabIndex={0}
-              onClick={() => onCompany(r.cik)}
-              onKeyDown={(e) => { if (e.key === "Enter") onCompany(r.cik); }}
-            >
-              <div className="scan-head">
-                <CompanyMark ticker={r.ticker} size={26} />
-                <strong style={{ color: "var(--accent)", letterSpacing: "0.04em" }}>{r.ticker}</strong>
-                <span className="dimmed" style={{ fontSize: 12 }}>{r.name}</span>
-                <span className="scan-meta">
+            <CompanyRow
+              key={r.cik} ticker={r.ticker} name={r.name} onOpen={() => onCompany(r.cik)}
+              meta={
+                <>
                   {isNew?.(r.latest) && <span className="new-dot" title="New activity since your last visit">NEW</span>}
-                  {r.insider.clusterBuy && <span className="dir-bull" style={{ fontSize: 11 }}>⚑ cluster buy</span>}
-                  {elapsed(r.latest) && <span className="muted" style={{ fontSize: 11 }} title={fmtDate(r.latest)}>{elapsed(r.latest)}</span>}
-                </span>
-              </div>
-              <div className="signal-stack">
-                {r.signals.map((s) => <SignalCard key={s.label} s={s} />)}
-              </div>
-            </div>
+                  {r.insider.clusterBuy && <span className="dir-bull" title="Several insiders bought recently">⚑ cluster buy</span>}
+                  {elapsed(r.latest) && <span className="srow-age" title={fmtDate(r.latest)}>{elapsed(r.latest)}</span>}
+                </>
+              }
+            >
+              {r.signals.map((s) => <SignalPill key={s.label} s={s} />)}
+            </CompanyRow>
           ))}
         </div>
       )}
-    </div>
+    </Panel>
   );
 }
 
 type MomSetup = { label: string; dir: Direction; tip: string };
 
-function momentumSetups(t: Technicals): MomSetup[] {
+export function momentumSetups(t: Technicals): MomSetup[] {
   const out: MomSetup[] = [];
   if (t.new52wHigh) out.push({ label: "52-wk breakout", dir: "bull", tip: "Closed at a fresh 52-week high — momentum at the top of its range." });
   if (t.new52wLow) out.push({ label: "52-wk low", dir: "bear", tip: "Closed at a fresh 52-week low." });
@@ -95,7 +139,7 @@ function momentumSetups(t: Technicals): MomSetup[] {
   return out;
 }
 
-export function MomentumScanner({
+export function MomentumPanel({
   companies, tech, onCompany,
 }: { companies: Company[]; tech: Record<string, Technicals>; onCompany: (cik: string) => void }) {
   const rows = useMemo(
@@ -105,36 +149,25 @@ export function MomentumScanner({
       .sort((a, b) => b.setups.length - a.setups.length),
     [companies, tech],
   );
-  if (rows.length === 0) return null;
 
   return (
-    <div className="section">
-      <div className="section-title">Momentum · {rows.length} setup{rows.length === 1 ? "" : "s"} firing</div>
-      <div className="scan-list">
-        {rows.map(({ c, setups }) => (
-          <div
-            key={c.cik} className="scan-row" role="button" tabIndex={0}
-            onClick={() => onCompany(c.cik)}
-            onKeyDown={(e) => { if (e.key === "Enter") onCompany(c.cik); }}
-          >
-            <div className="scan-head">
-              <CompanyMark ticker={c.ticker ?? "?"} size={26} />
-              <strong style={{ color: "var(--accent)", letterSpacing: "0.04em" }}>{c.ticker}</strong>
-              <span className="dimmed" style={{ fontSize: 12 }}>{c.name}</span>
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+    <Panel title="Momentum" count={rows.length} sub="Price-action setups from end-of-day bars" flush>
+      {rows.length === 0 ? (
+        <div className="panel-empty">No breakouts, crosses, RSI extremes or volume spikes firing right now.</div>
+      ) : (
+        <div className="srow-list">
+          {rows.map(({ c, setups }) => (
+            <CompanyRow key={c.cik} ticker={c.ticker ?? "?"} name={c.name ?? c.cik} onOpen={() => onCompany(c.cik)}>
               {setups.map((s) => (
-                <span
-                  key={s.label} className={`dir-${s.dir}`} title={s.tip}
-                  style={{ fontSize: 11, fontWeight: 600, padding: "3px 9px", border: "1px solid var(--border-1)", borderRadius: 999, whiteSpace: "nowrap" }}
-                >
-                  {s.label}
+                <span key={s.label} className={`pill dir-${s.dir}`} title={s.tip}>
+                  <span className="pill-mark" aria-hidden>{DIR_MARK[s.dir]}</span>
+                  <span className="pill-status">{s.label}</span>
                 </span>
               ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+            </CompanyRow>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }

@@ -51,6 +51,9 @@ across runs, not by doing more per run.
 Summa/
 ├── CLAUDE.md                     ← this file
 ├── README.md                     ← public-facing documentation
+├── explain.md                    ← REQUIRED change index (GITIGNORED — owner's local notes, never committed)
+├── changes/                      ← REQUIRED: one .md per code update, section per changed file (GITIGNORED)
+│   └── README.md                 ← the file template + rules (see "Change log" below)
 ├── schema.sql                    ← run once in the Supabase SQL Editor (idempotent)
 │
 ├── backend/                      ← Python pipeline (runs in GitHub Actions)
@@ -121,14 +124,23 @@ Summa/
     ├── components/                ← shared presentational atoms (CSS-classes only, no data deps),
     │   │                            grouped by kind. Core atoms sit at the root; clustered
     │   │                            families live in subfolders:
-    │   │                            (root)   DataTable, InfoTip, Skeletons, NameContext,
+    │   │                            (root)   DataTable (`flush`/`dense` for nesting in a Panel),
+    │   │                                     Panel (+ PanelLink), InfoTip, Skeletons, NameContext,
     │   │                                     SignalCard, TapeRow, Scorecard
     │   ├── charts/                    charts, charts.lazy, Sparkline (viz primitives)
     │   ├── badges/                    FormBadge, EventClassBadge, GuidanceBadge, DirMark, CompanyMark
     │   └── strips/                    PriceStrip, TechStrip, KpiTile (metric strips)
     ├── views/                     ← top-level page views (own their data/effects):
-    │   │                            Sidebar, TopBar (command bar: SEC-index ticker search + market
-    │   │                            session status/ET clock), OverviewPage, ScannerSection (+ MomentumScanner),
+    │   │                            Sidebar (exports NAV_GROUPS — the single grouped nav config:
+    │   │                            view key = hash, label, icon, one-line desc; drives the nav,
+    │   │                            page.tsx's hash router and the Data Guide's page map; mobile
+    │   │                            off-canvas drawer ≤960px), TopBar (command bar: SEC-index ticker
+    │   │                            search focused by "/" or Ctrl/⌘+K + market session status/ET
+    │   │                            clock + drawer menu button), OverviewPage (the Dashboard: stat
+    │   │                            row + two-column Panel grid; owns the shared useWatchlistPulse
+    │   │                            fetch; onboarding empty state when the watchlist is empty),
+    │   │                            ScannerSection (SignalsPanel + MomentumPanel — compact
+    │   │                            company rows with signal pills, rendered inside Panels),
     │   │                            SearchPage, FeedPage, NewsPage, CalendarView, ManagersPage, IposPage,
     │   │                            RedditPage (Reddit Buzz leaderboard over reddit_trends),
     │   │                            CongressPage (consensus buys/sells over congress_trades),
@@ -226,6 +238,26 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
 
 ---
 
+## Change log — `changes/` + `explain.md` (mandatory every code session)
+
+Every session that changes code files **must**:
+
+1. Write a **new file `changes/YYYY-MM-DD-<slug>.md`** using the template in
+   `changes/README.md`: header (date, request, files changed, how verified), summary,
+   a files table, then **one `###` section per code file touched** (status, summary,
+   changes, why, impact), verification steps, and follow-ups. One update = one file;
+   never edit an old change file to describe new work.
+2. Add one index line to **`explain.md`** (repo root), newest first, linking to that file.
+3. If the change touches anything CLAUDE.md documents, update CLAUDE.md in the same
+   session and say so in the change file.
+
+Plain language, no pasted code. Do not end a code session without steps 1 and 2.
+`changes/` and `explain.md` are **gitignored on purpose** — they are the owner's private
+reading notes. Never `git add -f` them, never move their content into committed docs,
+and never put credentials, keys or webhook URLs in them.
+
+---
+
 ## Python Code Conventions
 
 - Python 3.10+ features permitted (union types with `|`, `match` statements).
@@ -264,12 +296,17 @@ Never-negotiate rules. If a proposed change violates one, stop and flag it.
 - `useMemo` for derived/filtered arrays.
 - Design tokens via CSS custom properties in `globals.css`; component-specific layout
   via inline styles. No hardcoded hex in JSX where a token exists.
-- **Design language (2026-07):** modern trading platform — deep-navy surfaces
-  (`--bg-0 #0a0e17` → panels `#111726`), electric-blue accent (`--accent #3b82f6`),
-  Inter (`--font-sans`) for UI with JetBrains Mono reserved for numerals/prices,
-  soft radius-10/12 panels with `--shadow-1`, glass (blur) top bar + sticky company
-  hero, segmented-control tabs. Chart series palette in `components/charts/charts.tsx`
-  is fixed-order and CVD-validated against the `#111726` panel
+- **Design language (2026-09):** modern research platform — neutral graphite surfaces
+  with a faint cool tint (`--bg-0 #0c0f15` → panels `#12161e`), FLAT panels (hairline
+  `--border-1` borders, `--panel-sheen: none`, near-invisible `--shadow-1`), electric-blue
+  accent (`--accent #3b82f6`), Inter (`--font-sans`) for UI with JetBrains Mono reserved
+  for numerals/prices, radius-12/14 panels, glass (blur) top bar + sticky company hero,
+  segmented-control tabs. The dashboard card chrome is the `Panel` atom
+  (`components/Panel.tsx`: header with title + count pill + subtitle + right-aligned
+  actions, `flush` body for tables/lists); the Overview is a stat row over a two-column
+  `dash-grid` (watchlist table + filing volume | Signals / Momentum / Latest filings
+  panels, collapsing to one column ≤1080px). Chart series palette in
+  `components/charts/charts.tsx` is fixed-order and CVD-validated against the `#12161e` panel
   (blue `#3b82f6` → amber `#d97706` → teal `#0d9488` → violet `#8b5cf6` → pink `#db2777`);
   `--pos #22c55e` / `--neg #ef4444` are status colors, never reused as series. The
   scroll container is `.page-scroll` (inside `.main-area`, below the fixed `.topbar`) —
@@ -572,6 +609,9 @@ npx tsc --noEmit             # typecheck (run after any page.tsx extraction)
 
 If the dev server hangs and the project is inside OneDrive, pause OneDrive sync for the
 project directory — OneDrive file locking interferes with Turbopack's file watching.
+`next build` stalls the same way (near-zero CPU for minutes). Workaround: copy `frontend/`
+(excluding `node_modules`, `.next`, `out`) to a directory outside OneDrive, junction
+`node_modules` back to the original, and build there.
 
 ---
 

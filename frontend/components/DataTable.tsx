@@ -25,11 +25,15 @@ type Props<T> = {
   filterPlaceholder?: string;
   empty?: ReactNode;
   maxHeight?: string;
+  /** No outer border/shadow — for nesting inside a Panel. */
+  flush?: boolean;
+  /** Tighter row padding. */
+  dense?: boolean;
 };
 
 export function DataTable<T>({
   columns, rows, rowKey, onRowClick, initialSort, filterable,
-  filterPlaceholder = "Filter…", empty = "No data.", maxHeight,
+  filterPlaceholder = "Filter…", empty = "No data.", maxHeight, flush = false, dense = false,
 }: Props<T>) {
   const [sort, setSort] = useState(initialSort ?? null);
   const [q, setQ] = useState("");
@@ -66,7 +70,7 @@ export function DataTable<T>({
   }
 
   return (
-    <div className="dt-wrap">
+    <div className={`dt-wrap${flush ? " flush" : ""}${dense ? " dense" : ""}`}>
       {filterable && (
         <input
           className="dt-filter"

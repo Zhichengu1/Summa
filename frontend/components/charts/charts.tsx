@@ -14,7 +14,7 @@ const GRID = "var(--border-1)";
 const ACCENT = "#3b82f6";
 const POS = "#22c55e";
 const NEG = "#ef4444";
-// Categorical series — fixed order, validated (six-checks) on the #111726 panel:
+// Categorical series — fixed order, validated (six-checks) on the #12161e panel:
 // blue → amber → teal → violet → pink; status POS/NEG never reused as series.
 const SERIES = [ACCENT, "#d97706", "#0d9488", "#8b5cf6", "#db2777"];
 
