@@ -553,21 +553,22 @@ def company_has_news(cik: str) -> bool:
 _PAGE = 1000
 
 
-def _select_all(table: str, columns: str) -> list[dict[str, Any]]:
+def _select_all(table: str, columns: str, order: str | None = None) -> list[dict[str, Any]]:
     """Fetch every row of `table` (selected `columns`) by paging through ranges.
 
     Scales the scheduler's whole-table reads to any watchlist size: without this,
     a single `.select().execute()` caps at ~1000 rows and the pipeline would stop
-    seeing (and so stop ingesting) companies past that boundary.
+    seeing (and so stop ingesting) companies past that boundary. `order` (a column
+    name, ascending) makes the paging deterministic where callers cap the result.
     """
     client = get_client()
     out: list[dict[str, Any]] = []
     start = 0
     while True:
-        batch = (
-            client.table(table).select(columns)
-            .range(start, start + _PAGE - 1).execute().data or []
-        )
+        q = client.table(table).select(columns)
+        if order:
+            q = q.order(order)
+        batch = q.range(start, start + _PAGE - 1).execute().data or []
         out.extend(batch)
         if len(batch) < _PAGE:
             return out
@@ -577,7 +578,9 @@ def _select_all(table: str, columns: str) -> list[dict[str, Any]]:
 def fetch_watchlist() -> list[dict[str, Any]]:
     """Return the dynamic watchlist / ingest queue rows (cik, ticker, name, status)."""
     try:
-        return _select_all("watchlist", "cik, ticker, name, status")
+        # Oldest first, so the backend's dynamic cap (watchlist.WATCHLIST_DYNAMIC_MAX)
+        # keeps the companies people queued first, not whatever was inserted last.
+        return _select_all("watchlist", "cik, ticker, name, status", order="added_at")
     except Exception:
         logger.exception("fetch_watchlist failed")
         return []

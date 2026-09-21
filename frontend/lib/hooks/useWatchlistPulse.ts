@@ -11,6 +11,7 @@ import {
   fetchRecentInsider, fetchRecentEarnings, fetchRecentEvents,
   fetchRecentBeneficial, fetchRecentOfferings, fetchRecentLateFilings,
 } from "../data/data";
+import { cached } from "../data/cache";
 import type { CompanyData, WatchEntry } from "../domain/pulse";
 import type { Company } from "../types";
 
@@ -25,10 +26,12 @@ export function useWatchlistPulse(companies: Company[]): { entries: WatchEntry[]
     if (!ciks.length) { setBundles({}); setLoading(false); return; }
     let cancelled = false;
     setLoading(true);
-    Promise.all([
+    // Cached per watchlist for 10 min: the Overview and the Calendar both mount
+    // this, and the pipeline only adds rows every ~10 min anyway.
+    cached(`pulse:${cikKey}`, 10 * 60_000, () => Promise.all([
       fetchRecentInsider(ciks), fetchRecentEarnings(ciks), fetchRecentEvents(ciks),
       fetchRecentBeneficial(ciks), fetchRecentOfferings(ciks), fetchRecentLateFilings(ciks),
-    ]).then(([ins, ea, ev, ben, off, late]) => {
+    ])).then(([ins, ea, ev, ben, off, late]) => {
       if (cancelled) return;
       const by: Record<string, CompanyData> = {};
       const slot = (cik: string) =>

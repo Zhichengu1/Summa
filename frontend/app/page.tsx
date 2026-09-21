@@ -191,7 +191,7 @@ export default function Page() {
     fetchCompanySummaries().then(setSummaries);
     // News is loaded here (not just inside the News view) so the nav badge can
     // count new headlines app-wide, and Realtime keeps it live in every view.
-    fetchNews(500).then(setNews);
+    fetchNews().then(setNews);   // 300 most recent — the largest first-paint read, capped on purpose
     return () => { cancelled = true; };
   }, [attempt]);
 
@@ -202,7 +202,7 @@ export default function Page() {
     if (p.some((x) => k(x) === k(n))) return p;
     return [n, ...p]
       .sort((a, b) => (b.published_at ?? "").localeCompare(a.published_at ?? ""))
-      .slice(0, 500);
+      .slice(0, 300);
   })), []);
 
   // Bundled SEC index (~707 KB) for universal company search. Deferred until the
@@ -254,7 +254,13 @@ export default function Page() {
     watch.add(item);
     if (!already) {
       const ingested = ingestedCiks.has(c.cik);
-      if (!ingested) void queueWatchlist(item);  // queue for backend ingest
+      if (!ingested) {
+        // Queue for backend ingest. The insert can be refused by the database guard
+        // (queue cap / row validation) — say so instead of silently never ingesting.
+        queueWatchlist(item).then((ok) => {
+          if (!ok) toasts.push(`${c.ticker} is on your list, but the ingest queue refused it (full or invalid) — try again later`, { tone: "warn" });
+        });
+      }
       toasts.push(
         ingested
           ? `${c.ticker} added to your watchlist`

@@ -1,5 +1,6 @@
 // Data access layer — the only place that talks to Supabase.
 import { supabase } from "./supabase";
+import { cached } from "./cache";
 import { CORE_WATCHLIST } from "./watchlist";
 import type {
   Company, FinancialFact, Filing,
@@ -35,10 +36,12 @@ async function selectAllPaged<T>(
 // to any watchlist size. Replaces fetching every company's full price history
 // client-side (which capped out ~80 companies). Returns [] so callers fall back.
 export async function fetchCompanySummaries(): Promise<CompanySummary[]> {
-  return selectAllPaged<CompanySummary>(
+  // Cached: the root shell (dock prices) and the dashboard both read this on the
+  // same load — one request serves both, and revisits inside 5 min are free.
+  return cached("company_summary", 5 * 60_000, () => selectAllPaged<CompanySummary>(
     "company_summary",
     "cik, ticker, last_close, as_of, chg_1d, ret_ytd, pct_off_high, rsi14, pct_from_50, pct_from_200, ma_cross, vol_spike, new_52w_high, new_52w_low, spark, filings_30d, last_filing_form, last_filing_at, net_insider_90d, cluster_buy",
-  );
+  ));
 }
 
 // Active IPO pipeline — one row per IPO-lifecycle filing (S-1/F-1, 424B, RW),
@@ -54,16 +57,47 @@ export async function fetchIpos(): Promise<Ipo[]> {
 
 // Congressional stock-trade disclosures (congress_trades), global/market-wide.
 // A bounded recency window on the transaction date, paged so it scales; the
-// Congress view aggregates consensus buys/sells (2+ distinct filers on one
-// ticker) client-side from these rows.
+// Congress view aggregates consensus buys/sells client-side from these rows.
+//
+// Egress: this table is the largest thing the frontend reads (~0.6 KB/row full,
+// ~0.3 KB/row lean; ~1.6k rows in 120 days). Both loaders are cached for 30 min
+// (the backend refreshes the table ~daily), and the dashboard uses the lean
+// column set — enough for the tracker and its hover card, none of the tape's
+// document/return columns. Keep `days` at 120: the tracker's widest window (60d)
+// plus its previous window for momentum.
+const CONGRESS_TTL = 30 * 60_000;
+const CONGRESS_FULL_COLS = "id, chamber, party, state, office, filer_id, filer_name, ticker, asset_name, side, transaction_date, filing_date, is_late, owner, amount_low, amount_high, amount_label, doc_url, ret_since, excess_since";
+const CONGRESS_LEAN_COLS = "chamber, party, state, filer_id, filer_name, ticker, asset_name, side, transaction_date, owner, amount_low, amount_high, amount_label";
+
+function congressSince(days: number): string {
+  return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Full rows (the Congress page: tracker + consensus + trade tape). */
 export async function fetchCongressTrades(days = 120): Promise<CongressTrade[]> {
-  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-  return selectAllPaged<CongressTrade>(
-    "congress_trades",
-    "id, branch, chamber, party, state, office, filer_id, filer_name, ticker, asset_name, side, transaction_type, transaction_date, filing_date, is_late, owner, amount_low, amount_high, amount_label, doc_url, ret_since, excess_since",
+  return cached(`congress:full:${days}`, CONGRESS_TTL, () => selectAllPaged<CongressTrade>(
+    "congress_trades", CONGRESS_FULL_COLS,
     { col: "transaction_date", asc: false },
-    { col: "transaction_date", value: cutoff },
-  );
+    { col: "transaction_date", value: congressSince(days) },
+  ));
+}
+
+/** Lean rows (the dashboard tracker + hover card only) — about half the bytes. */
+export async function fetchCongressTradesLean(days = 120): Promise<CongressTrade[]> {
+  return cached(`congress:lean:${days}`, CONGRESS_TTL, async () => {
+    const rows = await selectAllPaged<Partial<CongressTrade>>(
+      "congress_trades", CONGRESS_LEAN_COLS,
+      { col: "transaction_date", asc: false },
+      { col: "transaction_date", value: congressSince(days) },
+    );
+    // Fill the columns the lean select omits so the shared type stays honest
+    // (the row id is only a table key; a synthetic one is enough here).
+    return rows.map((r, i) => ({
+      id: `${r.ticker}:${r.filer_id ?? ""}:${r.transaction_date}:${i}`,
+      branch: null, office: null, transaction_type: null, filing_date: null, is_late: null,
+      doc_url: null, ret_since: null, excess_since: null, ...r,
+    }) as CongressTrade);
+  });
 }
 
 // Weekly CFTC COT positioning (cot_reports), global/market-wide. Fetches the
@@ -167,7 +201,9 @@ export async function fetchCompanies(): Promise<Company[]> {
 // Watchlist-wide news feed — recent Google News headlines across every ingested
 // company (company_news), newest first. Powers the top-level News view (a
 // recent-`limit` window, mirroring fetchFilings). Returns [] on error.
-export async function fetchNews(limit = 500): Promise<NewsItem[]> {
+// 300 most-recent headlines (~1 KB each — the largest read on first paint, so
+// the cap is deliberate; the nav badge and News view only need the recent tail).
+export async function fetchNews(limit = 300): Promise<NewsItem[]> {
   const { data, error } = await supabase
     .from("company_news")
     .select("cik, ticker, company_name, guid, title, link, source, summary, published_at, importance, category")
