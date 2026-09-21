@@ -1,14 +1,23 @@
 "use client";
-// Dashboard (the landing view). Layout, top to bottom:
-//   • header — title, subtitle, "latest filing" freshness + Add-company action
-//   • stat row — companies tracked, new filings, new headlines, signals active
-//   • two-column grid — LEFT: the watchlist table (the centerpiece) + the filing
-//     volume chart; RIGHT: Signals, Momentum, and Latest filings panels
+// Dashboard (the landing view). Top to bottom, in the order a reader wants it:
+//   • header — title, "latest filing" freshness, Add-company action
+//   • pulse strip — one compact line of watchlist-wide numbers (breadth, filings,
+//     new-since-last-visit, signals, momentum), each clickable where it has a home
+//   • heatmap — every company as a tile coloured by its 1D / YTD move; the fastest
+//     read of "what moved" and a one-click navigator
+//   • three panels — Movers (best / worst today) · Signals (from the filings) ·
+//     Earnings ahead (estimated from each company's reporting cadence) + Momentum
+//   • the full-width watchlist table (sortable, filterable)
+//   • filing volume chart + latest filings
 // Prices/technicals come from one paginated read of precomputed company_summary
 // rows (O(companies) tiny rows), falling back to a client-side raw-price compute
 // only until that precompute is populated. See "Scaling" in CLAUDE.md.
 import { useEffect, useMemo, useState } from "react";
 
+import { CompanyPeek } from "../components/CompanyPeek";
+import { CongressBuysList } from "../components/CongressBuysList";
+import { CongressPeek } from "../components/CongressPeek";
+import { Icon } from "../components/Icon";
 import { DataTable, type Column } from "../components/DataTable";
 import { Panel, PanelLink } from "../components/Panel";
 import { CompanyMark } from "../components/badges/CompanyMark";
@@ -16,55 +25,71 @@ import { FormBadge } from "../components/badges/FormBadge";
 import { Sparkline } from "../components/charts/Sparkline";
 import { StackedBarChart } from "../components/charts/charts.lazy";
 import { SignalsPanel, MomentumPanel, momentumSetups } from "./ScannerSection";
-import { fetchRecentPrices, fetchCompanySummaries } from "../lib/data/data";
+import { fetchRecentPrices, fetchCompanySummaries, fetchCongressTrades } from "../lib/data/data";
+import { mostBought, type MostBought } from "../lib/domain/congress";
 import { useWatchlistPulse } from "../lib/hooks/useWatchlistPulse";
+import { usePeek } from "../lib/hooks/usePeek";
 import { buildWatchlistSignals } from "../lib/domain/pulse";
+import { nextEarningsEstimate } from "../lib/domain/catalysts";
 import { profileFor } from "../lib/domain/taxonomy";
 import { derivePriceKpis } from "../lib/domain/prices";
 import { deriveTechnicals, type Technicals } from "../lib/domain/technicals";
 import { fmtUSD, fmtPct, fmtDelta, fmtDate, elapsed } from "../lib/utils/format";
-import type { Company, Filing, DailyPrice, MainView } from "../lib/types";
+import type { Company, Filing, DailyPrice, MainView, CompanySummary, CompanyTab, CongressTrade } from "../lib/types";
 
-type PriceRow = { last: number | null; chg1d: number | null; offHigh: number | null; spark: number[] };
+type PriceRow = { last: number | null; chg1d: number | null; ytd: number | null; offHigh: number | null; spark: number[] };
 type NavView = Exclude<MainView, "company">;
+type HeatMode = "1d" | "ytd";
 
-function StatCard({
-  label, value, foot, onClick, title, tone,
-}: {
-  label: string; value: React.ReactNode; foot?: React.ReactNode;
-  onClick?: () => void; title?: string; tone?: "accent" | "pos" | "neg" | "warn";
-}) {
+/** Tile tint: status colour whose opacity grows with the size of the move. */
+function heatStyle(v: number | null, mode: HeatMode): React.CSSProperties {
+  if (v == null) return { background: "var(--bg-2)" };
+  const span = mode === "1d" ? 5 : 40;                 // move that reaches full intensity
+  const a = 0.08 + Math.min(Math.abs(v), span) / span * 0.36;   // muted: 0.08 → 0.44
+  return { background: `rgba(var(${v >= 0 ? "--pos-rgb" : "--neg-rgb"}), ${a.toFixed(2)})` };
+}
+
+function PulseStat({
+  value, label, tone, onClick, title,
+}: { value: React.ReactNode; label: React.ReactNode; tone?: "accent" | "pos" | "neg"; onClick?: () => void; title?: string }) {
+  const cls = `pulse-stat${onClick ? " pulse-link" : ""}`;
   const inner = (
     <>
-      <div className="stat-label">{label}</div>
-      <div className={`stat-value${tone ? ` tone-${tone}` : ""}`}>{value}</div>
-      {foot && <div className="stat-foot">{foot}</div>}
+      <span className={`pulse-value${tone ? ` tone-${tone}` : ""}`}>{value}</span>
+      <span className="pulse-label">{label}</span>
     </>
   );
   return onClick
-    ? <button className="stat stat-link" onClick={onClick} title={title}>{inner}</button>
-    : <div className="stat" title={title}>{inner}</div>;
+    ? <button className={cls} onClick={onClick} title={title}>{inner}</button>
+    : <span className={cls} title={title}>{inner}</span>;
 }
 
 export function OverviewPage({
-  companies, filings, onCompany, isNew, newFilings = 0, newNews = 0, onNavigate,
+  companies, filings, onCompany, isNew, newFilings = 0, newNews = 0, onNavigate, onTrack,
 }: {
   companies: Company[]; filings: Filing[];
-  onCompany: (cik: string) => void;
+  onCompany: (cik: string, tab?: CompanyTab) => void;
+  /** Add a market-wide ticker (e.g. a Congress buy) to the watchlist. */
+  onTrack?: (ticker: string) => void;
   isNew?: (iso: string | null | undefined) => boolean;
-  /** New-since-last-visit counts (shared with the nav badges) for the stat row. */
+  /** New-since-last-visit counts (shared with the nav badges) for the pulse strip. */
   newFilings?: number; newNews?: number;
   onNavigate?: (view: NavView) => void;
 }) {
-  // Per-company recent prices for the sparkline + price columns (one batched fetch).
-  // The same ~1yr series also feeds the per-company technicals → Momentum panel.
+  // Per-company recent prices for the heatmap, movers and table (one batched fetch).
+  // The same series also feeds the per-company technicals → Momentum panel.
   const [priceRows, setPriceRows] = useState<Record<string, PriceRow>>({});
   const [techRows, setTechRows] = useState<Record<string, Technicals>>({});
+  // Raw summary rows, kept for the hover peek card (same numbers, richer flags).
+  const [summaryMap, setSummaryMap] = useState<Map<string, CompanySummary>>(new Map());
+  const [pricesLoading, setPricesLoading] = useState(true);
+  const [heatMode, setHeatMode] = useState<HeatMode>("1d");
   const ciks = useMemo(() => companies.map((c) => c.cik), [companies]);
   const cikKey = ciks.join(",");
   useEffect(() => {
-    if (!ciks.length) { setPriceRows({}); setTechRows({}); return; }
+    if (!ciks.length) { setPriceRows({}); setTechRows({}); setPricesLoading(false); return; }
     let cancelled = false;
+    setPricesLoading(true);
     const cikSet = new Set(ciks);
 
     // Fallback: compute client-side from raw prices (the original path). Capped at
@@ -82,11 +107,12 @@ export function OverviewPage({
           const closes = prc.map((p) => p.close).filter((x): x is number => x != null);
           const prev = closes.length > 1 ? closes[closes.length - 2] : null;
           const chg1d = k.last != null && prev != null && prev !== 0 ? ((k.last - prev) / prev) * 100 : null;
-          out[cik] = { last: k.last, chg1d, offHigh: k.pctOffHigh, spark: closes.slice(-60) };
+          out[cik] = { last: k.last, chg1d, ytd: k.retYTD, offHigh: k.pctOffHigh, spark: closes.slice(-60) };
           techOut[cik] = deriveTechnicals(prc);
         }
         setPriceRows(out);
         setTechRows(techOut);
+        setPricesLoading(false);
       });
     };
 
@@ -97,10 +123,11 @@ export function OverviewPage({
       if (cancelled) return;
       const scoped = summaries.filter((s) => cikSet.has(s.cik));
       if (scoped.length === 0) { computeFromRawPrices(); return; }  // not populated yet
+      setSummaryMap(new Map(scoped.map((s) => [s.cik, s])));
       const pr: Record<string, PriceRow> = {};
       const tr: Record<string, Technicals> = {};
       for (const s of scoped) {
-        pr[s.cik] = { last: s.last_close, chg1d: s.chg_1d, offHigh: s.pct_off_high, spark: s.spark ?? [] };
+        pr[s.cik] = { last: s.last_close, chg1d: s.chg_1d, ytd: s.ret_ytd, offHigh: s.pct_off_high, spark: s.spark ?? [] };
         tr[s.cik] = {
           sma50: null, sma200: null, cross: s.ma_cross,
           pctFrom50: s.pct_from_50, pctFrom200: s.pct_from_200,
@@ -110,9 +137,32 @@ export function OverviewPage({
       }
       setPriceRows(pr);
       setTechRows(tr);
+      setPricesLoading(false);
     });
     return () => { cancelled = true; };
   }, [cikKey]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Hover peek: heatmap tiles, movers and table rows all open the same company card.
+  const pk = usePeek({ side: "right" });
+  const peekCompany = pk.peek ? companies.find((c) => c.cik === pk.peek!.cik) ?? null : null;
+  const openFromPeek = (cik: string, tab?: CompanyTab) => { pk.close(); onCompany(cik, tab); };
+
+  // Congress tracker: one bounded market-wide read (180d = the 90-day window plus
+  // the previous window for momentum). Fail-soft — an empty result hides the panel.
+  const [congress, setCongress] = useState<CongressTrade[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchCongressTrades(180).then((r) => { if (!cancelled) setCongress(r); }).catch(() => { if (!cancelled) setCongress([]); });
+    return () => { cancelled = true; };
+  }, []);
+  const congressTop = useMemo(() => mostBought(congress ?? [], 90, 8), [congress]);
+  const cgPeek = usePeek({ side: "right", width: 372, height: 560 });
+  const cgPeekRow: MostBought | null = cgPeek.peek ? congressTop.find((r) => r.ticker === cgPeek.peek!.cik) ?? null : null;
+  const watchedByTicker = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of companies) if (c.ticker) m.set(c.ticker.toUpperCase(), c.cik);
+    return m;
+  }, [companies]);
 
   // Catalyst slices for the whole watchlist (one fetch, shared with the Signals panel).
   const pulse = useWatchlistPulse(companies);
@@ -121,6 +171,19 @@ export function OverviewPage({
     () => companies.filter((c) => techRows[c.cik] && momentumSetups(techRows[c.cik]).length > 0).length,
     [companies, techRows],
   );
+
+  // Estimated next earnings per company (from its own reporting cadence) — the
+  // "what's ahead" panel. Only cadences that look genuinely quarterly qualify.
+  const earningsAhead = useMemo(() => {
+    const out: { cik: string; ticker: string; name: string; estDate: string; daysAway: number }[] = [];
+    for (const e of pulse.entries) {
+      const dates = (e.data.earnings ?? []).map((x) => x.reported_date ?? x.filed_at);
+      const est = nextEarningsEstimate(dates);
+      if (!est || est.daysAway < -10 || est.daysAway > 75) continue;
+      out.push({ cik: e.cik, ticker: e.ticker, name: e.name, estDate: est.estDate, daysAway: est.daysAway });
+    }
+    return out.sort((a, b) => a.daysAway - b.daysAway).slice(0, 8);
+  }, [pulse.entries]);
 
   const volumeData = useMemo(() => {
     const buckets = new Map<string, Record<string, number>>();
@@ -161,7 +224,7 @@ export function OverviewPage({
     return m;
   }, [filings]);
 
-  // Header + stat-row numbers.
+  // Header + pulse-strip numbers.
   const glance = useMemo(() => {
     const cutoff7 = Date.now() - 7 * 86_400_000;
     let filings7 = 0;
@@ -171,16 +234,36 @@ export function OverviewPage({
       if (new Date(f.filed_at).getTime() > cutoff7) filings7++;
       if (!latest || f.filed_at > latest) latest = f.filed_at;
     }
-    let up = 0, down = 0;
+    let up = 0, down = 0, sum = 0, n = 0;
     for (const c of companies) {
       const v = priceRows[c.cik]?.chg1d;
       if (v == null) continue;
       if (v >= 0) up++; else down++;
+      sum += v; n++;
     }
-    return { filings7, latest, up, down };
+    return { filings7, latest, up, down, avg1d: n ? sum / n : null };
   }, [filings, companies, priceRows]);
 
-  // Watchlist filings, newest first, for the side panel.
+  // Heatmap tiles: every company, sorted by the active move (best first).
+  const heatTiles = useMemo(() => {
+    const val = (c: Company) => (heatMode === "1d" ? priceRows[c.cik]?.chg1d : priceRows[c.cik]?.ytd) ?? null;
+    return companies
+      .map((c) => ({ c, v: val(c), last: priceRows[c.cik]?.last ?? null }))
+      .sort((a, b) => (b.v ?? -Infinity) - (a.v ?? -Infinity) || (a.c.ticker ?? "").localeCompare(b.c.ticker ?? ""));
+  }, [companies, priceRows, heatMode]);
+
+  // Movers: best and worst 1D moves (only companies with a close).
+  const movers = useMemo(() => {
+    const rows = companies
+      .map((c) => ({ c, v: priceRows[c.cik]?.chg1d ?? null, last: priceRows[c.cik]?.last ?? null }))
+      .filter((r): r is { c: Company; v: number; last: number | null } => r.v != null)
+      .sort((a, b) => b.v - a.v);
+    const up = rows.filter((r) => r.v > 0).slice(0, 5);
+    const down = rows.filter((r) => r.v < 0).slice(-5).reverse();
+    return { up, down };
+  }, [companies, priceRows]);
+
+  // Watchlist filings, newest first, for the bottom panel.
   const latestFilings = useMemo(() => {
     const mine = new Set(ciks);
     return filings.filter((f) => mine.has(f.cik)).slice(0, 8);
@@ -188,7 +271,7 @@ export function OverviewPage({
 
   const cols: Column<Company>[] = [
     {
-      key: "ticker", header: "Company", width: "240px",
+      key: "ticker", header: "Company", width: "260px",
       value: (c) => c.ticker ?? "",
       render: (c) => {
         const p = profileFor(c.ticker, c.sector, c.industry, c.cik);
@@ -205,17 +288,22 @@ export function OverviewPage({
       },
     },
     {
-      key: "last", header: "Last", align: "right", width: "90px",
+      key: "last", header: "Last", align: "right", width: "84px",
       value: (c) => priceRows[c.cik]?.last ?? -1,
       render: (c) => { const p = priceRows[c.cik]; return p?.last != null ? <span className="dt-num strong">{fmtUSD(p.last)}</span> : <span className="dimmed">—</span>; },
     },
     {
-      key: "chg1d", header: "1D", align: "right", width: "84px",
+      key: "chg1d", header: "1D", align: "right", width: "82px",
       value: (c) => priceRows[c.cik]?.chg1d ?? -999,
       render: (c) => { const v = priceRows[c.cik]?.chg1d; return v != null ? <span className={`chg ${v >= 0 ? "pos" : "neg"}`}>{fmtDelta(v)}</span> : <span className="dimmed">—</span>; },
     },
     {
-      key: "offhi", header: "Off 52w high", align: "right", width: "110px",
+      key: "ytd", header: "YTD", align: "right", width: "82px",
+      value: (c) => priceRows[c.cik]?.ytd ?? -999,
+      render: (c) => { const v = priceRows[c.cik]?.ytd; return v != null ? <span className={`dt-num ${v >= 0 ? "pos" : "neg"}`}>{fmtDelta(v)}</span> : <span className="dimmed">—</span>; },
+    },
+    {
+      key: "offhi", header: "vs 52w high", align: "right", width: "104px",
       value: (c) => priceRows[c.cik]?.offHigh ?? -999,
       render: (c) => { const v = priceRows[c.cik]?.offHigh; return v != null ? <span className={`dt-num ${v > -3 ? "pos" : v < -25 ? "neg" : "muted"}`}>{fmtPct(v)}</span> : <span className="dimmed">—</span>; },
     },
@@ -240,7 +328,7 @@ export function OverviewPage({
       },
     },
     {
-      key: "cnt", header: "30d", align: "right", width: "56px",
+      key: "cnt", header: "30d", align: "right", width: "60px",
       value: (c) => cnt30.get(c.cik) ?? 0,
       render: (c) => {
         const n = cnt30.get(c.cik) ?? 0;
@@ -263,7 +351,7 @@ export function OverviewPage({
             <div>
               <div className="onboard-title">Add companies to your watchlist</div>
               <div className="onboard-body">Search any US ticker or company name in the bar above, or use the Add companies page.</div>
-              <button className="btn-primary" onClick={() => onNavigate?.("search")}>⌕ Find a company</button>
+              <button className="btn-primary" onClick={() => onNavigate?.("search")}><Icon name="search" size={14} /> Find a company</button>
             </div>
           </div>
           <div className="onboard-step">
@@ -278,7 +366,7 @@ export function OverviewPage({
             <div>
               <div className="onboard-title">Read the signals</div>
               <div className="onboard-body">This page then shows live signals and momentum setups; each company page has a health check, catalysts, ownership and fundamentals.</div>
-              <button className="btn-ghost" onClick={() => onNavigate?.("guide")}>◇ What the data means</button>
+              <button className="btn-ghost" onClick={() => onNavigate?.("guide")}><Icon name="guide" size={14} /> What the data means</button>
             </div>
           </div>
         </div>
@@ -286,12 +374,15 @@ export function OverviewPage({
     );
   }
 
+  const newTotal = newFilings + newNews;
+  const heatLabel = heatMode === "1d" ? "last session" : "year to date";
+
   return (
     <div className="dash">
       <header className="dash-head">
         <div>
           <h1 className="page-title">Dashboard</h1>
-          <div className="page-sub">Your {companies.length} compan{companies.length === 1 ? "y" : "ies"} at a glance — what moved, what was filed, and what the filings imply.</div>
+          <div className="page-sub">{companies.length} compan{companies.length === 1 ? "y" : "ies"} · last close and latest SEC filings</div>
         </div>
         <div className="dash-actions">
           {glance.latest && (
@@ -299,83 +390,232 @@ export function OverviewPage({
               <span className="live-dot" /> Latest filing {elapsed(glance.latest)}
             </span>
           )}
-          <button className="btn-primary" onClick={() => onNavigate?.("search")}>+ Add company</button>
+          <button className="btn-ghost" onClick={() => onNavigate?.("search")}><Icon name="plus" size={14} strokeWidth={2.25} /> Add company</button>
         </div>
       </header>
 
-      <div className="stat-grid">
-        <StatCard
-          label="Companies tracked" value={companies.length}
-          foot={<><span className="pos">▲ {glance.up}</span> <span className="stat-sep">·</span> <span className="neg">▼ {glance.down}</span> <span>on the last close</span></>}
-          title="Companies on your watchlist, and how many closed up vs down in the last session"
+      {/* Pulse strip — the whole watchlist in one line */}
+      <div className="pulse-strip" role="list">
+        <PulseStat value={companies.length} label="companies" title="Companies on your watchlist" />
+        <PulseStat
+          value={<><span className="pos">▲ {glance.up}</span> <span className="pulse-sep">·</span> <span className="neg">▼ {glance.down}</span></>}
+          label="up · down, last close" title="How many closed up vs down in the last session"
         />
-        <StatCard
-          label="New filings" value={newFilings} tone={newFilings > 0 ? "accent" : undefined}
-          foot={<>{glance.filings7} in the last 7 days</>}
-          onClick={() => onNavigate?.("feed")} title="Filings since your last visit — open the feed"
+        <PulseStat
+          value={glance.avg1d != null ? fmtDelta(glance.avg1d) : "—"}
+          tone={glance.avg1d == null ? undefined : glance.avg1d >= 0 ? "pos" : "neg"}
+          label="average move" title="Average 1-day change across the watchlist (equal-weighted)"
         />
-        <StatCard
-          label="New headlines" value={newNews} tone={newNews > 0 ? "accent" : undefined}
-          foot={<>since your last visit</>}
-          onClick={() => onNavigate?.("news")} title="Headlines since your last visit — open the news feed"
+        <PulseStat
+          value={glance.filings7} label="filings · 7d"
+          onClick={() => onNavigate?.("feed")} title="Filings in the last 7 days — open the feed"
         />
-        <StatCard
-          label="Signals active" value={pulse.loading ? "…" : signalRows.length}
-          foot={<>{momentumCount} with momentum setups</>}
+        <PulseStat
+          value={newTotal} tone={newTotal > 0 ? "accent" : undefined}
+          label={newTotal > 0 ? `new since last visit (${newFilings} filings · ${newNews} headlines)` : "new since last visit"}
+          onClick={() => onNavigate?.(newNews > newFilings ? "news" : "feed")}
+          title="Filings and headlines since you were last here"
+        />
+        <PulseStat
+          value={pulse.loading ? "…" : signalRows.length} label="with signals"
           title="Companies with at least one actionable signal from their filings"
+        />
+        <PulseStat
+          value={pricesLoading ? "…" : momentumCount} label="momentum setups"
+          title="Companies with a breakout, MA cross, RSI extreme or volume spike"
         />
       </div>
 
-      <div className="dash-grid">
-        <div className="dash-main">
-          <Panel
-            title="Watchlist" count={companies.length} flush
-            sub="Click a row to open the company · click a header to sort"
-          >
-            <DataTable
-              columns={cols} rows={companies} rowKey={(c) => c.cik}
-              onRowClick={(c) => onCompany(c.cik)}
-              initialSort={{ key: "ticker", dir: "asc" }}
-              filterable filterPlaceholder="Filter by ticker, name or industry…"
-              empty="No companies." flush dense
-            />
-          </Panel>
+      {/* Heatmap — every company as a tile, coloured by the move */}
+      <Panel
+        title="Heatmap" count={companies.length}
+        sub={`${heatMode === "1d" ? "1-day" : "Year-to-date"} move · last close`}
+        actions={
+          <div className="seg" role="group" aria-label="Heatmap period">
+            <button className={`seg-btn${heatMode === "1d" ? " active" : ""}`} onClick={() => setHeatMode("1d")}>1D</button>
+            <button className={`seg-btn${heatMode === "ytd" ? " active" : ""}`} onClick={() => setHeatMode("ytd")}>YTD</button>
+          </div>
+        }
+      >
+        {pricesLoading ? (
+          <div className="heat-grid">
+            {companies.slice(0, 16).map((c) => <div key={c.cik} className="skeleton heat-skel" />)}
+          </div>
+        ) : (
+          <div className="heat-grid">
+            {heatTiles.map(({ c, v, last }) => (
+              <button
+                key={c.cik} className="heat-tile" style={heatStyle(v, heatMode)}
+                onClick={() => openFromPeek(c.cik)}
+                onMouseEnter={(e) => pk.enter(c.cik, e.currentTarget)} onMouseLeave={pk.leave}
+                onFocus={(e) => pk.enter(c.cik, e.currentTarget, true)} onBlur={pk.leave}
+                title={`${c.name ?? c.ticker} · ${last != null ? fmtUSD(last) : "no price"} · ${v != null ? `${fmtDelta(v)} ${heatLabel}` : "no move data"}`}
+              >
+                <span className="heat-tkr">{c.ticker}</span>
+                <span className="heat-chg">{v != null ? fmtDelta(v) : "—"}</span>
+                <span className="heat-px">{last != null ? fmtUSD(last) : ""}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </Panel>
 
-          {volumeData.length > 1 && (
-            <Panel title="Filing volume" sub="Filings per month across your watchlist, by form type">
-              <StackedBarChart
-                data={volumeData}
-                keys={formTypes.map((ft) => ({ key: ft, name: ft }))}
-                title=""
-              />
-            </Panel>
+      {/* Movers · Signals · Ahead */}
+      <div className="dash-row3">
+        <div className="dash-stack">
+        <Panel title="Movers" sub="1-day · last close" flush>
+          {pricesLoading ? (
+            <div className="srow-skel">{[0, 1, 2, 3].map((i) => <div key={i} className="skeleton" style={{ height: 40 }} />)}</div>
+          ) : movers.up.length + movers.down.length === 0 ? (
+            <div className="panel-empty">No price data yet — prices arrive with the next pipeline run.</div>
+          ) : (
+            <div className="movers">
+              <div className="movers-col">
+                <div className="movers-head pos">▲ Gainers</div>
+                {movers.up.length === 0 && <div className="movers-none">None up today</div>}
+                {movers.up.map(({ c, v, last }) => (
+                  <button
+                    key={c.cik} className="mover" onClick={() => openFromPeek(c.cik)} title={c.name ?? ""}
+                    onMouseEnter={(e) => pk.enter(c.cik, e.currentTarget)} onMouseLeave={pk.leave}
+                    onFocus={(e) => pk.enter(c.cik, e.currentTarget, true)} onBlur={pk.leave}
+                  >
+                    <CompanyMark ticker={c.ticker ?? "?"} size={22} />
+                    <span className="mover-tkr">{c.ticker}</span>
+                    <span className="mover-px">{last != null ? fmtUSD(last) : ""}</span>
+                    <span className="chg pos">{fmtDelta(v)}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="movers-col">
+                <div className="movers-head neg">▼ Losers</div>
+                {movers.down.length === 0 && <div className="movers-none">None down today</div>}
+                {movers.down.map(({ c, v, last }) => (
+                  <button
+                    key={c.cik} className="mover" onClick={() => openFromPeek(c.cik)} title={c.name ?? ""}
+                    onMouseEnter={(e) => pk.enter(c.cik, e.currentTarget)} onMouseLeave={pk.leave}
+                    onFocus={(e) => pk.enter(c.cik, e.currentTarget, true)} onBlur={pk.leave}
+                  >
+                    <CompanyMark ticker={c.ticker ?? "?"} size={22} />
+                    <span className="mover-tkr">{c.ticker}</span>
+                    <span className="mover-px">{last != null ? fmtUSD(last) : ""}</span>
+                    <span className="chg neg">{fmtDelta(v)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
+        </Panel>
+
+        <Panel
+          title="Congress buys" count={congressTop.length} flush
+          sub="Most distinct members buying · 90d"
+          actions={<PanelLink onClick={() => onNavigate?.("congress")} title="Open the Congress tracker">View all <Icon name="arrow-right" size={12} /></PanelLink>}
+        >
+          {congress == null ? (
+            <div className="srow-skel">{[0, 1, 2, 3].map((i) => <div key={i} className="skeleton" style={{ height: 30 }} />)}</div>
+          ) : congressTop.length === 0 ? (
+            <div className="panel-empty">No congressional buys disclosed in the last 90 days.</div>
+          ) : (
+            <CongressBuysList
+              rows={congressTop} watchedCiks={watchedByTicker} compact
+              onOpen={(cik) => { cgPeek.close(); onCompany(cik); }} onTrack={onTrack} onDrill={() => { cgPeek.close(); onNavigate?.("congress"); }}
+              onRowEnter={(r, el, now) => cgPeek.enter(r.ticker, el, now)} onRowLeave={cgPeek.leave}
+            />
+          )}
+        </Panel>
         </div>
 
-        <aside className="dash-side">
-          <SignalsPanel entries={pulse.entries} loading={pulse.loading} onCompany={onCompany} isNew={isNew} />
-          <MomentumPanel companies={companies} tech={techRows} onCompany={onCompany} />
+        <SignalsPanel entries={pulse.entries} loading={pulse.loading} onCompany={onCompany} isNew={isNew} limit={6} />
+
+        <div className="dash-stack">
           <Panel
-            title="Latest filings" flush
-            actions={<PanelLink onClick={() => onNavigate?.("feed")} title="Open the full filings feed">View all →</PanelLink>}
+            title="Earnings ahead" count={earningsAhead.length} flush
+            sub="Estimated from reporting cadence"
           >
-            {latestFilings.length === 0 ? (
-              <div className="panel-empty">No filings yet for your watchlist.</div>
+            {pulse.loading ? (
+              <div className="srow-skel">{[0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 36 }} />)}</div>
+            ) : earningsAhead.length === 0 ? (
+              <div className="panel-empty">No report expected in the next ~10 weeks (needs three past reports to estimate).</div>
             ) : (
               <div className="mini-list">
-                {latestFilings.map((f) => (
-                  <button key={f.accession_number} className="mini-row" onClick={() => onCompany(f.cik)} title={`${f.company_name ?? ""} · ${fmtDate(f.filed_at)}`}>
-                    <FormBadge form={f.form_type} />
-                    <span className="mini-tkr">{f.ticker}</span>
-                    <span className="mini-name">{f.company_name}</span>
-                    <span className="mini-age">{isNew?.(f.filed_at) && <span className="new-dot">NEW</span>}{elapsed(f.filed_at) || fmtDate(f.filed_at)}</span>
+                {earningsAhead.map((e) => (
+                  <button key={e.cik} className="mini-row ahead-row" onClick={() => onCompany(e.cik)} title={`${e.name} · estimated ${fmtDate(e.estDate)}`}>
+                    <span className={`ahead-days${e.daysAway < 0 ? " overdue" : e.daysAway <= 7 ? " soon" : ""}`}>
+                      {e.daysAway < 0 ? "due" : e.daysAway === 0 ? "today" : `${e.daysAway}d`}
+                    </span>
+                    <span className="mini-tkr">{e.ticker}</span>
+                    <span className="mini-name">{e.name}</span>
+                    <span className="mini-age">~{fmtDate(e.estDate)}</span>
                   </button>
                 ))}
               </div>
             )}
           </Panel>
-        </aside>
+          <MomentumPanel companies={companies} tech={techRows} onCompany={onCompany} limit={5} />
+        </div>
       </div>
+
+      {/* The full watchlist */}
+      <Panel title="Watchlist" count={companies.length} flush>
+        <DataTable
+          columns={cols} rows={companies} rowKey={(c) => c.cik}
+          onRowClick={(c) => openFromPeek(c.cik)}
+          onRowEnter={(c, el, now) => pk.enter(c.cik, el, now)} onRowLeave={pk.leave}
+          initialSort={{ key: "ticker", dir: "asc" }}
+          filterable filterPlaceholder="Filter by ticker, name or industry…"
+          empty="No companies." flush dense
+        />
+      </Panel>
+
+      <div className="dash-row2">
+        {volumeData.length > 1 && (
+          <Panel title="Filing volume" sub="Per month, by form type">
+            <StackedBarChart
+              data={volumeData}
+              keys={formTypes.map((ft) => ({ key: ft, name: ft }))}
+              title=""
+            />
+          </Panel>
+        )}
+        <Panel
+          title="Latest filings" flush
+          actions={<PanelLink onClick={() => onNavigate?.("feed")} title="Open the full filings feed">View all <Icon name="arrow-right" size={12} /></PanelLink>}
+        >
+          {latestFilings.length === 0 ? (
+            <div className="panel-empty">No filings yet for your watchlist.</div>
+          ) : (
+            <div className="mini-list">
+              {latestFilings.map((f) => (
+                <button key={f.accession_number} className="mini-row" onClick={() => onCompany(f.cik)} title={`${f.company_name ?? ""} · ${fmtDate(f.filed_at)}`}>
+                  <FormBadge form={f.form_type} />
+                  <span className="mini-tkr">{f.ticker}</span>
+                  <span className="mini-name">{f.company_name}</span>
+                  <span className="mini-age">{isNew?.(f.filed_at) && <span className="new-dot">NEW</span>}{elapsed(f.filed_at) || fmtDate(f.filed_at)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </Panel>
+      </div>
+
+      {cgPeek.peek && cgPeekRow && (
+        <CongressPeek
+          row={cgPeekRow} windowDays={90} top={cgPeek.peek.top} left={cgPeek.peek.left}
+          onMouseEnter={cgPeek.hold} onMouseLeave={cgPeek.leave}
+          onDrill={() => { cgPeek.close(); onNavigate?.("congress"); }}
+          onTrack={onTrack ? (t) => { cgPeek.close(); onTrack(t); } : undefined}
+          cik={watchedByTicker.get(cgPeekRow.ticker)} onOpen={(cik) => { cgPeek.close(); onCompany(cik); }}
+        />
+      )}
+      {pk.peek && peekCompany && (
+        <CompanyPeek
+          company={peekCompany} summary={summaryMap.get(peekCompany.cik)}
+          filings30={cnt30.get(peekCompany.cik) ?? 0}
+          pending={false}
+          top={pk.peek.top} left={pk.peek.left}
+          onOpen={openFromPeek} onMouseEnter={pk.hold} onMouseLeave={pk.leave}
+        />
+      )}
     </div>
   );
 }

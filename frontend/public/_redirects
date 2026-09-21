@@ -1,0 +1,16 @@
+# Cloudflare Pages: the app is a single static page with client-side path routing.
+# Serve index.html (200 rewrite) for every app route so deep links and reloads work.
+# Rules are explicit (not /*) so static assets are never touched.
+/feed        /index.html  200
+/news        /index.html  200
+/calendar    /index.html  200
+/search      /index.html  200
+/trends      /index.html  200
+/managers    /index.html  200
+/options     /index.html  200
+/ipos        /index.html  200
+/congress    /index.html  200
+/reddit      /index.html  200
+/cot         /index.html  200
+/guide       /index.html  200
+/company/*   /index.html  200

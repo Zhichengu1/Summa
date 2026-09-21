@@ -4,15 +4,11 @@
 // styling as the global News view; searchable within the company.
 import { useMemo, useState } from "react";
 
+import { SearchField } from "../../components/SearchField";
 import { safeHref } from "../../lib/utils/url";
 import { fmtDate, elapsed } from "../../lib/utils/format";
 import type { CompanyAux } from "./companyAux";
 
-const CAT_EMOJI: Record<string, string> = {
-  Fed: "🏦", Macro: "🏛️", "M&A": "💼", Investment: "💡", FDA: "💊", Legal: "⚖️",
-  Earnings: "📊", Distress: "🚨", Capital: "💰", Exec: "👔", Analyst: "⭐",
-  Product: "🚀", Move: "📉", News: "📰",
-};
 const IMPORTANT_MIN = 4;  // "important" = Minor+ catalyst tier (below is generic/latest)
 
 export function NewsTab({ aux, ticker }: { aux: CompanyAux; ticker: string }) {
@@ -48,13 +44,8 @@ export function NewsTab({ aux, ticker }: { aux: CompanyAux; ticker: string }) {
           className={`chip${importantOnly ? " active" : ""}`}
           title="Show only trader-important headlines (earnings, M&A, analyst, FDA, legal…)"
           onClick={() => setImportantOnly((v) => !v)}
-        >★ Important only</button>
-        <input
-          className="dt-filter"
-          style={{ borderRadius: 5, width: 220 }}
-          placeholder={`Search ${ticker} news…`} value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
+        >Important only</button>
+        <SearchField value={q} onChange={setQ} placeholder={`Search ${ticker} news…`} width={220} />
         <span className="dimmed" style={{ fontSize: 11 }}>{displayed.length} of {news.length} headlines</span>
       </div>
 
@@ -67,7 +58,7 @@ export function NewsTab({ aux, ticker }: { aux: CompanyAux; ticker: string }) {
               <div className="news-body">
                 {n.category && n.category !== "News" && (n.importance ?? 0) > 0 && (
                   <div className="news-tags">
-                    <span className="news-cat">{CAT_EMOJI[n.category] ?? "📰"} {n.category}</span>
+                    <span className="news-cat">{n.category}</span>
                   </div>
                 )}
                 {href ? (

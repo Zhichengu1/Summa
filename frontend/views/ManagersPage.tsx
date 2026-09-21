@@ -34,7 +34,7 @@ function FilingLink({ accession, filedAt }: { accession: string | null; filedAt?
   return (
     <a className="mgr-file" href={href} target="_blank" rel="noopener noreferrer"
        onClick={(e) => e.stopPropagation()} title="Cross-check this 13F on 13f.info">
-      📄 {accession}{filedAt ? ` · filed ${fmtDate(filedAt)}` : ""} · 13f.info ↗
+      {accession}{filedAt ? ` · filed ${fmtDate(filedAt)}` : ""} · 13f.info
     </a>
   );
 }
@@ -497,7 +497,7 @@ export function ManagersPage({
         <p className="muted" style={{ marginTop: 4 }}>
           {tab === "investors"
             ? <>The largest institutional investors and what they bought or sold last quarter (Form 13F-HR). Click an investor to compare its latest 13F against the prior one — new buys, added, trimmed, and sold-out positions.</>
-            : <>Stocks held in common across the tracked institutions — the consensus / crowded names. Switch to <strong>✦ Emerging / hidden</strong> for the under-the-radar names that just crossed into consensus (not the giants everyone owns), or pick two or more investors below to see only what they <em>all</em> hold.</>}
+            : <>Stocks held in common across the tracked institutions — the consensus / crowded names. Switch to <strong>Emerging / hidden</strong> for the under-the-radar names that just crossed into consensus (not the giants everyone owns), or pick two or more investors below to see only what they <em>all</em> hold.</>}
         </p>
       </div>
 
@@ -533,7 +533,7 @@ export function ManagersPage({
                   className={`chip${compareSet.has(m.managerCik) ? " active" : ""}`}
                   onClick={() => toggleCompare(m.managerCik)}
                 >
-                  {compareSet.has(m.managerCik) ? "✓ " : ""}{m.name}
+                  {m.name}
                 </button>
               ))}
             </div>
@@ -547,7 +547,7 @@ export function ManagersPage({
               ))}
               <span style={{ flex: "0 0 14px" }} />
               <button className={`chip${overlapMode === "all" ? " active" : ""}`} onClick={() => setOverlapMode("all")}>All consensus</button>
-              <button className={`chip${overlapMode === "emerging" ? " active" : ""}`} onClick={() => setOverlapMode("emerging")}>✦ Emerging / hidden</button>
+              <button className={`chip${overlapMode === "emerging" ? " active" : ""}`} onClick={() => setOverlapMode("emerging")}>Emerging / hidden</button>
             </div>
           )}
 

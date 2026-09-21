@@ -19,7 +19,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
+import { ViewSkeleton } from "../components/Skeletons";
 import { CompanyMark } from "../components/badges/CompanyMark";
+import { Icon } from "../components/Icon";
 import { fetchCompanySummaries, fetchOptionsSnapshots, fetchRecentEarnings } from "../lib/data/data";
 import { nextEarningsEstimate } from "../lib/domain/catalysts";
 import {
@@ -203,7 +205,7 @@ function TradeSection({ idea }: { idea: OptionsIdea }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 8 }}>
-        🎯 The trade — {idea.structure.label.toLowerCase()}
+        The trade — {idea.structure.label.toLowerCase()}
       </div>
 
       {/* Headline pick: the spread when premium is rich, otherwise the single contract. */}
@@ -338,7 +340,7 @@ function DetailPanel({ idea, onClose, onOpenCompany }: {
         <span className="muted" style={{ fontSize: 12 }}>
           snapshot {fmtDate(idea.date, { utc: true })} · CBOE delayed
         </span>
-        <button className="chip active" style={{ marginLeft: "auto" }} onClick={onClose}>✕ close</button>
+        <button className="chip active" style={{ marginLeft: "auto" }} onClick={onClose}>Close</button>
       </div>
 
       <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--fg-1)", marginBottom: 12 }}>
@@ -359,7 +361,7 @@ function DetailPanel({ idea, onClose, onOpenCompany }: {
 
       {idea.warnings.length > 0 && (
         <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>⚠️ Before you trade this</div>
+          <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>Before you trade this</div>
           <div style={{ display: "grid", gap: 5 }}>
             {idea.warnings.map((w) => (
               <div key={w} style={{ fontSize: 12.5, lineHeight: 1.5, color: "var(--fg-2)" }}>• {w}</div>
@@ -371,7 +373,7 @@ function DetailPanel({ idea, onClose, onOpenCompany }: {
       {idea.unusual.length > 0 && (
         <div>
           <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>
-            🔥 Unusual contracts — volume far above open interest
+            Unusual contracts — volume far above open interest
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -580,8 +582,8 @@ export function OptionsPage({ onCompany }: { onCompany?: (cik: string) => void }
       value: (i) => i.unusual.length,
       render: (i) => (
         <span style={{ fontSize: 12, whiteSpace: "nowrap" }}>
-          {i.unusual.length > 0 && <span title={`${i.unusual.length} contracts traded far above their open interest today`}>🔥</span>}
-          {i.warnings.length > 0 && <span title={`${i.warnings.length} caveats — open the row`}> ⚠️</span>}
+          {i.unusual.length > 0 && <span className="row-flag flag-hot" title={`${i.unusual.length} contracts traded far above their open interest today`}><Icon name="flame" size={12} /></span>}
+          {i.warnings.length > 0 && <span className="row-flag flag-warn" title={`${i.warnings.length} caveats — open the row`}><Icon name="alert" size={12} /></span>}
         </span>
       ),
     },
@@ -589,10 +591,7 @@ export function OptionsPage({ onCompany }: { onCompany?: (cik: string) => void }
 
   if (loading) {
     return (
-      <div className="page-head">
-        <h1 className="page-title">Options Radar</h1>
-        <p className="empty-note">Loading…</p>
-      </div>
+      <ViewSkeleton title="Options Radar" />
     );
   }
 

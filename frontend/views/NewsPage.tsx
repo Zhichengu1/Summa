@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { CompanyMark } from "../components/badges/CompanyMark";
+import { SearchField } from "../components/SearchField";
 import { fetchMarketNews, subscribeMarketNews } from "../lib/data/data";
 import { safeHref } from "../lib/utils/url";
 import { fmtDate, elapsed } from "../lib/utils/format";
@@ -15,12 +16,6 @@ import type { NewsItem, MarketNews } from "../lib/types";
 
 type Scope = "top" | "watchlist";
 
-// Category → emoji chip (mirrors backend news_score.py CATEGORY_EMOJI).
-const CAT_EMOJI: Record<string, string> = {
-  Fed: "🏦", Macro: "🏛️", "M&A": "💼", Investment: "💡", FDA: "💊", Legal: "⚖️",
-  Earnings: "📊", Distress: "🚨", Capital: "💰", Exec: "👔", Analyst: "⭐",
-  Product: "🚀", Move: "📉", News: "📰",
-};
 // "Important" = a real catalyst (Minor tier and up); below this is generic/latest news.
 const IMPORTANT_MIN = 4;
 
@@ -138,18 +133,13 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
 
       <div className="toggle-row">
         <button className={`chip${scope === "top" ? " active" : ""}`} onClick={() => setScope("top")}>
-          🔥 Top Intelligence
+          Top Intelligence
         </button>
         <button className={`chip${scope === "watchlist" ? " active" : ""}`} onClick={() => setScope("watchlist")}>
-          ★ Watchlist
+          Watchlist
         </button>
         <span className="chip-sep">|</span>
-        <input
-          className="dt-filter"
-          style={{ borderRadius: 5, width: 220 }}
-          placeholder="Search…" value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
+        <SearchField value={q} onChange={setQ} placeholder="Search headlines…" width={220} />
         <span className="chip-sep">|</span>
         {AGE_CHOICES.map((c) => (
           <button
@@ -165,7 +155,7 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
               className={`chip${importantOnly ? " active" : ""}`}
               title="Show only trader-important headlines (earnings, M&A, analyst, FDA, legal…)"
               onClick={() => setImportantOnly((v) => !v)}
-            >★ Important only</button>
+            >Important only</button>
             <span className="chip-sep">|</span>
             <button className={`chip${tickerFilter === null ? " active" : ""}`} onClick={() => setTickerFilter(null)}>All</button>
             {tickers.map((t) => (
@@ -191,12 +181,11 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
             {marketShown.map((n) => {
               const href = safeHref(n.link);
               const title = n.title ?? "(untitled)";
-              const emoji = CAT_EMOJI[n.category ?? "News"] ?? "📰";
               return (
                 <article key={n.guid} className="news-card">
                   <div className="news-body">
                     <div className="news-tags">
-                      <span className="news-cat">{emoji} {n.category ?? "News"}</span>
+                      <span className="news-cat">{n.category ?? "News"}</span>
                       {n.source && <span className="news-srcbadge">{n.source}</span>}
                     </div>
                     {href ? (
@@ -239,7 +228,7 @@ export function NewsPage({ news, onCompany }: { news: NewsItem[]; onCompany: (ci
                     <div className="news-body">
                       {n.category && n.category !== "News" && (n.importance ?? 0) > 0 && (
                         <div className="news-tags">
-                          <span className="news-cat">{CAT_EMOJI[n.category] ?? "📰"} {n.category}</span>
+                          <span className="news-cat">{n.category}</span>
                         </div>
                       )}
                       {href ? (

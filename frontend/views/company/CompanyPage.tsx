@@ -2,10 +2,12 @@
 // CompanyPage — the per-company shell: header, queued-state banner, the tab bar,
 // and the active tab. Fetches the per-company facts + the shared CompanyAux bundle
 // ONCE here and passes them down, so switching tabs never refetches the same rows.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 
 import { CompanyMark } from "../../components/badges/CompanyMark";
+import { Icon } from "../../components/Icon";
+import { TabSkeleton } from "../../components/Skeletons";
 import {
   fetchFinancialFacts, fetchFilingsForCik, fetchEarningsEvents, fetchCorporateEvents,
   fetchInsiderTransactions, fetchInstitutionalHoldings, fetchBeneficialOwnership,
@@ -19,7 +21,7 @@ import { type CompanyAux, EMPTY_AUX } from "./companyAux";
 // company opens). The other six tabs — several are large and pull in lazy charts —
 // are code-split and fetched only when their tab is selected.
 import { CompanyOverviewTab } from "./CompanyOverviewTab";
-const tabLoading = () => <div style={{ padding: 24, color: "var(--fg-4)" }}>Loading…</div>;
+const tabLoading = () => <TabSkeleton />;
 const StrategyTab = dynamic(() => import("./StrategyTab").then((m) => ({ default: m.StrategyTab })), { ssr: false, loading: tabLoading });
 const FundamentalsTab = dynamic(() => import("./FundamentalsTab").then((m) => ({ default: m.FundamentalsTab })), { ssr: false, loading: tabLoading });
 const PeersTab = dynamic(() => import("./PeersTab").then((m) => ({ default: m.PeersTab })), { ssr: false, loading: tabLoading });
@@ -27,6 +29,17 @@ const OwnershipTab = dynamic(() => import("./OwnershipTab").then((m) => ({ defau
 const CatalystsTab = dynamic(() => import("./CatalystsTab").then((m) => ({ default: m.CatalystsTab })), { ssr: false, loading: tabLoading });
 const FilingsTab = dynamic(() => import("./FilingsTab").then((m) => ({ default: m.FilingsTab })), { ssr: false, loading: tabLoading });
 const NewsTab = dynamic(() => import("./NewsTab").then((m) => ({ default: m.NewsTab })), { ssr: false, loading: tabLoading });
+
+// Hovering a tab warms its chunk so the switch is instant (imports are cached).
+const TAB_PRELOAD: Partial<Record<CompanyTab, () => Promise<unknown>>> = {
+  strategy: () => import("./StrategyTab"),
+  fundamentals: () => import("./FundamentalsTab"),
+  peers: () => import("./PeersTab"),
+  ownership: () => import("./OwnershipTab"),
+  catalysts: () => import("./CatalystsTab"),
+  filings: () => import("./FilingsTab"),
+  news: () => import("./NewsTab"),
+};
 
 export function CompanyPage({
   cik, tab, companies, onTab, pending = false, onBack,
@@ -53,6 +66,13 @@ export function CompanyPage({
       setAux({ filings, earnings, events, insider, holdings, beneficial, offers, lateF, prices, proposed, news, loading: false });
     });
   }, [cik]);
+
+  // Keep the active tab in view when the segmented control overflows (narrow viewports).
+  const tabsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = tabsRef.current?.querySelector<HTMLElement>('[aria-selected="true"]');
+    el?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [tab]);
 
   const ticker = company?.ticker ?? "?";
   const name = company?.name ?? cik;
@@ -84,9 +104,12 @@ export function CompanyPage({
 
   return (
     <div>
+      {/* Sticky profile header: identity + price on top, the section tabs beneath —
+          both stay pinned while a long tab scrolls. */}
+      <div className="company-head">
       <div className="company-hero">
         {onBack && (
-          <button className="hero-back" onClick={onBack} title="Back to the overview" aria-label="Back to the overview">←</button>
+          <button className="hero-back" onClick={onBack} title="Back to the dashboard" aria-label="Back to the dashboard"><Icon name="arrow-left" size={15} /></button>
         )}
         <CompanyMark ticker={ticker} size={40} />
         <div style={{ minWidth: 0 }}>
@@ -109,34 +132,40 @@ export function CompanyPage({
           </div>
         )}
       </div>
-
-      {pending && (
-        <div className="pending-banner">
-          <strong>⏳ Queued for ingestion.</strong> This company was added to your watchlist and
-          will be pulled on the next pipeline run. Its data appears here once the backend ingests it.
-        </div>
-      )}
-
-      <div className="tabs" role="tablist" aria-label="Company sections">
+      <div className="tabs" role="tablist" aria-label="Company sections" ref={tabsRef}>
         {TABS.map((t) => (
           <button
             key={t.key} role="tab" aria-selected={tab === t.key} title={t.desc}
             className={`tab${tab === t.key ? " active" : ""}`} onClick={() => onTab(t.key)}
+            onMouseEnter={() => void TAB_PRELOAD[t.key]?.()} onFocus={() => void TAB_PRELOAD[t.key]?.()}
           >
             {t.label}
           </button>
         ))}
       </div>
+      </div>
+
+      {pending && (
+        <div className="pending-banner">
+          <strong>Queued for ingestion.</strong> This company was added to your watchlist and
+          will be pulled on the next pipeline run. Its data appears here once the backend ingests it.
+        </div>
+      )}
+
       <div className="tab-desc">{TABS.find((t) => t.key === tab)?.desc}</div>
 
-      {tab === "overview"     && <CompanyOverviewTab facts={facts} loading={loadingFacts} aux={aux} />}
-      {tab === "strategy"     && <StrategyTab cik={cik} ticker={ticker} facts={facts} loading={loadingFacts} />}
-      {tab === "fundamentals" && <FundamentalsTab facts={facts} loading={loadingFacts} />}
-      {tab === "peers"        && <PeersTab cik={cik} peers={companies} />}
-      {tab === "ownership"    && <OwnershipTab aux={aux} />}
-      {tab === "catalysts"    && <CatalystsTab aux={aux} />}
-      {tab === "filings"      && <FilingsTab aux={aux} />}
-      {tab === "news"         && <NewsTab aux={aux} ticker={ticker} />}
+      {/* Keyed so each tab switch gets a short fade-in; the shell above (and its
+          fetched data) stays mounted, so nothing is refetched. */}
+      <div key={tab} className="tab-panel" role="tabpanel">
+        {tab === "overview"     && <CompanyOverviewTab facts={facts} loading={loadingFacts} aux={aux} />}
+        {tab === "strategy"     && <StrategyTab cik={cik} ticker={ticker} facts={facts} loading={loadingFacts} />}
+        {tab === "fundamentals" && <FundamentalsTab facts={facts} loading={loadingFacts} />}
+        {tab === "peers"        && <PeersTab cik={cik} peers={companies} />}
+        {tab === "ownership"    && <OwnershipTab aux={aux} />}
+        {tab === "catalysts"    && <CatalystsTab aux={aux} />}
+        {tab === "filings"      && <FilingsTab aux={aux} />}
+        {tab === "news"         && <NewsTab aux={aux} ticker={ticker} />}
+      </div>
     </div>
   );
 }
