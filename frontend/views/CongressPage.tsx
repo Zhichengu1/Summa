@@ -1,7 +1,10 @@
 "use client";
 // Congress Trades — STOCK-Act disclosure tracker over `congress_trades`
 // (normalized House PTR + Senate eFD filings, refreshed ~daily by
-// summa-congress.yml). The headline read is CONSENSUS: stocks that three or
+// summa-congress.yml). The page opens with the TRACKER: the stocks the most
+// distinct members bought in the window, with momentum vs the previous window
+// and a one-click "Track" that adds the name to the watchlist (shared with the
+// dashboard panel via lib/domain/congress.ts). Below it, CONSENSUS: stocks that three or
 // more distinct members bought — or sold — inside the selected window (default
 // the latest 30 days), ranked by how many filers piled in, freshest first
 // within a count. A totals strip above the panels sums the window's whole
@@ -12,7 +15,14 @@
 // through to their company page.
 import { useEffect, useMemo, useState } from "react";
 
+import { CongressBuysList } from "../components/CongressBuysList";
+import { CongressPeek } from "../components/CongressPeek";
 import { DataTable, type Column } from "../components/DataTable";
+import { Icon } from "../components/Icon";
+import { Panel } from "../components/Panel";
+import { mostBought, type MostBought } from "../lib/domain/congress";
+import { usePeek } from "../lib/hooks/usePeek";
+import { ViewSkeleton } from "../components/Skeletons";
 import { fetchCongressTrades } from "../lib/data/data";
 import { fmtUSD, fmtDate, fmtDelta } from "../lib/utils/format";
 import { safeHref } from "../lib/utils/url";
@@ -79,19 +89,22 @@ function MembersCell({ members }: { members: Member[] }) {
   );
 }
 
-export function CongressPage({ companies, onCompany }: {
+export function CongressPage({ companies, onCompany, onTrack }: {
   companies: Company[];
   onCompany: (cik: string) => void;
+  /** Add a ticker to the watchlist (resolved to a CIK by the root shell). */
+  onTrack?: (ticker: string) => void;
 }) {
   const [rows, setRows] = useState<CongressTrade[]>([]);
   const [loading, setLoading] = useState(true);
-  const [windowDays, setWindowDays] = useState<number>(30);
+  const [windowDays, setWindowDays] = useState<number>(90);   // 90d: enough disclosures to rank; 30d is too sparse
   const [minFilers, setMinFilers] = useState<number>(3);
   // Drill-down: a consensus row click narrows the tape to that ticker.
   const [detailTicker, setDetailTicker] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchCongressTrades().then((r) => { setRows(r); setLoading(false); });
+    // 180 days: the widest window (90d) plus its previous window for momentum.
+    fetchCongressTrades(180).then((r) => { setRows(r); setLoading(false); });
   }, []);
 
   // Watchlist ticker → cik, for stars + click-through to the company page.
@@ -100,6 +113,17 @@ export function CongressPage({ companies, onCompany }: {
     for (const c of companies) if (c.ticker) m.set(c.ticker.toUpperCase(), c.cik);
     return m;
   }, [companies]);
+
+  // The tracker: most distinct buyers in the window, with the prior window for momentum.
+  const leaders = useMemo(() => mostBought(rows, windowDays, 12), [rows, windowDays]);
+  // Every ticker (not just the top 12) so any row on the page can peek at its people.
+  const peopleByTicker = useMemo(() => new Map(mostBought(rows, windowDays, Infinity).map((r) => [r.ticker, r])), [rows, windowDays]);
+  const pk = usePeek({ side: "right", width: 372, height: 560 });
+  const [peekSide, setPeekSide] = useState<"buy" | "sell">("buy");
+  const peekRow: MostBought | null = pk.peek ? peopleByTicker.get(pk.peek.cik) ?? null : null;
+  const peekEnter = (ticker: string, el: HTMLElement, now: boolean, at?: { x: number; y: number }, side: "buy" | "sell" = "buy") => {
+    setPeekSide(side); pk.enter(ticker, el, now, at);
+  };
 
   const inWindow = useMemo(() => {
     const cutoff = new Date(Date.now() - windowDays * 86_400_000).toISOString().slice(0, 10);
@@ -170,10 +194,9 @@ export function CongressPage({ companies, onCompany }: {
       render: (r) => (
         <span style={{ color: "var(--accent)", fontWeight: 700, whiteSpace: "nowrap" }}>
           {r.ticker}
-          {watchByTicker.has(r.ticker) && <span title="On your watchlist" style={{ marginLeft: 4 }}>⭐</span>}
+          {watchByTicker.has(r.ticker) && <span className="row-flag flag-watch" title="On your watchlist"><Icon name="star" size={11} /></span>}
           {r.otherSide > 0 && (
-            <span title={`Contested: ${r.otherSide} member${r.otherSide > 1 ? "s" : ""} on the other side in the same window`}
-              style={{ marginLeft: 4 }}>⚖️</span>
+            <span className="row-flag flag-warn" title={`Contested: ${r.otherSide} member${r.otherSide > 1 ? "s" : ""} on the other side in the same window`}><Icon name="congress" size={12} /></span>
           )}
         </span>
       ) },
@@ -220,7 +243,7 @@ export function CongressPage({ companies, onCompany }: {
     { key: "ticker", header: "Ticker", width: "90px", value: (r) => r.ticker,
       render: (r) => (
         <span style={{ color: "var(--accent)", fontWeight: 700 }}>
-          {r.ticker}{watchByTicker.has(r.ticker) && <span title="On your watchlist" style={{ marginLeft: 4 }}>⭐</span>}
+          {r.ticker}{watchByTicker.has(r.ticker) && <span className="row-flag flag-watch" title="On your watchlist"><Icon name="star" size={11} /></span>}
         </span>
       ) },
     { key: "side", header: "Side", width: "72px", value: (r) => r.side,
@@ -240,7 +263,7 @@ export function CongressPage({ companies, onCompany }: {
       render: (r) => (
         <span className="muted" style={{ whiteSpace: "nowrap" }}>
           {fmtDate(r.filing_date, { utc: true })}
-          {r.is_late && <span title="Filed past the 45-day STOCK-Act deadline" style={{ marginLeft: 4 }}>⚠️</span>}
+          {r.is_late && <span className="row-flag flag-warn" title="Filed past the 45-day STOCK-Act deadline"><Icon name="alert" size={12} /></span>}
         </span>
       ) },
     { key: "doc", header: "Doc", width: "56px", value: () => null,
@@ -255,10 +278,7 @@ export function CongressPage({ companies, onCompany }: {
 
   if (loading) {
     return (
-      <div className="page-head">
-        <h1 className="page-title">Congress Trades</h1>
-        <p className="empty-note">Loading…</p>
-      </div>
+      <ViewSkeleton title="Congress Trades" />
     );
   }
 
@@ -293,7 +313,22 @@ export function CongressPage({ companies, onCompany }: {
         ))}
       </div>
 
-      <div className="kpi-strip dense" style={{ marginBottom: 16 }}>
+      <Panel
+        title="Most bought by Congress" count={leaders.length} flush className="cg-panel"
+        sub={`Distinct members buying · last ${windowDays}d · bar ghost = previous ${windowDays}d · click a row for its trades`}
+      >
+        {leaders.length === 0 ? (
+          <div className="panel-empty">{rows.length === 0 ? emptyNote : `No disclosed buys in the last ${windowDays} days.`}</div>
+        ) : (
+          <CongressBuysList
+            rows={leaders} watchedCiks={watchByTicker}
+            onOpen={(cik) => { pk.close(); onCompany(cik); }} onTrack={onTrack} onDrill={(t) => { pk.close(); setDetailTicker(t); }} primary="drill"
+            onRowEnter={(r, el, now, at) => peekEnter(r.ticker, el, now, at)} onRowLeave={pk.leave}
+          />
+        )}
+      </Panel>
+
+      <div className="kpi-strip dense" style={{ marginBottom: 16, marginTop: 16 }}>
         {(["buy", "sell"] as const).map((side) => {
           const t = totals[side];
           const buySide = side === "buy";
@@ -323,7 +358,8 @@ export function CongressPage({ companies, onCompany }: {
             columns={consensusCols("buy")} rows={buys} rowKey={(r) => r.ticker}
             initialSort={{ key: "count", dir: "desc" }}
             empty={emptyNote} maxHeight="340px"
-            onRowClick={(r) => setDetailTicker(r.ticker)}
+            onRowClick={(r) => { pk.close(); setDetailTicker(r.ticker); }}
+            onRowEnter={(r, el, now) => peekEnter(r.ticker, el, now, undefined, "buy")} onRowLeave={pk.leave}
           />
         </div>
         <div>
@@ -334,7 +370,8 @@ export function CongressPage({ companies, onCompany }: {
             columns={consensusCols("sell")} rows={sells} rowKey={(r) => r.ticker}
             initialSort={{ key: "count", dir: "desc" }}
             empty={emptyNote} maxHeight="340px"
-            onRowClick={(r) => setDetailTicker(r.ticker)}
+            onRowClick={(r) => { pk.close(); setDetailTicker(r.ticker); }}
+            onRowEnter={(r, el, now) => peekEnter(r.ticker, el, now, undefined, "sell")} onRowLeave={pk.leave}
           />
         </div>
       </div>
@@ -346,7 +383,7 @@ export function CongressPage({ companies, onCompany }: {
         {detailTicker && (
           <button className="chip active" onClick={() => setDetailTicker(null)}
             title="Clear the ticker drill-down and show every trade in the window">
-            ✕ show all
+            Show all
           </button>
         )}
       </div>
@@ -358,6 +395,16 @@ export function CongressPage({ companies, onCompany }: {
         maxHeight="calc(100vh - 320px)"
         onRowClick={(r) => { const cik = watchByTicker.get(r.ticker); if (cik) onCompany(cik); }}
       />
+
+      {pk.peek && peekRow && (
+        <CongressPeek
+          row={peekRow} windowDays={windowDays} side={peekSide} top={pk.peek.top} left={pk.peek.left}
+          onMouseEnter={pk.hold} onMouseLeave={pk.leave}
+          onDrill={(t) => { pk.close(); setDetailTicker(t); }}
+          onTrack={onTrack ? (t) => { pk.close(); onTrack(t); } : undefined}
+          cik={watchByTicker.get(peekRow.ticker)} onOpen={(cik) => { pk.close(); onCompany(cik); }}
+        />
+      )}
     </div>
   );
 }

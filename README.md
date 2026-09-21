@@ -66,7 +66,7 @@ changes.
 
 ### 3. The dashboard (Next.js 14 static export)
 
-Read-only over Supabase (anon key, RLS-enforced), hash-routed, client-side sort/filter/charts:
+Read-only over Supabase (anon key, RLS-enforced), path-routed single page (`/feed`, `/company/<cik>/<tab>`), client-side sort/filter/charts:
 
 - **Overview** — watchlist table driven by the `company_summary` precompute, momentum scanner,
   and a cross-watchlist **Live Signals** scanner (insider clusters, earnings, events, activist

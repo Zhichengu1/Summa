@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
+import { ViewSkeleton } from "../components/Skeletons";
 import { Sparkline } from "../components/charts/Sparkline";
 import { HorizontalBarChart, MultiLineChart } from "../components/charts/charts.lazy";
 import { fetchThemeTrends } from "../lib/data/data";
@@ -136,7 +137,7 @@ function DetailPanel({ t, onClose, onCompany }: {
         <span style={{ fontWeight: 700, fontSize: 15 }}>{t.label}</span>
         <StageBadge stage={t.stage} />
         <span className="muted" style={{ fontSize: 12 }}>{t.categoryLabel} · {t.quarter}</span>
-        <button className="chip active" style={{ marginLeft: "auto" }} onClick={onClose}>✕ close</button>
+        <button className="chip active" style={{ marginLeft: "auto" }} onClick={onClose}>Close</button>
       </div>
       <div style={{ fontSize: 13, color: "var(--fg-2)", marginBottom: 12, maxWidth: 760, lineHeight: 1.55 }}>{t.summary}</div>
 
@@ -249,10 +250,7 @@ export function TrendsPage({ onCompany }: { onCompany: (cik: string) => void }) 
 
   if (loading) {
     return (
-      <div className="page-head">
-        <h1 className="page-title">Trends</h1>
-        <p className="empty-note">Loading…</p>
-      </div>
+      <ViewSkeleton title="Trends" />
     );
   }
 
@@ -324,7 +322,7 @@ export function TrendsPage({ onCompany }: { onCompany: (cik: string) => void }) 
 
       {pick && (
         <div style={{ background: "var(--bg-1)", border: "1px solid var(--border-1)", borderRadius: 10, padding: "12px 16px", marginBottom: 16 }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>🌱 Next trend</div>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Next trend</div>
           <div style={{ fontSize: 12.5, lineHeight: 1.55, color: "var(--fg-2)" }}>
             <span onClick={() => setDetailKey(pick.key)}
               style={{ color: "var(--accent)", fontWeight: 700, cursor: "pointer", marginRight: 6 }}

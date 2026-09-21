@@ -2,15 +2,18 @@
 // Reddit Buzz — the daily most-discussed-stocks leaderboard from the big
 // investing subreddits (reddit_trends: ApeWisdom ranks + Tradestie WSB
 // sentiment, one snapshot per UTC day, ~30-day window). GLOBAL market chatter,
-// not watchlist-scoped — watchlist tickers get a ⭐ and click through to their
+// not watchlist-scoped — watchlist tickers get a star and click through to their
 // company page. A day-chip row flips between stored snapshots, and each ticker
 // gets a mentions sparkline across the fetched window so a one-day spike reads
 // differently from sustained chatter. Rows carry the ingest's persisted price
-// context, so 💎 "value picks" — trending names deep below their 52-week high —
+// context, so "value picks" — trending names deep below their 52-week high —
 // are highlighted inline and filterable (mirrors the backend Discord screen).
 import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
+import { Icon } from "../components/Icon";
+import { SearchField } from "../components/SearchField";
+import { ViewSkeleton } from "../components/Skeletons";
 import { Sparkline } from "../components/charts/Sparkline";
 import { fetchRedditTrends } from "../lib/data/data";
 import { fmtNum, fmtDate } from "../lib/utils/format";
@@ -127,10 +130,9 @@ export function RedditPage({ companies, onCompany }: {
       render: (r) => (
         <span style={{ color: "var(--accent)", fontWeight: 700, whiteSpace: "nowrap" }}>
           {r.ticker}{watchByTicker.has(r.ticker) && (
-            <span title="On your watchlist" style={{ marginLeft: 4 }}>⭐</span>
+            <span className="row-flag flag-watch" title="On your watchlist"><Icon name="star" size={11} /></span>
           )}{isValuePick(r) && (
-            <span title={`Value pick: trending at the bottom of its 52-week range (${fmtNum(Math.abs(r.off_high_pct ?? 0), 0)}% below the high${r.off_low_pct != null ? `, ${fmtNum(r.off_low_pct, 0)}% above the low` : ""})`}
-              style={{ marginLeft: 4 }}>💎</span>
+            <span className="row-flag flag-gem" title={`Value pick: trending at the bottom of its 52-week range (${fmtNum(Math.abs(r.off_high_pct ?? 0), 0)}% below the high${r.off_low_pct != null ? `, ${fmtNum(r.off_low_pct, 0)}% above the low` : ""})`}><Icon name="gem" size={12} /></span>
           )}
         </span>
       ) },
@@ -194,10 +196,7 @@ export function RedditPage({ companies, onCompany }: {
 
   if (loading) {
     return (
-      <div className="page-head">
-        <h1 className="page-title">Reddit Buzz</h1>
-        <p className="empty-note">Loading…</p>
-      </div>
+      <ViewSkeleton title="Reddit Buzz" />
     );
   }
 
@@ -212,12 +211,7 @@ export function RedditPage({ companies, onCompany }: {
         </div>
       </div>
       <div className="toggle-row">
-        <input
-          className="dt-filter"
-          style={{ borderRadius: 5, width: 200 }}
-          placeholder="Search ticker or company…" value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
+        <SearchField value={q} onChange={setQ} placeholder="Search ticker or company…" width={220} />
         {days.slice(0, 7).map((d) => (
           <button key={d} className={`chip${activeDay === d ? " active" : ""}`} onClick={() => setDay(d)}>
             {d === days[0] ? "Latest" : fmtDate(d, { utc: true })}
@@ -226,12 +220,12 @@ export function RedditPage({ companies, onCompany }: {
         <span style={{ width: 1, alignSelf: "stretch", background: "var(--border)", margin: "0 4px" }} />
         <button className={`chip${watchOnly ? " active" : ""}`} title="Only tickers on your watchlist"
           onClick={() => setWatchOnly((v) => !v)}>
-          ⭐ Watchlist only
+          Watchlist only
         </button>
         <button className={`chip${valueOnly ? " active" : ""}`}
           title={`Trending non-ETF names ≥${Math.abs(VALUE_OFF_HIGH)}% below their 52-week high or within ${VALUE_NEAR_LOW}% of their 52-week low (not read bearish)`}
           onClick={() => setValueOnly((v) => !v)}>
-          💎 Value picks
+          Value picks
         </button>
       </div>
       <DataTable

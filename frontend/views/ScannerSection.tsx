@@ -60,13 +60,16 @@ function RowsSkeleton({ n = 4 }: { n?: number }) {
 }
 
 export function SignalsPanel({
-  entries, loading, onCompany, isNew,
+  entries, loading, onCompany, isNew, limit,
 }: {
   entries: WatchEntry[]; loading: boolean;
   onCompany: (cik: string) => void;
   isNew?: (iso: string | null | undefined) => boolean;
+  /** Show only the top N rows with a "Show all" toggle (dashboard panels). */
+  limit?: number;
 }) {
   const [dir, setDir] = useState<Direction | "all">("all");
+  const [expanded, setExpanded] = useState(false);
 
   const rows = useMemo(() => buildWatchlistSignals(entries).filter((r) => r.signals.length > 0), [entries]);
   const shown = useMemo(() => {
@@ -84,11 +87,13 @@ export function SignalsPanel({
   }, [rows]);
 
   const toggle = (d: Direction) => setDir(dir === d ? "all" : d);
+  const capped = limit != null && !expanded && shown.length > limit;
+  const visible = capped ? shown.slice(0, limit) : shown;
 
   return (
     <Panel
       title="Signals" count={rows.length}
-      sub="From the latest filings — most actionable first"
+      sub="Most actionable first"
       flush
       actions={
         <div className="seg" role="group" aria-label="Filter signals by direction">
@@ -105,13 +110,13 @@ export function SignalsPanel({
         <div className="panel-empty">No active signals across your watchlist yet. Signals appear as filings are ingested.</div>
       ) : (
         <div className="srow-list">
-          {shown.map((r) => (
+          {visible.map((r) => (
             <CompanyRow
               key={r.cik} ticker={r.ticker} name={r.name} onOpen={() => onCompany(r.cik)}
               meta={
                 <>
                   {isNew?.(r.latest) && <span className="new-dot" title="New activity since your last visit">NEW</span>}
-                  {r.insider.clusterBuy && <span className="dir-bull" title="Several insiders bought recently">⚑ cluster buy</span>}
+                  {r.insider.clusterBuy && <span className="dir-bull" title="Several insiders bought recently">cluster buy</span>}
                   {elapsed(r.latest) && <span className="srow-age" title={fmtDate(r.latest)}>{elapsed(r.latest)}</span>}
                 </>
               }
@@ -119,6 +124,11 @@ export function SignalsPanel({
               {r.signals.map((s) => <SignalPill key={s.label} s={s} />)}
             </CompanyRow>
           ))}
+          {limit != null && shown.length > limit && (
+            <button className="panel-more" onClick={() => setExpanded((v) => !v)}>
+              {expanded ? "Show fewer" : `Show all ${shown.length}`}
+            </button>
+          )}
         </div>
       )}
     </Panel>
@@ -140,8 +150,9 @@ export function momentumSetups(t: Technicals): MomSetup[] {
 }
 
 export function MomentumPanel({
-  companies, tech, onCompany,
-}: { companies: Company[]; tech: Record<string, Technicals>; onCompany: (cik: string) => void }) {
+  companies, tech, onCompany, limit,
+}: { companies: Company[]; tech: Record<string, Technicals>; onCompany: (cik: string) => void; limit?: number }) {
+  const [expanded, setExpanded] = useState(false);
   const rows = useMemo(
     () => companies
       .map((c) => ({ c, setups: tech[c.cik] ? momentumSetups(tech[c.cik]) : [] }))
@@ -151,12 +162,12 @@ export function MomentumPanel({
   );
 
   return (
-    <Panel title="Momentum" count={rows.length} sub="Price-action setups from end-of-day bars" flush>
+    <Panel title="Momentum" count={rows.length} sub="End-of-day price setups" flush>
       {rows.length === 0 ? (
         <div className="panel-empty">No breakouts, crosses, RSI extremes or volume spikes firing right now.</div>
       ) : (
         <div className="srow-list">
-          {rows.map(({ c, setups }) => (
+          {(limit != null && !expanded ? rows.slice(0, limit) : rows).map(({ c, setups }) => (
             <CompanyRow key={c.cik} ticker={c.ticker ?? "?"} name={c.name ?? c.cik} onOpen={() => onCompany(c.cik)}>
               {setups.map((s) => (
                 <span key={s.label} className={`pill dir-${s.dir}`} title={s.tip}>
@@ -166,6 +177,11 @@ export function MomentumPanel({
               ))}
             </CompanyRow>
           ))}
+          {limit != null && rows.length > limit && (
+            <button className="panel-more" onClick={() => setExpanded((v) => !v)}>
+              {expanded ? "Show fewer" : `Show all ${rows.length}`}
+            </button>
+          )}
         </div>
       )}
     </Panel>

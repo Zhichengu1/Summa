@@ -8,6 +8,8 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
+import { SearchField } from "../components/SearchField";
+import { ViewSkeleton } from "../components/Skeletons";
 import { fetchIpos } from "../lib/data/data";
 import { safeHref } from "../lib/utils/url";
 import { fmtUSD, fmtNum, fmtDate, elapsed } from "../lib/utils/format";
@@ -220,10 +222,7 @@ export function IposPage() {
 
   if (loading) {
     return (
-      <div className="page-head">
-        <h1 className="page-title">IPOs</h1>
-        <p className="empty-note">Loading…</p>
-      </div>
+      <ViewSkeleton title="IPOs" />
     );
   }
 
@@ -239,12 +238,7 @@ export function IposPage() {
         </div>
       </div>
       <div className="toggle-row">
-        <input
-          className="dt-filter"
-          style={{ borderRadius: 5, width: 200 }}
-          placeholder="Search company or ticker…" value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
+        <SearchField value={q} onChange={setQ} placeholder="Search company or ticker…" width={220} />
         {STATUS_TABS.map((t) => (
           <button key={t.key} className={`chip${tab === t.key ? " active" : ""}`} onClick={() => setTab(t.key)}>
             {t.label}
@@ -258,7 +252,7 @@ export function IposPage() {
         ))}
         <button className={`chip${focus ? " active" : ""}`} title="Hide SPACs, penny, and sub-$10M micro-offerings"
           onClick={() => setFocus((v) => !v)}>
-          {focus ? "Notable only ✓" : "Show all"}
+          {focus ? "Notable only" : "Show all"}
         </button>
       </div>
       <DataTable

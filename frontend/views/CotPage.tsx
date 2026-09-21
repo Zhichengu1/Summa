@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
+import { ViewSkeleton } from "../components/Skeletons";
 import { Sparkline } from "../components/charts/Sparkline";
 import { NetPositionChart } from "../components/charts/charts.lazy";
 import { fetchCotReports } from "../lib/data/data";
@@ -121,7 +122,7 @@ function DetailPanel({ m, onClose }: { m: CotMarket; onClose: () => void }) {
             <button key={w.weeks} className={`chip${chartWeeks === w.weeks ? " active" : ""}`}
               onClick={() => setChartWeeks(w.weeks)}>{w.label}</button>
           ))}
-          <button className="chip active" onClick={onClose}>✕ close</button>
+          <button className="chip active" onClick={onClose}>Close</button>
         </span>
       </div>
       <div style={{ fontSize: 13, color: "var(--fg-2)", marginBottom: 12, maxWidth: 720 }}>{m.read}</div>
@@ -202,10 +203,7 @@ export function CotPage() {
 
   if (loading) {
     return (
-      <div className="page-head">
-        <h1 className="page-title">COT Futures</h1>
-        <p className="empty-note">Loading…</p>
-      </div>
+      <ViewSkeleton title="COT Futures" />
     );
   }
 
@@ -266,7 +264,7 @@ export function CotPage() {
 
       {takeaways.length > 0 && (
         <div style={{ background: "var(--bg-1)", border: "1px solid var(--border-1)", borderRadius: 10, padding: "12px 16px", marginBottom: 16 }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>📌 This week&apos;s key reads</div>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>This week&apos;s key reads</div>
           <div style={{ display: "grid", gap: 6 }}>
             {takeaways.map((t) => (
               <div key={t.code} style={{ fontSize: 12.5, lineHeight: 1.5, color: "var(--fg-2)" }}>

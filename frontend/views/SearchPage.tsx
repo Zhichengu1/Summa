@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
 import { CompanyMark } from "../components/badges/CompanyMark";
+import { SearchField } from "../components/SearchField";
 import { searchSec, type SecCompany } from "../lib/domain/secIndex";
 
 export function SearchPage({
@@ -70,15 +71,16 @@ export function SearchPage({
         </div>
       </div>
       <div className="toggle-row">
-        <input
-          className="dt-filter" style={{ borderRadius: 5, width: 340 }}
-          placeholder="Search ticker or company name…" value={q}
-          onChange={(e) => setQ(e.target.value)} autoFocus
-        />
+        <SearchField value={q} onChange={setQ} placeholder="Search ticker or company name…" width={360} autoFocus />
       </div>
-      {query && !typing && (
-        <div className="section">
-          <div className="section-title">Results for “{query}” · {results.length.toLocaleString()}{results.length === 250 ? "+" : ""}</div>
+      {/* The previous results stay on screen (slightly dimmed) while the next query
+          settles, so the list never flashes empty between keystrokes. */}
+      {query && (
+        <div className={`section settle${typing ? " busy" : ""}`} aria-busy={typing}>
+          <div className="section-title">
+            Results for “{query}” · {results.length.toLocaleString()}{results.length === 250 ? "+" : ""}
+            <span className="section-hint"> · click a row to open, or + Add to watch it</span>
+          </div>
           <DataTable
             columns={cols} rows={results} rowKey={(c) => c.cik}
             onRowClick={(c) => (watched.has(c.cik) || ingestedCiks.has(c.cik) ? onCompany(c.cik) : onAdd(c))}
@@ -87,7 +89,7 @@ export function SearchPage({
           />
         </div>
       )}
-      {q.trim() && typing && (
+      {q.trim() && !query && (
         <div className="empty-note" style={{ marginTop: 4 }}>Searching…</div>
       )}
       {!q.trim() && (

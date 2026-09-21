@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
 import { FormBadge } from "../components/badges/FormBadge";
+import { SearchField } from "../components/SearchField";
 import { safeHref } from "../lib/utils/url";
 import { fmtDate, elapsed } from "../lib/utils/format";
 import type { Filing } from "../lib/types";
@@ -92,15 +93,10 @@ export function FeedPage({ filings, onCompany }: { filings: Filing[]; onCompany:
           Filing Feed
           <span className="live-dot" title="Live — new filings appear in real time" />
         </h1>
-        <div className="page-sub">{filings.length} filings loaded · updates in real time</div>
+        <div className="page-sub">The {filings.length} most recent filings across every tracked company · new ones stream in live</div>
       </div>
       <div className="toggle-row">
-        <input
-          className="dt-filter"
-          style={{ borderRadius: 5, width: 220 }}
-          placeholder="Search…" value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
+        <SearchField value={q} onChange={setQ} placeholder="Search company or ticker…" width={240} />
         <button className={`chip${formFilter === null ? " active" : ""}`} onClick={() => setFormFilter(null)}>
           All
         </button>
@@ -113,6 +109,9 @@ export function FeedPage({ filings, onCompany }: { filings: Filing[]; onCompany:
             {ft}
           </button>
         ))}
+        {(q.trim() || formFilter) && (
+          <span className="toolbar-count">{displayed.length} of {filings.length}</span>
+        )}
       </div>
       <DataTable
         columns={cols} rows={displayed} rowKey={(f) => f.accession_number}

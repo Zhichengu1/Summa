@@ -2,7 +2,9 @@
 // (from the sidebar's nav config, so it can never drift from the real navigation),
 // then a definition of every data domain the warehouse tracks, ranked by how
 // directly it tends to move the share price.
-import { NAV_GROUPS } from "./Sidebar";
+import { Icon } from "../components/Icon";
+import { NAV_GROUPS } from "../lib/nav";
+import { viewPath } from "../lib/router";
 
 type ImpactTier = "high" | "medium" | "signal";
 
@@ -133,8 +135,8 @@ export function GuidePage() {
             <div className="guide-nav-group" key={g.label}>
               <div className="guide-nav-label">{g.label}</div>
               {g.items.map((it) => (
-                <a className="guide-nav-item" href={`#${it.view}`} key={it.view}>
-                  <span className="nav-icon" aria-hidden>{it.icon}</span>
+                <a className="guide-nav-item" href={viewPath(it.view)} key={it.view}>
+                  <span className="nav-icon" aria-hidden><Icon name={it.icon} /></span>
                   <span>
                     <span className="guide-nav-name">{it.label}</span>
                     <span className="guide-nav-desc">{it.desc}</span>

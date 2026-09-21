@@ -215,7 +215,7 @@ export function OwnershipTab({ aux }: { aux: CompanyAux }) {
               </div>
               <div className="kpi">
                 <div className="k-label"><Term term="Cluster buying">Distinct buyers</Term></div>
-                <div className={`k-value ${insiderRead.clusterBuy ? "pos" : ""}`}>{insiderRead.distinctBuyers}{insiderRead.clusterBuy ? " ⚑" : ""}</div>
+                <div className={`k-value ${insiderRead.clusterBuy ? "pos" : ""}`}>{insiderRead.distinctBuyers}</div>
                 <div className="k-delta"><span className="muted">{insiderRead.distinctSellers} distinct seller{insiderRead.distinctSellers === 1 ? "" : "s"}</span></div>
               </div>
               <div className="kpi">
