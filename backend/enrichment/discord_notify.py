@@ -1227,7 +1227,120 @@ def notify_cot_report(report_date: str,
         logger.exception("Discord COT webhook post failed")
 
 
-# Feed form → (emoji, trader-facing label, embed color). 8-K is the market-moving
+# ── Tech dip watch (ingest/dip_watch.py) ────────────────────────────────────
+
+_DIP_COLOR = 0xF0_52_52  # red — matches the bearish news batch
+_DIP_MAX_SHOWN = 20  # ~170 chars/entry keeps the embed under Discord's 6000 total
+
+
+def _dip_line(d: dict[str, Any], watched: set[str]) -> str:
+    """One two-line dip entry: ticker/name/price/drop header + a context line.
+
+    '**NVDA** NVIDIA Corporation · $118.40 ▼ -6.12%  ⭐  🔥 Reddit #3
+     5d -11.4% · 20d high -14.0% · 52w high -22.1% · vol 2.3× · vs QQQ -4.0 pts'
+    """
+    tk = _label(d.get("ticker"), 12)
+    shown = (f"[**{tk}**](https://finance.yahoo.com/quote/{tk.replace('.', '-')})"
+             if _TICKER_LINK_RE.match(tk) else f"**{tk}**")
+    head = [shown]
+    if d.get("name"):
+        head.append(_label(d["name"], 40))
+    try:
+        head.append(f"· ${float(d['last_price']):,.2f}")
+    except (KeyError, TypeError, ValueError):
+        pass
+    head.append(_fmt_pct(d.get("day_pct")) or "")
+    if tk in watched:
+        head.append("⭐")
+    if d.get("reddit_rank"):
+        head.append(f"🔥 Reddit #{int(d['reddit_rank'])}")
+    ctx: list[str] = []
+    for key, label in (("ret_5d", "5d"), ("off_20d_high", "20d high"),
+                       ("off_52w_high", "52w high")):
+        v = d.get(key)
+        if v is not None:
+            ctx.append(f"{label} {v:+.1f}%")
+    if d.get("vol_x"):
+        ctx.append(f"vol {d['vol_x']:.1f}×")
+    if d.get("vs_bench") is not None:
+        ctx.append(f"vs QQQ {d['vs_bench']:+.1f} pts")
+    if d.get("rule") == "slide":
+        ctx.append("📉 multi-day slide")
+    return " ".join(p for p in head if p) + ("\n" + "  ·  ".join(ctx) if ctx else "")
+
+
+def notify_price_dips(dips: list[dict[str, Any]],
+                      benchmark: tuple[str, float | None] = ("QQQ", None),
+                      day_pct: float = 4.0, slide_pct: float = 10.0,
+                      scanned: int = 0,
+                      watchlist_tickers: set[str] | None = None) -> None:
+    """Post ONE embed listing today's dips among popular tech names.
+
+    `dips` are dip_watch stat dicts (ticker/name/last_price/day_pct/ret_5d/
+    off_20d_high/off_52w_high/vol_x/vs_bench/rule/core/reddit_rank), sorted
+    biggest drop first. Split into "Big tech" (the curated Fortune-500 core) and
+    "Reddit-trending tech" fields. Posts to DISCORD_DIPS_WEBHOOK_URL when set,
+    else the shared DISCORD_WEBHOOK_URL. No-op without a webhook or dips; fail-soft.
+    """
+    webhook = (os.environ.get("DISCORD_DIPS_WEBHOOK_URL")
+               or os.environ.get("DISCORD_WEBHOOK_URL"))
+    if not webhook or not dips:
+        return
+    try:
+        import requests
+    except ImportError:
+        logger.warning("requests not installed — skipping Discord dip-watch notification")
+        return
+
+    watched = {t.upper() for t in (watchlist_tickers or set())}
+    bench_name, bench_pct = benchmark
+    header = [f"{len(dips)} tech name{'s' if len(dips) != 1 else ''} down hard today"]
+    if scanned:
+        header.append(f"{scanned} scanned")
+    if bench_pct is not None:
+        header.append(f"{bench_name} {_fmt_pct(bench_pct)}")
+    desc = "  ·  ".join(header)
+    if bench_pct is not None and bench_pct <= -2.0:
+        desc += "\n⚠️ Broad tech selloff — check the 'vs QQQ' gap to separate stock-specific drops."
+
+    # A field caps at 1024 chars (~5 entries), so a long group continues into
+    # extra fields; the whole embed caps at 6000, so show at most _DIP_MAX_SHOWN.
+    shown, hidden = dips[:_DIP_MAX_SHOWN], len(dips) - _DIP_MAX_SHOWN
+    if hidden > 0:
+        desc += f"\nShowing the {_DIP_MAX_SHOWN} biggest drops (+{hidden} more in the run log)."
+    fields: list[dict[str, Any]] = []
+    for title, group in (("🏢  Big tech (Fortune 500)", [d for d in shown if d.get("core")]),
+                         ("🔥  Reddit-trending tech", [d for d in shown if not d.get("core")])):
+        chunk: list[str] = []
+        name = f"{title} — {len(group)}"
+        for line in [_dip_line(d, watched) for d in group]:
+            if chunk and len("\n".join(chunk + [line])) > 1000:
+                fields.append({"name": name, "value": "\n".join(chunk), "inline": False})
+                chunk, name = [], f"{title} (cont.)"
+            chunk.append(line[:1000])
+        if chunk:
+            fields.append({"name": name, "value": "\n".join(chunk), "inline": False})
+
+    embed: dict[str, Any] = {
+        "title": "🩸  Tech dip watch — " + _dt.datetime.now(_dt.timezone.utc).strftime("%a %b %d"),
+        "color": _DIP_COLOR,
+        "description": desc[:4000],
+        "fields": fields[:25],
+        "footer": {"text": f"Summa · flagged at ≤ -{day_pct:g}% on the day, or ≤ -{slide_pct:g}% "
+                           "over 5 sessions on a red day · Yahoo EOD · a prompt to research, "
+                           "not investment advice"},
+        "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+    try:
+        resp = requests.post(webhook, json={"embeds": [embed]}, timeout=_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Discord dip-watch webhook returned %s: %s",
+                           resp.status_code, resp.text[:200])
+    except requests.RequestException:
+        logger.exception("Discord dip-watch webhook post failed")
+
+
+# Feed form →(emoji, trader-facing label, embed color). 8-K is the market-moving
 # one (material events) so it gets the amber "pay attention" color.
 _FILING_FORM_META: dict[str, tuple[str, str, int]] = {
     "8-K":     ("⚡", "Material event report", 0xF5_A6_23),
