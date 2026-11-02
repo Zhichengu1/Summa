@@ -234,6 +234,11 @@ export type RedditTrend = {
   // Industry labels resolved at ingest (curated profiles → SEC SIC).
   sector: string | null;
   industry: string | null;
+  // Written after the close by the dip watch (backend ingest/dip_watch.py),
+  // which also overwrites the price fields above with CLOSING values. Absent
+  // until schema.sql is re-applied; null on days the dip watch hasn't run.
+  ret_5d?: number | null;        // % over 5 sessions
+  dip_rule?: "day" | "slide" | null;  // day: closed ≤ −4% · slide: ≤ −10% over 5d on a red day
 };
 
 // One disclosed congressional (or executive-branch) stock transaction (backend

@@ -1,19 +1,18 @@
-"""Tech dip watch — daily price-drop detector for popular tech names → Discord.
+"""Dip watch — daily price-drop detector for Reddit-trending names + big tech → Discord.
 
-A GLOBAL, alert-only pass (nothing is stored) run once per weekday after the US
-close by summa-dips.yml via `python -m tools.dip_watch`. It answers one question:
-"did any tech name people actually care about just drop hard enough to look at?"
+A GLOBAL pass run once per weekday after the US close by summa-dips.yml via
+`python -m tools.dip_watch`. It answers "did anything the crowd is talking about
+(or a big tech name) just drop hard — and what is Reddit saying about it?"
 
 The universe is the union of two lists:
 
-  1. CORE — a curated list of the large-cap US tech companies on the Fortune 500
-     (Apple, Microsoft, Nvidia, …). Fortune publishes no free/keyless feed, so the
-     list is maintained here by hand; override it with DIP_WATCH_CORE
-     ("AAPL,MSFT,…") without a code change.
-  2. REDDIT — tickers that appeared near the top of the stored `reddit_trends`
-     snapshots in the last few days, kept only when labelled as tech (sector
-     "Technology", or a tech industry keyword) and not an ETF. This is the
-     "what the crowd is talking about right now" half; it moves with the board.
+  1. REDDIT — every ticker ranked ≤ DIP_WATCH_REDDIT_RANK on any stored
+     `reddit_trends` snapshot in the last DIP_WATCH_REDDIT_DAYS days, any sector.
+     ETFs are priced (so the list's closing numbers refresh) but never alerted.
+  2. CORE — a curated list of the large-cap US tech companies on the Fortune 500
+     (Apple, Microsoft, Nvidia, …), so big tech is covered even on days Reddit
+     isn't talking about it. Fortune publishes no free/keyless feed, so the list
+     is maintained here by hand; override it with DIP_WATCH_CORE ("AAPL,MSFT,…").
 
 Each ticker gets one keyless Yahoo chart GET (3 months of daily bars — the same
 free source price_ingest and reddit_trends_ingest use). A name is flagged when
@@ -23,15 +22,30 @@ TODAY's session closed down hard:
   - slide       — 5-session return ≤ -DIP_5D_PCT % (default 10 %) AND today is red.
 
 The "today is red" requirement on the slide rule is what keeps a multi-day
-selloff from re-alerting on its bounce days. Each flagged line carries context:
-5-day return, distance off the 20-session and 52-week highs, volume vs its
-30-day average, and the move relative to QQQ — so a broad tech selloff reads as
-such instead of as twenty separate stock stories.
+selloff from re-alerting on its bounce days.
 
-If the latest Yahoo bar isn't today's date (holiday, or a run that started too
-early) the pass skips without alerting, so yesterday's drop is never re-posted.
-Fail-soft throughout (invariant #10): a dead ticker drops out, a dead Yahoo or
-Supabase read just shrinks the universe, and nothing ever raises.
+**Reddit connection.** Each dip is joined to its latest Reddit snapshot row and
+given a deterministic read of how the crowd is reacting (`_crowd_read`): buzz
+spiking into the drop (look for the news), WSB still bullish (dip-buying talk),
+WSB bearish (the crowd agrees), chatter fading, or not on the board at all. The
+embed then draws the connections across dips — names in the same industry
+falling together (a sector move, not a stock story) and a tally of how the
+Reddit names are being read. Every move is also shown against its benchmark
+(QQQ for tech, SPY otherwise) so a market-wide selloff reads as one.
+
+**List update.** The Reddit ingest prices its snapshot intraday (its last run is
+before the close), so this pass writes the CLOSING last_price / day_pct /
+52-week distances / 5-day return plus a `dip_rule` flag back onto today's
+`reddit_trends` rows. The Reddit Buzz view then shows the close and marks the
+dips; rows that did not dip get `dip_rule` cleared.
+
+Freshness is keyed to the latest SESSION, not the run's clock: GitHub's cron
+routinely starts scheduled jobs hours late (the 13:15 UTC Reddit run has been
+starting at 18:00–21:00), so a 21:30 UTC dip run can land after midnight UTC.
+The session is the benchmark's latest bar; if it closed more than
+_MAX_SESSION_AGE_H ago (a holiday — no new bar) the pass skips without alerting
+or writing, so a drop is never re-posted the next day. Fail-soft throughout (invariant #10): a dead ticker drops out, a dead
+Yahoo or Supabase read just shrinks the universe, and nothing ever raises.
 
 A dip is a prompt to research, not a buy signal — the embed says so.
 """
@@ -48,6 +62,7 @@ from typing import Any
 
 import db
 from ingest.price_ingest import _yahoo_symbol
+from ingest.reddit_trends_ingest import _DB_COLS as _REDDIT_COLS, _industry_labels
 
 try:
     from enrichment import discord_notify
@@ -72,21 +87,32 @@ _CORE = [t.strip().upper() for t in os.environ.get("DIP_WATCH_CORE", _DEFAULT_CO
          if t.strip()]
 
 # Reddit half of the universe: tickers ranked ≤ RANK_MAX on any snapshot in the
-# last LOOKBACK_DAYS days.
+# last LOOKBACK_DAYS days (the stored top-N is 50).
 _REDDIT_LOOKBACK_DAYS = int(os.environ.get("DIP_WATCH_REDDIT_DAYS", "3"))
-_REDDIT_RANK_MAX = int(os.environ.get("DIP_WATCH_REDDIT_RANK", "40"))
-# Tech labels come from reddit_trends' (sector, industry) — SIC-derived or the
-# curated profiles — so match the sector plus industry keywords that SIC files
-# outside "Technology" (e.g. internet platforms under services).
-_TECH_SECTORS = {"technology"}
-_TECH_INDUSTRY_WORDS = ("semiconductor", "software", "computer", "electronic",
-                        "internet", "data processing", "communications equipment")
+_REDDIT_RANK_MAX = int(os.environ.get("DIP_WATCH_REDDIT_RANK", "50"))
 
 # Dip thresholds (percent, positive numbers).
 _DAY_PCT = float(os.environ.get("DIP_DAY_PCT", "4"))
 _5D_PCT = float(os.environ.get("DIP_5D_PCT", "10"))
-_BENCHMARK = "QQQ"
-_BUDGET_S = 90  # wall-clock cap for pricing the whole universe
+
+# Crowd-read thresholds on the 24h mention change.
+_BUZZ_SPIKE = 0.5    # mentions up ≥ 50 % vs 24h ago (or new to the board)
+_BUZZ_FADE = -0.3    # mentions down ≥ 30 %
+_BUZZ_MIN_MENTIONS = 25  # below this a % change is noise (3 mentions "+200 %")
+
+# Benchmarks: tech moves are read against QQQ, everything else against SPY.
+_TECH_BENCH, _BROAD_BENCH = "QQQ", "SPY"
+_TECH_SECTORS = {"technology"}
+_TECH_INDUSTRY_WORDS = ("semiconductor", "software", "computer", "electronic",
+                        "internet", "data processing", "communications equipment")
+
+_BUDGET_S = 150  # wall-clock cap for pricing the whole universe
+# A session's close (16:00 ET ≈ 21:00 UTC, ignoring DST) must be at most this old.
+# 18h tolerates a badly delayed cron; a holiday's stale bar is ≥ 24h old.
+_MAX_SESSION_AGE_H = 18
+# Columns this pass adds onto reddit_trends (schema.sql); the legacy fallback
+# writes the closing prices without them if schema.sql hasn't been re-applied.
+_DIP_COLS = ("ret_5d", "dip_rule")
 
 
 def _get_chart(ticker: str) -> dict[str, Any] | None:
@@ -103,7 +129,7 @@ def _get_chart(ticker: str) -> dict[str, Any] | None:
 
 
 def _stats(result: dict[str, Any]) -> dict[str, Any] | None:
-    """Session stats from a chart result: last bar date, day %, 5d %, off-highs, volume ×."""
+    """Session stats from a chart result: bar date, day %, 5d %, 20d/52w distances, volume ×."""
     try:
         meta = result.get("meta") or {}
         quote = ((result.get("indicators") or {}).get("quote") or [{}])[0] or {}
@@ -119,18 +145,19 @@ def _stats(result: dict[str, Any]) -> dict[str, Any] | None:
             # Bars are stamped at the US open (13:30/14:30 UTC), so the UTC date
             # is the session date.
             "bar_date": _dt.datetime.fromtimestamp(bars[-1][0], tz=_dt.timezone.utc).date(),
-            "last_price": round(last, 2),
+            "last_price": round(last, 4),
             "day_pct": (last / prev - 1.0) * 100.0,
             "name": meta.get("shortName") or meta.get("longName"),
             "is_etf": str(meta.get("instrumentType") or "").upper() == "ETF",
         }
         if len(closes) >= 6:
             out["ret_5d"] = (last / closes[-6] - 1.0) * 100.0
-        hi20 = max(closes[-20:])
-        out["off_20d_high"] = (last / hi20 - 1.0) * 100.0
-        hi52 = meta.get("fiftyTwoWeekHigh")
+        out["off_20d_high"] = (last / max(closes[-20:]) - 1.0) * 100.0
+        hi52, lo52 = meta.get("fiftyTwoWeekHigh"), meta.get("fiftyTwoWeekLow")
         if hi52 and float(hi52) > 0:
             out["off_52w_high"] = (last / float(hi52) - 1.0) * 100.0
+        if lo52 and float(lo52) > 0:
+            out["off_52w_low"] = (last / float(lo52) - 1.0) * 100.0
         vols = [v for _, _, v in bars if isinstance(v, (int, float)) and v > 0]
         if len(vols) >= 11:
             base = vols[-31:-1] if len(vols) >= 31 else vols[:-1]
@@ -143,27 +170,55 @@ def _stats(result: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _is_tech(sector: Any, industry: Any) -> bool:
-    """True when a stored (sector, industry) label reads as a tech company."""
+    """True when a (sector, industry) label reads as a tech company."""
     if str(sector or "").strip().lower() in _TECH_SECTORS:
         return True
     ind = str(industry or "").lower()
     return any(w in ind for w in _TECH_INDUSTRY_WORDS)
 
 
-def _reddit_tech_tickers() -> dict[str, dict[str, Any]]:
-    """Recently-trending tech tickers from reddit_trends → {ticker: best rank/mentions}."""
+def _reddit_context() -> dict[str, dict[str, Any]]:
+    """Latest Reddit snapshot row per recently-trending ticker, plus days-on-board."""
     since = (_dt.datetime.now(_dt.timezone.utc).date()
              - _dt.timedelta(days=_REDDIT_LOOKBACK_DAYS)).isoformat()
     out: dict[str, dict[str, Any]] = {}
-    for r in db.fetch_recent_reddit_trends(since, _REDDIT_RANK_MAX):
-        if r.get("is_etf") or not _is_tech(r.get("sector"), r.get("industry")):
-            continue
+    for r in db.fetch_recent_reddit_trends(since, _REDDIT_RANK_MAX):  # newest day first
         t = str(r.get("ticker") or "").upper()
-        best = out.get(t)
-        if best is None or (r.get("rank") or 999) < (best.get("rank") or 999):
-            out[t] = {"rank": r.get("rank"), "mentions": r.get("mentions"),
-                      "name": r.get("name")}
+        if not t:
+            continue
+        if t in out:
+            out[t]["days_on_board"] += 1
+            continue
+        out[t] = {**r, "days_on_board": 1}
     return out
+
+
+def _crowd_read(ctx: dict[str, Any] | None) -> tuple[str, str]:
+    """(key, label) for how Reddit is reacting to a dip — deterministic, from one snapshot row."""
+    if not ctx:
+        return "off_board", "Not on the Reddit board"
+    m, dm = ctx.get("mentions"), ctx.get("mentions_change")
+    growth: float | None = None
+    if m is not None and dm is not None and m >= _BUZZ_MIN_MENTIONS:
+        prior = m - dm
+        growth = 9.99 if prior <= 0 else dm / prior   # new to the board = a spike
+    mood = str(ctx.get("sentiment") or "").lower()
+    spiking = growth is not None and growth >= _BUZZ_SPIKE
+    if spiking and "bull" in mood:
+        return "spike_bull", "Buzz spiking and WSB bullish: the crowd is buying the dip"
+    if spiking and "bear" in mood:
+        return "spike_bear", "Buzz spiking and WSB bearish: capitulation chatter"
+    if spiking:
+        return "spike", "Buzz spiking into the drop: look for the news"
+    if "bull" in mood:
+        return "bull", "WSB still bullish: dip-buying talk"
+    if "bear" in mood:
+        return "bear", "WSB bearish: the crowd agrees with the drop"
+    if growth is not None and growth <= _BUZZ_FADE:
+        return "fading", "Chatter fading as it falls"
+    if m is not None and m < _BUZZ_MIN_MENTIONS:
+        return "light", "Light chatter"
+    return "steady", "Steady chatter"
 
 
 def _flag(s: dict[str, Any]) -> str | None:
@@ -179,27 +234,116 @@ def _flag(s: dict[str, Any]) -> str | None:
     return None
 
 
-def scan_dips(dry_run: bool = False) -> int:
-    """Price the tech universe, flag today's dips, post one Discord embed. Returns #dips.
+def _connections(dips: list[dict[str, Any]]) -> list[str]:
+    """Cross-dip connections: same-industry clusters, and how the Reddit names are read."""
+    lines: list[str] = []
+    # Broad read first: one sector carrying most of the dips is a sector move.
+    by_sector: dict[str, int] = {}
+    for d in dips:
+        if d.get("sector"):
+            by_sector[d["sector"]] = by_sector.get(d["sector"], 0) + 1
+    if by_sector:
+        top, n = max(by_sector.items(), key=lambda kv: kv[1])
+        if n >= 3 and n * 2 >= len(dips):
+            lines.append(f"Sector move: {n} of {len(dips)} dips are {top}")
+    by_group: dict[str, list[dict[str, Any]]] = {}
+    for d in dips:
+        g = d.get("industry") or d.get("sector")
+        if g:
+            by_group.setdefault(g, []).append(d)
+    for g, ds in sorted(by_group.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if len(ds) < 2:
+            continue
+        avg = sum(d["day_pct"] for d in ds) / len(ds)
+        lines.append(f"{g} ({len(ds)}, avg {avg:+.1f}%): "
+                     + ", ".join(d["ticker"] for d in ds))
+    reads: dict[str, int] = {}
+    for d in dips:
+        if d["crowd"] != "off_board":
+            reads[d["crowd"]] = reads.get(d["crowd"], 0) + 1
+    on_board = sum(reads.values())
+    if on_board:
+        parts = []
+        spiking = sum(v for k, v in reads.items() if k.startswith("spike"))
+        bull = reads.get("bull", 0) + reads.get("spike_bull", 0)
+        bear = reads.get("bear", 0) + reads.get("spike_bear", 0)
+        if spiking:
+            parts.append(f"{spiking} with buzz spiking")
+        if bull:
+            parts.append(f"{bull} read bullish")
+        if bear:
+            parts.append(f"{bear} read bearish")
+        if reads.get("fading"):
+            parts.append(f"{reads['fading']} fading")
+        lines.append(f"Reddit: {on_board} of {len(dips)} dips are on the board"
+                     + (" · " + ", ".join(parts) if parts else ""))
+    return lines
 
-    `dry_run=True` logs the dips without posting. Never raises.
-    """
-    reddit = _reddit_tech_tickers()
-    universe = list(dict.fromkeys(_CORE + sorted(reddit)))  # core first, de-duped
-    logger.info("  dip_watch: universe %d tickers (%d core, %d reddit-tech, %d overlap)",
-                len(universe), len(_CORE), len(reddit), len(set(_CORE) & set(reddit)))
 
-    bench_res = _get_chart(_BENCHMARK)
-    bench = _stats(bench_res) if bench_res else None
-    today = _dt.datetime.now(_dt.timezone.utc).date()
-    if bench and bench["bar_date"] != today:
-        logger.info("  dip_watch: latest %s bar is %s, not %s — market closed today, skipped",
-                    _BENCHMARK, bench["bar_date"], today)
+def _update_reddit_list(trend_date: str, priced: dict[str, dict[str, Any]]) -> int:
+    """Write closing prices + the dip flag back onto today's reddit_trends rows."""
+    rows = db.fetch_reddit_trends_day_full(trend_date)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        s = priced.get(str(r.get("ticker") or "").upper())
+        if not s:
+            continue
+        row = {k: r.get(k) for k in _REDDIT_COLS if k in r}
+        row.update(
+            last_price=s["last_price"],
+            day_pct=round(s["day_pct"], 2),
+            off_high_pct=round(s["off_52w_high"], 2) if s.get("off_52w_high") is not None else r.get("off_high_pct"),
+            off_low_pct=round(s["off_52w_low"], 2) if s.get("off_52w_low") is not None else r.get("off_low_pct"),
+            ret_5d=round(s["ret_5d"], 2) if s.get("ret_5d") is not None else None,
+            dip_rule=None if s.get("is_etf") else _flag(s),
+        )
+        out.append(row)
+    if not out:
         return 0
+    try:
+        return db.upsert_reddit_trends(out)
+    except Exception:
+        logger.warning("  dip_watch: reddit_trends dip columns missing — re-run schema.sql; "
+                       "writing closing prices only")
+        try:
+            return db.upsert_reddit_trends(
+                [{k: v for k, v in r.items() if k not in _DIP_COLS} for r in out])
+        except Exception:
+            logger.exception("  dip_watch: reddit_trends update failed")
+            return 0
 
-    dips: list[dict[str, Any]] = []
+
+def scan_dips(dry_run: bool = False) -> int:
+    """Price the universe, flag today's dips, update the Reddit list, post one embed.
+
+    `dry_run=True` logs the dips without posting or writing. Returns #dips; never raises.
+    """
+    reddit = _reddit_context()
+    universe = list(dict.fromkeys(sorted(reddit) + _CORE))
+    logger.info("  dip_watch: universe %d tickers (%d reddit, %d core, %d overlap)",
+                len(universe), len(reddit), len(_CORE), len(set(_CORE) & set(reddit)))
+
+    bench: dict[str, float | None] = {}
+    session: _dt.date | None = None
+    for b in (_TECH_BENCH, _BROAD_BENCH):
+        res = _get_chart(b)
+        s = _stats(res) if res else None
+        bench[b] = s["day_pct"] if s else None
+        if s and session is None:
+            session = s["bar_date"]
+    if session is None:
+        logger.warning("  dip_watch: benchmarks unavailable — can't date the session, skipped")
+        return 0
+    close_utc = _dt.datetime.combine(session, _dt.time(21, 0), tzinfo=_dt.timezone.utc)
+    age_h = (_dt.datetime.now(_dt.timezone.utc) - close_utc).total_seconds() / 3600
+    if age_h > _MAX_SESSION_AGE_H:
+        logger.info("  dip_watch: latest session is %s (%.0fh old) — market closed today, skipped",
+                    session, age_h)
+        return 0
+    logger.info("  dip_watch: session %s", session)
+
+    priced: dict[str, dict[str, Any]] = {}
     deadline = time.monotonic() + _BUDGET_S
-    priced = 0
     for t in universe:
         if time.monotonic() > deadline:
             logger.warning("  dip_watch: price budget hit at %s — rest skipped this run", t)
@@ -207,27 +351,59 @@ def scan_dips(dry_run: bool = False) -> int:
         res = _get_chart(t)
         time.sleep(0.1)  # polite spacing to Yahoo
         s = _stats(res) if res else None
-        if not s:
-            continue
-        priced += 1
-        if s["bar_date"] != today:
-            continue  # stale/halted symbol — never re-alert an old session
+        if s and s["bar_date"] == session:  # stale/halted symbol — never re-alert an old session
+            priced[t] = s
+
+    dips: list[dict[str, Any]] = []
+    for t, s in priced.items():
         rule = _flag(s)
-        if not rule:
+        if not rule or s.get("is_etf"):
             continue
-        s.update(ticker=t, rule=rule, core=t in _CORE)
-        if t in reddit:
-            s["reddit_rank"] = reddit[t].get("rank")
-            s["reddit_mentions"] = reddit[t].get("mentions")
-            s["name"] = s.get("name") or reddit[t].get("name")
-        if bench and bench.get("day_pct") is not None:
-            s["vs_bench"] = s["day_pct"] - bench["day_pct"]
-        dips.append(s)
+        ctx = reddit.get(t)
+        d = {**s, "ticker": t, "rule": rule, "core": t in _CORE}
+        if ctx:
+            d.update(reddit_rank=ctx.get("rank"), mentions=ctx.get("mentions"),
+                     mentions_change=ctx.get("mentions_change"), sentiment=ctx.get("sentiment"),
+                     days_on_board=ctx.get("days_on_board"),
+                     sector=ctx.get("sector"), industry=ctx.get("industry"))
+            d["name"] = d.get("name") or ctx.get("name")
+        d["crowd"], d["crowd_label"] = _crowd_read(ctx)
+        dips.append(d)
+
+    # Label the dips Reddit hasn't labelled (core names off the board): stored
+    # labels → curated profiles → SEC SIC, the same cheap chain the Reddit ingest uses.
+    unlabelled = [d["ticker"] for d in dips if not (d.get("industry") or d.get("sector"))]
+    if unlabelled:
+        try:
+            labels = _industry_labels(unlabelled)
+            for d in dips:
+                sector, industry = labels.get(d["ticker"], (None, None))
+                d["sector"] = d.get("sector") or sector
+                d["industry"] = d.get("industry") or industry
+        except Exception:
+            logger.exception("  dip_watch: industry labelling failed")
+    for d in dips:
+        b = _TECH_BENCH if (d["core"] or _is_tech(d.get("sector"), d.get("industry"))) else _BROAD_BENCH
+        if bench.get(b) is not None:
+            d["bench"], d["vs_bench"] = b, d["day_pct"] - bench[b]
 
     dips.sort(key=lambda d: d["day_pct"])  # biggest drop first
-    logger.info("  dip_watch: priced %d/%d, %d dip(s)%s", priced, len(universe), len(dips),
-                (": " + ", ".join(f"{d['ticker']} {d['day_pct']:+.1f}%" for d in dips)) if dips else "")
-    if not dips or dry_run or discord_notify is None:
+    logger.info("  dip_watch: priced %d/%d, %d dip(s)%s", len(priced), len(universe), len(dips),
+                (": " + ", ".join(f"{d['ticker']} {d['day_pct']:+.1f}% [{d['crowd']}]"
+                                  for d in dips)) if dips else "")
+    connections = _connections(dips)
+    for line in connections:
+        logger.info("  dip_watch: connection — %s", line)
+    if dry_run:
+        return len(dips)
+
+    # The Reddit snapshot is keyed by UTC day, which equals the session date.
+    written = _update_reddit_list(session.isoformat(), priced)
+    logger.info("  dip_watch: updated %d reddit_trends rows for %s with closing prices%s",
+                written, session, "" if written else
+                " (no snapshot for that day yet — the Reddit job hasn't run)")
+
+    if not dips or discord_notify is None:
         return len(dips)
     try:
         from watchlist import get_active_watchlist
@@ -236,8 +412,8 @@ def scan_dips(dry_run: bool = False) -> int:
         watched = set()  # the star is cosmetic — never block the alert on it
     try:
         discord_notify.notify_price_dips(
-            dips, benchmark=(_BENCHMARK, bench.get("day_pct") if bench else None),
-            day_pct=_DAY_PCT, slide_pct=_5D_PCT, scanned=priced, watchlist_tickers=watched)
+            dips, benchmarks=bench, connections=connections,
+            day_pct=_DAY_PCT, slide_pct=_5D_PCT, scanned=len(priced), watchlist_tickers=watched)
     except Exception:
         logger.exception("  dip_watch: Discord notify failed")
     return len(dips)

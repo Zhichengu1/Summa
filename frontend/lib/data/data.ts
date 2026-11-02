@@ -180,7 +180,11 @@ export async function fetchRedditTrends(days = 10): Promise<RedditTrend[]> {
     .order("trend_date", { ascending: false })
     .order("rank", { ascending: true })
     .limit(1000);
-  let { data, error } = await query(`${base}, last_price, day_pct, off_high_pct, off_low_pct, is_etf, sector, industry`);
+  const priced = `${base}, last_price, day_pct, off_high_pct, off_low_pct, is_etf, sector, industry`;
+  // Newest columns first; each fallback drops the columns a not-yet-re-applied
+  // schema.sql may lack.
+  let { data, error } = await query(`${priced}, ret_5d, dip_rule`);
+  if (error) ({ data, error } = await query(priced));
   if (error) ({ data, error } = await query(base));
   if (error || !data) return [];
   return data as unknown as RedditTrend[];
