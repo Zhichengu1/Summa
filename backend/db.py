@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dotenv import load_dotenv
+from postgrest.types import ReturnMethod
 from supabase import create_client, Client
 
 load_dotenv()
@@ -31,9 +32,16 @@ def get_client() -> Client:
     return _client
 
 
+# Writes never need the written rows back. PostgREST's default is to echo them
+# (`Prefer: return=representation`), which counts as API egress on the Supabase
+# free tier — for the pipeline's bulk upserts (price bars, 13F portfolios, trades)
+# that silently doubled the bytes of every write. `minimal` returns nothing.
+_RETURN_MINIMAL = ReturnMethod.minimal
+
+
 def upsert(table: str, row: dict[str, Any], on_conflict: str) -> None:
     """Upsert a single row, deduplicating on `on_conflict`."""
-    get_client().table(table).upsert(row, on_conflict=on_conflict).execute()
+    get_client().table(table).upsert(row, on_conflict=on_conflict, returning=_RETURN_MINIMAL).execute()
 
 
 def _dedupe(rows: list[dict[str, Any]], on_conflict: str) -> list[dict[str, Any]]:
@@ -62,7 +70,7 @@ def upsert_many(
     client = get_client()
     for i in range(0, len(rows), chunk):
         client.table(table).upsert(
-            rows[i : i + chunk], on_conflict=on_conflict
+            rows[i : i + chunk], on_conflict=on_conflict, returning=_RETURN_MINIMAL
         ).execute()
     return len(rows)
 
