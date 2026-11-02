@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dotenv import load_dotenv
+from postgrest.types import ReturnMethod
 from supabase import create_client, Client
 
 load_dotenv()
@@ -31,9 +32,16 @@ def get_client() -> Client:
     return _client
 
 
+# Writes never need the written rows back. PostgREST's default is to echo them
+# (`Prefer: return=representation`), which counts as API egress on the Supabase
+# free tier — for the pipeline's bulk upserts (price bars, 13F portfolios, trades)
+# that silently doubled the bytes of every write. `minimal` returns nothing.
+_RETURN_MINIMAL = ReturnMethod.minimal
+
+
 def upsert(table: str, row: dict[str, Any], on_conflict: str) -> None:
     """Upsert a single row, deduplicating on `on_conflict`."""
-    get_client().table(table).upsert(row, on_conflict=on_conflict).execute()
+    get_client().table(table).upsert(row, on_conflict=on_conflict, returning=_RETURN_MINIMAL).execute()
 
 
 def _dedupe(rows: list[dict[str, Any]], on_conflict: str) -> list[dict[str, Any]]:
@@ -62,7 +70,7 @@ def upsert_many(
     client = get_client()
     for i in range(0, len(rows), chunk):
         client.table(table).upsert(
-            rows[i : i + chunk], on_conflict=on_conflict
+            rows[i : i + chunk], on_conflict=on_conflict, returning=_RETURN_MINIMAL
         ).execute()
     return len(rows)
 
@@ -571,21 +579,22 @@ def company_has_news(cik: str) -> bool:
 _PAGE = 1000
 
 
-def _select_all(table: str, columns: str) -> list[dict[str, Any]]:
+def _select_all(table: str, columns: str, order: str | None = None) -> list[dict[str, Any]]:
     """Fetch every row of `table` (selected `columns`) by paging through ranges.
 
     Scales the scheduler's whole-table reads to any watchlist size: without this,
     a single `.select().execute()` caps at ~1000 rows and the pipeline would stop
-    seeing (and so stop ingesting) companies past that boundary.
+    seeing (and so stop ingesting) companies past that boundary. `order` (a column
+    name, ascending) makes the paging deterministic where callers cap the result.
     """
     client = get_client()
     out: list[dict[str, Any]] = []
     start = 0
     while True:
-        batch = (
-            client.table(table).select(columns)
-            .range(start, start + _PAGE - 1).execute().data or []
-        )
+        q = client.table(table).select(columns)
+        if order:
+            q = q.order(order)
+        batch = q.range(start, start + _PAGE - 1).execute().data or []
         out.extend(batch)
         if len(batch) < _PAGE:
             return out
@@ -595,7 +604,9 @@ def _select_all(table: str, columns: str) -> list[dict[str, Any]]:
 def fetch_watchlist() -> list[dict[str, Any]]:
     """Return the dynamic watchlist / ingest queue rows (cik, ticker, name, status)."""
     try:
-        return _select_all("watchlist", "cik, ticker, name, status")
+        # Oldest first, so the backend's dynamic cap (watchlist.WATCHLIST_DYNAMIC_MAX)
+        # keeps the companies people queued first, not whatever was inserted last.
+        return _select_all("watchlist", "cik, ticker, name, status", order="added_at")
     except Exception:
         logger.exception("fetch_watchlist failed")
         return []

@@ -28,7 +28,9 @@ import { fmtUSD, fmtDate, fmtDelta } from "../lib/utils/format";
 import { safeHref } from "../lib/utils/url";
 import type { Company, CongressTrade } from "../lib/types";
 
-const WINDOWS = [30, 60, 90] as const;
+// 30/60 only: the fetch is 120 days so the previous window (momentum) is exact
+// for both, and 120d keeps the read to ~1.6k rows (see fetchCongressTrades).
+const WINDOWS = [30, 60] as const;
 
 function partyColor(party: string | null): string {
   if (party === "D") return "#3b82f6";
@@ -97,14 +99,14 @@ export function CongressPage({ companies, onCompany, onTrack }: {
 }) {
   const [rows, setRows] = useState<CongressTrade[]>([]);
   const [loading, setLoading] = useState(true);
-  const [windowDays, setWindowDays] = useState<number>(90);   // 90d: enough disclosures to rank; 30d is too sparse
+  const [windowDays, setWindowDays] = useState<number>(60);   // 60d: enough disclosures to rank; 30d is sparse
   const [minFilers, setMinFilers] = useState<number>(3);
   // Drill-down: a consensus row click narrows the tape to that ticker.
   const [detailTicker, setDetailTicker] = useState<string | null>(null);
 
   useEffect(() => {
-    // 180 days: the widest window (90d) plus its previous window for momentum.
-    fetchCongressTrades(180).then((r) => { setRows(r); setLoading(false); });
+    // 120 days: the widest window (60d) plus its previous window for momentum. Cached.
+    fetchCongressTrades(120).then((r) => { setRows(r); setLoading(false); });
   }, []);
 
   // Watchlist ticker → cik, for stars + click-through to the company page.
