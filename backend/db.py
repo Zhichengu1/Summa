@@ -330,6 +330,24 @@ def fetch_reddit_trends_day(trend_date: str) -> list[dict[str, Any]]:
         return []
 
 
+def fetch_recent_reddit_trends(since_date: str, rank_max: int) -> list[dict[str, Any]]:
+    """reddit_trends rows on/after `since_date` ranked ≤ `rank_max` (dip-watch universe).
+
+    Bounded by days × the stored top-N (a few hundred rows at most). Fails soft to [].
+    """
+    try:
+        result = (
+            get_client().table("reddit_trends")
+            .select("ticker, name, rank, mentions, sector, industry, is_etf, trend_date")
+            .gte("trend_date", since_date).lte("rank", rank_max)
+            .order("trend_date", desc=True).limit(1000).execute()
+        )
+        return result.data or []
+    except Exception:
+        logger.exception("fetch_recent_reddit_trends failed")
+        return []
+
+
 def fetch_reddit_industry_map(tickers: list[str]) -> dict[str, tuple[str | None, str | None]]:
     """Most-recent stored (sector, industry) per ticker from reddit_trends.
 
