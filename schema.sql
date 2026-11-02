@@ -583,6 +583,12 @@ ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS is_etf       BOOLEAN;  -- ind
 -- companies, not just symbols.
 ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS sector       TEXT;
 ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS industry     TEXT;
+-- Written after the close by ingest/dip_watch.py (summa-dips.yml), which also
+-- overwrites last_price/day_pct/off_*_pct with CLOSING values (the Reddit
+-- ingest's last run is intraday). dip_rule: 'day' (closed ≤ −4%) | 'slide'
+-- (≤ −10% over 5 sessions on a red day) | NULL (no dip / not yet scanned).
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS ret_5d       NUMERIC;  -- % over 5 sessions
+ALTER TABLE reddit_trends ADD COLUMN IF NOT EXISTS dip_rule     TEXT;
 
 ALTER TABLE reddit_trends ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON reddit_trends FROM anon, authenticated;

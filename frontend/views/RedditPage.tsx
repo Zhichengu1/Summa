@@ -8,6 +8,9 @@
 // differently from sustained chatter. Rows carry the ingest's persisted price
 // context, so "value picks" — trending names deep below their 52-week high —
 // are highlighted inline and filterable (mirrors the backend Discord screen).
+// After the close the dip watch rewrites the day's prices with closing values
+// and flags names that closed down hard (dip_rule) — marked inline and
+// filterable via "Dips".
 import { useEffect, useMemo, useState } from "react";
 
 import { DataTable, type Column } from "../components/DataTable";
@@ -30,6 +33,15 @@ function isValuePick(r: RedditTrend): boolean {
   if (r.is_etf || (r.mentions ?? 0) < VALUE_MIN_MENTIONS || /bear/i.test(r.sentiment ?? "")) return false;
   return (r.off_high_pct != null && r.off_high_pct <= VALUE_OFF_HIGH)
     || (r.off_low_pct != null && r.off_low_pct <= VALUE_NEAR_LOW);
+}
+
+// Hover text for the dip marker: which rule fired and the numbers behind it.
+function dipTitle(r: RedditTrend): string {
+  const day = r.day_pct != null ? `closed ${fmtNum(r.day_pct, 1)}% on the day` : "closed down";
+  const five = r.ret_5d != null ? `, ${fmtNum(r.ret_5d, 1)}% over 5 sessions` : "";
+  return r.dip_rule === "slide"
+    ? `Dip — multi-day slide: ${day}${five}`
+    : `Dip — ${day}${five}`;
 }
 
 function SentimentBadge({ sentiment }: { sentiment: string | null }) {
@@ -67,6 +79,7 @@ export function RedditPage({ companies, onCompany }: {
   const [day, setDay] = useState<string | null>(null);   // null → latest
   const [watchOnly, setWatchOnly] = useState(false);
   const [valueOnly, setValueOnly] = useState(false);
+  const [dipsOnly, setDipsOnly] = useState(false);
   const [q, setQ] = useState("");
 
   useEffect(() => {
@@ -109,6 +122,7 @@ export function RedditPage({ companies, onCompany }: {
     let r = rows.filter((x) => x.trend_date === activeDay);
     if (watchOnly) r = r.filter((x) => watchByTicker.has(x.ticker));
     if (valueOnly) r = r.filter(isValuePick);
+    if (dipsOnly) r = r.filter((x) => !!x.dip_rule);
     if (q.trim()) {
       const n = q.toLowerCase();
       r = r.filter((x) =>
@@ -116,7 +130,11 @@ export function RedditPage({ companies, onCompany }: {
         || (x.industry ?? "").toLowerCase().includes(n) || (x.sector ?? "").toLowerCase().includes(n));
     }
     return r;
-  }, [rows, activeDay, watchOnly, valueOnly, watchByTicker, q]);
+  }, [rows, activeDay, watchOnly, valueOnly, dipsOnly, watchByTicker, q]);
+  const dipCount = useMemo(
+    () => rows.filter((x) => x.trend_date === activeDay && x.dip_rule).length,
+    [rows, activeDay],
+  );
 
   const cols: Column<RedditTrend>[] = [
     { key: "rank", header: "#", width: "44px", align: "right", value: (r) => r.rank ?? 9_999,
@@ -133,6 +151,8 @@ export function RedditPage({ companies, onCompany }: {
             <span className="row-flag flag-watch" title="On your watchlist"><Icon name="star" size={11} /></span>
           )}{isValuePick(r) && (
             <span className="row-flag flag-gem" title={`Value pick: trending at the bottom of its 52-week range (${fmtNum(Math.abs(r.off_high_pct ?? 0), 0)}% below the high${r.off_low_pct != null ? `, ${fmtNum(r.off_low_pct, 0)}% above the low` : ""})`}><Icon name="gem" size={12} /></span>
+          )}{r.dip_rule && (
+            <span className="row-flag flag-dip" title={dipTitle(r)}><Icon name="alert" size={12} /></span>
           )}
         </span>
       ) },
@@ -227,6 +247,11 @@ export function RedditPage({ companies, onCompany }: {
           onClick={() => setValueOnly((v) => !v)}>
           Value picks
         </button>
+        <button className={`chip${dipsOnly ? " active" : ""}`}
+          title="Names that closed down hard: ≤ −4% on the day, or ≤ −10% over 5 sessions on a red day (written after the close)"
+          onClick={() => setDipsOnly((v) => !v)}>
+          Dips{dipCount ? ` · ${dipCount}` : ""}
+        </button>
       </div>
       <DataTable
         columns={cols} rows={displayed} rowKey={(r) => `${r.trend_date}:${r.ticker}`}
@@ -234,7 +259,9 @@ export function RedditPage({ companies, onCompany }: {
         initialSort={{ key: "rank", dir: "asc" }}
         empty={rows.length === 0
           ? "No Reddit snapshots yet — the summa-reddit workflow writes the first one on its next daily run."
-          : "No tickers match."}
+          : dipsOnly && dipCount === 0
+            ? "No dips flagged for this day. The dip watch runs after the US close."
+            : "No tickers match."}
         maxHeight="calc(100vh - 240px)"
         onRowClick={(r) => {
           const cik = watchByTicker.get(r.ticker);

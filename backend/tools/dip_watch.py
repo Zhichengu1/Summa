@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Tech dip watch → Discord (summa-dips.yml).
+"""Dip watch → Discord + reddit_trends (summa-dips.yml).
 
-Thin entry point around ingest.dip_watch: prices the curated Fortune-500 tech
-list plus the tech names trending on Reddit (from stored `reddit_trends`
-snapshots), flags anything that closed down hard today, and posts one Discord
-embed. Alert-only — nothing is written to Supabase. Edgar-free (db + stdlib
-HTTP only), so the workflow installs just requirements-news.txt. Posts to
-DISCORD_DIPS_WEBHOOK_URL, falling back to DISCORD_WEBHOOK_URL; a silent no-op
-on the Discord side when neither is set. --dry-run logs the dips without posting.
+Thin entry point around ingest.dip_watch: prices every ticker on the recent
+Reddit trending board (any sector) plus the curated Fortune-500 tech list,
+flags anything that closed down hard, reads how Reddit is reacting to each and
+connects them (industry clusters, sector moves), posts one Discord embed, and
+writes the closing prices + a dip flag back onto that day's reddit_trends rows.
+Edgar-free (db + stdlib HTTP only), so the workflow installs just
+requirements-news.txt. Posts to DISCORD_DIPS_WEBHOOK_URL, falling back to
+DISCORD_WEBHOOK_URL; a silent no-op on the Discord side when neither is set.
+--dry-run logs the dips and connections without posting or writing.
 
 Run:  python -m tools.dip_watch [--dry-run]
 """
@@ -36,7 +38,7 @@ logger = logging.getLogger("summa.dips")
 
 
 def main() -> int:
-    """Run the tech dip scan once."""
+    """Run the dip scan once."""
     dry = "--dry-run" in sys.argv[1:]
     n = dip_watch.scan_dips(dry_run=dry)
     logger.info("dip watch: %d dip(s)%s", n, " (dry run — not posted)" if dry else "")

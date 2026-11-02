@@ -1,13 +1,17 @@
 name: summa-dips
 
-# Tech dip watch → Discord. Once per weekday after the US close: prices the
-# curated Fortune-500 tech list + the tech names trending in recent
-# `reddit_trends` snapshots via Yahoo's keyless chart endpoint, and posts one
-# embed listing anything that closed down hard (≤ -4% on the day, or ≤ -10% over
-# 5 sessions on a red day). 21:30 UTC is after the 16:00 ET close in both EDT
-# (5:30pm) and EST (4:30pm). Holidays self-skip (no fresh bar → no alert).
-# Alert-only (no Supabase writes), edgar-free — installs only
-# requirements-news.txt. Cost: ~60 tiny HTTP GETs, ~1 free Actions minute/day.
+# Dip watch → Discord + `reddit_trends`. Once per weekday after the US close:
+# prices every ticker on the recent Reddit trending board (any sector) plus the
+# curated Fortune-500 tech list via Yahoo's keyless chart endpoint, flags names
+# that closed down hard (≤ -4% on the day, or ≤ -10% over 5 sessions on a red
+# day), reads how Reddit is reacting to each (buzz spiking / fading, WSB mood),
+# connects them (same-industry clusters, sector moves), posts one embed, and
+# writes the CLOSING prices + a dip flag back onto that day's reddit_trends rows.
+# 21:30 UTC is after the 16:00 ET close in both EDT and EST; GitHub often starts
+# crons hours late, so freshness is keyed to the latest session (≤ 18h old), and
+# holidays self-skip. Edgar-free — installs only requirements-news.txt. Cost:
+# ~110 tiny HTTP GETs + ~70 KB of Supabase reads + one ~50-row upsert per run,
+# ~2 free Actions minutes/day.
 
 on:
   schedule:
@@ -15,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Log the dips without posting to Discord"
+        description: "Log the dips without posting to Discord or updating reddit_trends"
         type: boolean
         default: false
 
@@ -32,7 +36,7 @@ env:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -49,7 +53,7 @@ jobs:
         working-directory: backend
         run: pip install -r requirements-news.txt
 
-      - name: Scan tech names for price dips
+      - name: Scan Reddit names + big tech for price dips
         working-directory: backend
         env:
           SUPABASE_URL:             ${{ secrets.SUPABASE_URL }}

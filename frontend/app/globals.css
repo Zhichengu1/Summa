@@ -100,6 +100,7 @@ button > .icon:first-child, .btn-primary > .icon, .btn-ghost > .icon { margin-ri
 .row-flag.flag-warn  { color: var(--warn); }
 .row-flag.flag-hot   { color: var(--alert); }
 .row-flag.flag-gem   { color: var(--accent-bright); }
+.row-flag.flag-dip   { color: var(--neg); }
 
 /* Numerals: tabular everywhere, mono where they carry the data */
 .num, .dt-num, .px, .k-value, .hero-last, .hero-chg, .mkt-clock {

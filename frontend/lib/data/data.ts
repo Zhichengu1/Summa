@@ -170,20 +170,29 @@ export async function fetchOptionsHistory(cik: string, days = 120): Promise<Opti
 // (last_price…is_etf) only exist after the 2026-07 schema.sql re-run, so on a
 // column error we retry with the legacy set instead of blanking the view.
 // Returns [] on (unrecoverable) error.
-export async function fetchRedditTrends(days = 10): Promise<RedditTrend[]> {
-  const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-  const base = "trend_date, ticker, name, rank, mentions, upvotes, rank_change, mentions_change, sentiment, sentiment_score, source";
-  const query = (cols: string) => supabase
-    .from("reddit_trends")
-    .select(cols)
-    .gte("trend_date", cutoff)
-    .order("trend_date", { ascending: false })
-    .order("rank", { ascending: true })
-    .limit(1000);
-  let { data, error } = await query(`${base}, last_price, day_pct, off_high_pct, off_low_pct, is_etf, sector, industry`);
-  if (error) ({ data, error } = await query(base));
-  if (error || !data) return [];
-  return data as unknown as RedditTrend[];
+export function fetchRedditTrends(days = 10): Promise<RedditTrend[]> {
+  // ~500 rows (10 days × top 50), market-wide: cached 10 min like the other
+  // market-wide reads. Snapshots change a few times a day at most. A failed read
+  // throws inside the loader so it is never cached, and the caller gets [].
+  return cached(`reddit:${days}`, 10 * 60_000, async () => {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    const base = "trend_date, ticker, name, rank, mentions, upvotes, rank_change, mentions_change, sentiment, sentiment_score, source";
+    const query = (cols: string) => supabase
+      .from("reddit_trends")
+      .select(cols)
+      .gte("trend_date", cutoff)
+      .order("trend_date", { ascending: false })
+      .order("rank", { ascending: true })
+      .limit(1000);
+    const priced = `${base}, last_price, day_pct, off_high_pct, off_low_pct, is_etf, sector, industry`;
+    // Newest columns first; each fallback drops the columns a not-yet-re-applied
+    // schema.sql may lack.
+    let { data, error } = await query(`${priced}, ret_5d, dip_rule`);
+    if (error) ({ data, error } = await query(priced));
+    if (error) ({ data, error } = await query(base));
+    if (error || !data) throw error ?? new Error("reddit_trends read failed");
+    return data as unknown as RedditTrend[];
+  }).catch(() => []);
 }
 
 export async function fetchCompanies(): Promise<Company[]> {
