@@ -25,7 +25,7 @@ import { FormBadge } from "../components/badges/FormBadge";
 import { Sparkline } from "../components/charts/Sparkline";
 import { StackedBarChart } from "../components/charts/charts.lazy";
 import { SignalsPanel, MomentumPanel, momentumSetups } from "./ScannerSection";
-import { fetchRecentPrices, fetchCompanySummaries, fetchCongressTrades } from "../lib/data/data";
+import { fetchRecentPrices, fetchCompanySummaries, fetchCongressTradesLean } from "../lib/data/data";
 import { mostBought, type MostBought } from "../lib/domain/congress";
 import { useWatchlistPulse } from "../lib/hooks/useWatchlistPulse";
 import { usePeek } from "../lib/hooks/usePeek";
@@ -147,15 +147,15 @@ export function OverviewPage({
   const peekCompany = pk.peek ? companies.find((c) => c.cik === pk.peek!.cik) ?? null : null;
   const openFromPeek = (cik: string, tab?: CompanyTab) => { pk.close(); onCompany(cik, tab); };
 
-  // Congress tracker: one bounded market-wide read (180d = the 90-day window plus
-  // the previous window for momentum). Fail-soft — an empty result hides the panel.
+  // Congress tracker: one lean, cached market-wide read (120d = the 60-day window
+  // plus the previous window for momentum). Fail-soft — an empty result hides the panel.
   const [congress, setCongress] = useState<CongressTrade[] | null>(null);
   useEffect(() => {
     let cancelled = false;
-    fetchCongressTrades(180).then((r) => { if (!cancelled) setCongress(r); }).catch(() => { if (!cancelled) setCongress([]); });
+    fetchCongressTradesLean(120).then((r) => { if (!cancelled) setCongress(r); }).catch(() => { if (!cancelled) setCongress([]); });
     return () => { cancelled = true; };
   }, []);
-  const congressTop = useMemo(() => mostBought(congress ?? [], 90, 8), [congress]);
+  const congressTop = useMemo(() => mostBought(congress ?? [], 60, 8), [congress]);
   const cgPeek = usePeek({ side: "right", width: 372, height: 560 });
   const cgPeekRow: MostBought | null = cgPeek.peek ? congressTop.find((r) => r.ticker === cgPeek.peek!.cik) ?? null : null;
   const watchedByTicker = useMemo(() => {
@@ -508,13 +508,13 @@ export function OverviewPage({
 
         <Panel
           title="Congress buys" count={congressTop.length} flush
-          sub="Most distinct members buying · 90d"
+          sub="Most distinct members buying · 60d"
           actions={<PanelLink onClick={() => onNavigate?.("congress")} title="Open the Congress tracker">View all <Icon name="arrow-right" size={12} /></PanelLink>}
         >
           {congress == null ? (
             <div className="srow-skel">{[0, 1, 2, 3].map((i) => <div key={i} className="skeleton" style={{ height: 30 }} />)}</div>
           ) : congressTop.length === 0 ? (
-            <div className="panel-empty">No congressional buys disclosed in the last 90 days.</div>
+            <div className="panel-empty">No congressional buys disclosed in the last 60 days.</div>
           ) : (
             <CongressBuysList
               rows={congressTop} watchedCiks={watchedByTicker} compact
@@ -600,7 +600,7 @@ export function OverviewPage({
 
       {cgPeek.peek && cgPeekRow && (
         <CongressPeek
-          row={cgPeekRow} windowDays={90} top={cgPeek.peek.top} left={cgPeek.peek.left}
+          row={cgPeekRow} windowDays={60} top={cgPeek.peek.top} left={cgPeek.peek.left}
           onMouseEnter={cgPeek.hold} onMouseLeave={cgPeek.leave}
           onDrill={() => { cgPeek.close(); onNavigate?.("congress"); }}
           onTrack={onTrack ? (t) => { cgPeek.close(); onTrack(t); } : undefined}

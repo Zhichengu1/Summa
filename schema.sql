@@ -431,6 +431,39 @@ END $$;
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 DROP POLICY IF EXISTS "anon insert watchlist" ON watchlist;
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 CREATE POLICY "anon insert watchlist" ON watchlist FOR INSERT TO anon WITH CHECK (true);
 
+-- Guard rails on the one anon-writable table. Anyone with the public anon key can
+-- INSERT here, so the row shape is validated and the queue is capped at the
+-- database layer (the backend applies the same checks — belt and braces):
+--   * cik must be a zero-padded 10-digit CIK; ticker/name are length-limited;
+--     status can only be queued or ingested.
+--   * a BEFORE INSERT trigger rejects new rows once WATCHLIST_QUEUE_CAP (300)
+--     companies are still 'queued' — a burst of junk inserts cannot inflate the
+--     ingest work or the warehouse. Raise the cap deliberately as the real
+--     watchlist grows. Idempotent.
+ALTER TABLE watchlist DROP CONSTRAINT IF EXISTS watchlist_cik_format;
+ALTER TABLE watchlist ADD CONSTRAINT watchlist_cik_format CHECK (cik ~ '^[0-9]{10}$') NOT VALID;
+ALTER TABLE watchlist DROP CONSTRAINT IF EXISTS watchlist_ticker_len;
+ALTER TABLE watchlist ADD CONSTRAINT watchlist_ticker_len CHECK (ticker IS NULL OR length(ticker) <= 12) NOT VALID;
+ALTER TABLE watchlist DROP CONSTRAINT IF EXISTS watchlist_name_len;
+ALTER TABLE watchlist ADD CONSTRAINT watchlist_name_len CHECK (name IS NULL OR length(name) <= 120) NOT VALID;
+ALTER TABLE watchlist DROP CONSTRAINT IF EXISTS watchlist_status_enum;
+ALTER TABLE watchlist ADD CONSTRAINT watchlist_status_enum CHECK (status IN ('queued', 'ingested')) NOT VALID;
+
+CREATE OR REPLACE FUNCTION watchlist_queue_cap() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE queued_now INTEGER;
+BEGIN
+  SELECT count(*) INTO queued_now FROM watchlist WHERE status = 'queued';
+  IF queued_now >= 300 THEN
+    RAISE EXCEPTION 'watchlist queue is full (% queued); try again after the pipeline ingests them', queued_now
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS watchlist_queue_cap_trg ON watchlist;
+CREATE TRIGGER watchlist_queue_cap_trg BEFORE INSERT ON watchlist
+  FOR EACH ROW EXECUTE FUNCTION watchlist_queue_cap();
+
 -- ===========================================================================
 -- company_summary — ONE small precomputed row per company. Powers the
 -- watchlist-wide surfaces (Overview table, Momentum Scanner) so the frontend
